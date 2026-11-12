@@ -1,0 +1,12 @@
+# Rust
+/target/
+
+# ブレインストーミング用のモックアップ
+/.superpowers/
+
+# 設計書・実装計画（Git 管理外）
+/docs/superpowers/
+
+# OS
+.DS_Store
+Thumbs.db
