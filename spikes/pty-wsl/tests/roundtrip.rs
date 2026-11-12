@@ -52,3 +52,10 @@ fn shift_enter_reaches_shell_unchanged() {
     let out = roundtrip(sh(2), &shift_enter_bytes(), Duration::from_secs(10)).unwrap();
     assert!(out.contains("1b 0d"), "{out:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn cjk_reaches_shell_unchanged() {
+    let out = roundtrip(sh(3), "あ".as_bytes(), Duration::from_secs(10)).unwrap();
+    assert!(out.contains("e3 81 82"), "{out:?}");
+}
