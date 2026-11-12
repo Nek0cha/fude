@@ -88,16 +88,20 @@ pub fn encode_key(input: &KeyInput, modes: TermModes, overrides: &KeyOverrides) 
     };
     match input.code {
         KeyCode::Enter => Some(with_alt(b"\r")),
+        KeyCode::Backspace if m.ctrl => Some(with_alt(&[0x08])),
         KeyCode::Backspace => Some(with_alt(&[0x7f])),
         KeyCode::Escape => Some(with_alt(&[0x1b])),
-        KeyCode::Tab if m.shift => Some(b"\x1b[Z".to_vec()),
+        KeyCode::Tab if m.shift => Some(with_alt(b"\x1b[Z")),
         KeyCode::Tab => Some(with_alt(b"\t")),
         KeyCode::Up => Some(arrow(b'A', m, modes)),
         KeyCode::Down => Some(arrow(b'B', m, modes)),
         KeyCode::Right => Some(arrow(b'C', m, modes)),
         KeyCode::Left => Some(arrow(b'D', m, modes)),
-        KeyCode::Char(c) if m.ctrl => ctrl_byte(c).map(|b| with_alt(&[b])),
         KeyCode::Char(c) => {
+            // 対応する制御文字が無い Ctrl+文字は、文字のまま送る。
+            if let Some(b) = ctrl_byte(c).filter(|_| m.ctrl) {
+                return Some(with_alt(&[b]));
+            }
             let mut buf = [0u8; 4];
             Some(with_alt(c.encode_utf8(&mut buf).as_bytes()))
         }
@@ -116,11 +120,18 @@ fn arrow(final_byte: u8, m: Modifiers, modes: TermModes) -> Vec<u8> {
     }
 }
 
-/// Ctrl+文字を制御文字に変換する。`@`〜`_` と `a`〜`z` だけを対象とする。
+/// Ctrl+文字を制御文字に変換する。数字と記号の対応は xterm に合わせる。対応が無ければ `None` を返す。
 fn ctrl_byte(c: char) -> Option<u8> {
     match c {
         '@'..='_' => Some(c as u8 - b'@'),
         'a'..='z' => Some(c as u8 - b'a' + 1),
+        ' ' | '2' => Some(0x00),
+        '3' => Some(0x1b),
+        '4' => Some(0x1c),
+        '5' => Some(0x1d),
+        '6' => Some(0x1e),
+        '7' | '/' => Some(0x1f),
+        '8' | '?' => Some(0x7f),
         _ => None,
     }
 }
@@ -200,6 +211,32 @@ mod tests {
         assert_eq!(enc(k(Char('c'), false, true, false)), [0x03]);
         assert_eq!(enc(k(Char('a'), false, true, false)), [0x01]);
         assert_eq!(enc(k(Char('['), false, true, false)), [0x1b]);
+    }
+
+    #[test]
+    fn ctrl_space_and_symbols() {
+        assert_eq!(enc(k(Char(' '), false, true, false)), [0x00]);
+        assert_eq!(enc(k(Char('?'), false, true, false)), [0x7f]);
+        assert_eq!(enc(k(Char('/'), false, true, false)), [0x1f]);
+    }
+
+    #[test]
+    fn ctrl_digits_follow_xterm() {
+        assert_eq!(enc(k(Char('2'), false, true, false)), [0x00]);
+        assert_eq!(enc(k(Char('3'), false, true, false)), [0x1b]);
+        assert_eq!(enc(k(Char('7'), false, true, false)), [0x1f]);
+        assert_eq!(enc(k(Char('8'), false, true, false)), [0x7f]);
+        assert_eq!(enc(k(Char('1'), false, true, false)), b"1");
+    }
+
+    #[test]
+    fn ctrl_backspace_is_bs() {
+        assert_eq!(enc(k(Backspace, false, true, false)), [0x08]);
+    }
+
+    #[test]
+    fn alt_shift_tab_keeps_alt() {
+        assert_eq!(enc(k(Tab, true, false, true)), b"\x1b\x1b[Z");
     }
 
     #[test]
