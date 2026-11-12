@@ -5,9 +5,9 @@ use std::borrow::Cow;
 
 use gpui_kit::*;
 
-const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGen35ConsoleNF-Regular.ttf");
-const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGen35ConsoleNF-Bold.ttf");
-const MONO_FAMILY: &str = "HackGen35 Console NF";
+const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Regular.ttf");
+const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Bold.ttf");
+const MONO_FAMILY: &str = "HackGen Console NF";
 
 /// gpui-pre 0.3.12 の WindowBackgroundAppearance の列挙値すべて。
 const MODES: [WindowBackgroundAppearance; 5] = [

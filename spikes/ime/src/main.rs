@@ -9,8 +9,8 @@ use fude_core::keys::{KeyCode, KeyInput, KeyOverrides, Modifiers, TermModes, enc
 use gpui_kit::component::input::{Editor, EditorState};
 use gpui_kit::*;
 
-const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGen35ConsoleNF-Regular.ttf");
-const MONO_FAMILY: &str = "HackGen35 Console NF";
+const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Regular.ttf");
+const MONO_FAMILY: &str = "HackGen Console NF";
 const LINE_HEIGHT: f32 = 22.;
 const PADDING: f32 = 16.;
 /// 画面に残す確定済みの行数。
