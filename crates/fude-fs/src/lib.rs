@@ -35,11 +35,8 @@ impl RelPath {
         if segments.contains(&"..") {
             return Err(PathError(format!("プロジェクトの外を指す: {path}")));
         }
-        if let Some(first) = segments.first()
-            && first.len() >= 2
-            && first.as_bytes()[0].is_ascii_alphabetic()
-            && first.as_bytes()[1] == b':'
-        {
+        // Windows では、どの位置でも "C:…" の要素を push するとパス全体が置き換わるため、どこにあっても拒む。
+        if segments.iter().any(|s| s.len() >= 2 && s.as_bytes()[0].is_ascii_alphabetic() && s.as_bytes()[1] == b':') {
             return Err(PathError(format!("ドライブ名を含む: {path}")));
         }
         Ok(RelPath(segments.join("/")))
@@ -133,7 +130,7 @@ mod tests {
 
     #[test]
     fn rel_path_rejects_escape() {
-        for p in ["../x", "a/../../x", "a/..", "..", "C:\\x", "C:x", "c:/x", "a\0b", "a\\..\\..\\x"] {
+        for p in ["../x", "a/../../x", "a/..", "..", "C:\\x", "C:x", "c:/x", "a\0b", "a\\..\\..\\x", "a/C:x", "//?/C:/x", "a/C:/Windows"] {
             assert!(RelPath::new(p).is_err(), "{p:?} は拒む");
         }
     }
