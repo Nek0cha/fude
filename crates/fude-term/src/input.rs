@@ -32,6 +32,14 @@ impl WheelAccum {
     }
 }
 
+/// Windows のホイール 1 段で届く行数（OS の既定値）。
+const WINDOWS_LINES_PER_NOTCH: f32 = 3.0;
+
+/// 代替スクロールで送る行数。Windows ではホイール 1 段を 1 行にする（ユーザーの決定）。
+pub fn alt_scroll_lines(lines: f32, windows: bool) -> f32 {
+    if windows { lines / WINDOWS_LINES_PER_NOTCH } else { lines }
+}
+
 /// 代替スクロール。正（上）は上矢印、負は下矢印を |lines| 回送る。app_cursor なら `ESC O` 形式。
 pub fn alt_scroll_bytes(lines: i32, app_cursor: bool) -> Vec<u8> {
     let arrow = if lines > 0 { b'A' } else { b'B' };
@@ -60,6 +68,14 @@ mod tests {
         assert_eq!(w.feed(0.7), 1);
         assert_eq!(w.feed(-0.2), 0);
         assert_eq!(w.feed(-0.9), -1);
+    }
+
+    /// Windows のホイールは 1 段で 3 行ぶん届く。代替スクロールでは 1 段を 1 行にする。
+    #[test]
+    fn alt_scroll_moves_one_line_per_notch_on_windows() {
+        assert_eq!(alt_scroll_lines(3.0, true), 1.0);
+        assert_eq!(alt_scroll_lines(-6.0, true), -2.0);
+        assert_eq!(alt_scroll_lines(3.0, false), 3.0);
     }
 
     #[test]

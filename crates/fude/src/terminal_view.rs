@@ -10,7 +10,9 @@ use std::time::Instant;
 use fude_core::keymap::Platform;
 use fude_core::keys::{KeyOverrides, KeyRoute, RawKey, encode_key, route_key};
 use fude_core::workspace::ShellKind;
-use fude_term::{GridSize, SelectKind, Session, SessionEvent, WheelAccum, alt_scroll_bytes, paste_bytes, spawn_spec};
+use fude_term::{
+    GridSize, SelectKind, Session, SessionEvent, WheelAccum, alt_scroll_bytes, alt_scroll_lines, paste_bytes, spawn_spec,
+};
 use futures::StreamExt;
 use gpui_kit::assets::IconName;
 use gpui_kit::*;
@@ -208,20 +210,15 @@ impl TerminalView {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => p.y / self.metrics.line_h,
         };
+        let alt = session.with_state(|st| st.alt_scroll().then(|| st.modes().app_cursor));
+        let lines = if alt.is_some() { alt_scroll_lines(lines, cfg!(windows)) } else { lines };
         let n = self.wheel.feed(lines);
         if n == 0 {
             return;
         }
-        let alt = session.with_state(|st| {
-            if st.alt_scroll() {
-                Some(st.modes().app_cursor)
-            } else {
-                st.scroll(n);
-                None
-            }
-        });
-        if let Some(app_cursor) = alt {
-            session.write(alt_scroll_bytes(n, app_cursor));
+        match alt {
+            Some(app_cursor) => session.write(alt_scroll_bytes(n, app_cursor)),
+            None => session.with_state(|st| st.scroll(n)),
         }
         cx.notify();
     }

@@ -20,7 +20,9 @@ impl ShellKind {
     /// タブやペインに表示する短い名前。
     pub fn label(&self) -> String {
         match self {
-            ShellKind::Native if cfg!(target_os = "macos") => "zsh".into(),
+            ShellKind::Native if cfg!(target_os = "macos") => {
+                native_label_from_shell(std::env::var("SHELL").ok().as_deref())
+            }
             ShellKind::Native => "pwsh".into(),
             ShellKind::Wsl { distro } => format!("wsl·{distro}"),
         }
@@ -257,6 +259,15 @@ pub fn display_title(raw: &str) -> Option<String> {
     Some(title.to_string())
 }
 
+/// macOS のネイティブシェルの名前。ログインシェル（$SHELL）のファイル名、無ければ zsh。
+/// 起動するシェル（fude-term の spawn_spec）と同じ規則にする。
+pub fn native_label_from_shell(shell: Option<&str>) -> String {
+    shell
+        .filter(|s| !s.is_empty())
+        .and_then(|s| Path::new(s).file_name())
+        .map_or_else(|| "zsh".to_string(), |n| n.to_string_lossy().into_owned())
+}
+
 /// プロジェクトのアイコンの色を、root から決める（6 色の中から）。
 /// FNV-1a を使い、実行のたびに同じ値になる。
 pub fn project_color_index(root: &Path) -> usize {
@@ -438,6 +449,14 @@ mod tests {
         assert_eq!(display_title("/usr/bin/zsh").as_deref(), Some("zsh"));
         assert_eq!(display_title(" ✳ Claude Code ").as_deref(), Some("✳ Claude Code"));
         assert_eq!(display_title("  "), None);
+    }
+
+    #[test]
+    fn mac_native_label_follows_login_shell() {
+        assert_eq!(native_label_from_shell(Some("/opt/homebrew/bin/fish")), "fish");
+        assert_eq!(native_label_from_shell(Some("/bin/zsh")), "zsh");
+        assert_eq!(native_label_from_shell(Some("")), "zsh");
+        assert_eq!(native_label_from_shell(None), "zsh");
     }
 
     #[test]

@@ -7,7 +7,7 @@ pub mod shell;
 pub mod state;
 pub mod wsl;
 
-pub use input::{WheelAccum, alt_scroll_bytes, paste_bytes};
+pub use input::{WheelAccum, alt_scroll_bytes, alt_scroll_lines, paste_bytes};
 pub use palette::Palette;
 pub use session::{Session, SessionEvent};
 pub use shell::{SpawnSpec, spawn_spec};
