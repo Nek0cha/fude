@@ -22,12 +22,12 @@ use crate::language::language_for;
 use crate::theme::{Theme, mono_font, size};
 use crate::title_row::icon;
 
-gpui_kit::actions!(file_view, [SaveFile, PanelBack, PanelForward, ClosePanel]);
+gpui_kit::actions!(file_view, [SaveFile, LeaveEditor]);
 
-/// Esc で右パネルを閉じる（FileView の文脈）。
+/// Esc でターミナルへ戻る（FileView の文脈）。エディタ列は閉じない。
 pub fn bind_file_view_keys(cx: &mut App) {
-    // 保存と履歴は fude_core::keymap::context_bindings（workspace_view::bind_keys）で登録する。
-    cx.bind_keys([KeyBinding::new("escape", ClosePanel, Some("FileView"))]);
+    // 保存は fude_core::keymap::context_bindings（workspace_view::bind_keys）で登録する。
+    cx.bind_keys([KeyBinding::new("escape", LeaveEditor, Some("FileView"))]);
 }
 
 /// Git で変更があるファイルは差分から開く（設計書 §5.3）。
@@ -55,9 +55,8 @@ pub(crate) fn open_error_text(e: OpenError) -> String {
 
 /// FileView から持ち主へ知らせること。
 pub enum FileViewEvent {
-    Close,
-    Back,
-    Forward,
+    /// Esc が親まで来た。ターミナルへフォーカスを戻す。
+    LeaveEditor,
     /// 未保存の状態が変わった。
     Dirty,
     Saved,
@@ -93,8 +92,6 @@ pub struct FileView {
     saved_text: String,
     dirty: bool,
     banner: Option<Banner>,
-    /// 戻る／進むを押せるか（持ち主が入れる）。
-    nav: (bool, bool),
     /// 読み込みのあとに置くカーソルの位置（0 始まりの行と列）。
     pending_cursor: Option<(u32, u32)>,
     /// Git の状態を読む前に開いたため、表示の仕方を仮に決めている。状態が届いたら決め直す
@@ -121,7 +118,6 @@ impl FileView {
             saved_text: String::new(),
             dirty: false,
             banner: None,
-            nav: (false, false),
             pending_cursor: None,
             pending_doc: None,
             auto_mode: false,
@@ -143,10 +139,6 @@ impl FileView {
     /// Git の状態がまだ無いときに開いた（set_mark で表示の仕方を決め直す）。
     pub fn set_auto_mode(&mut self, auto: bool) {
         self.auto_mode = auto;
-    }
-
-    pub fn set_nav(&mut self, can_back: bool, can_forward: bool) {
-        self.nav = (can_back, can_forward);
     }
 
     /// Git の記号が変わったら（状態の読み直し）、差分を読み直す。
@@ -438,7 +430,6 @@ impl FileView {
     fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let name = self.rel.rsplit('/').next().unwrap_or(&self.rel).to_string();
         let parent = self.rel.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
-        let (can_back, can_forward) = self.nav;
         let button = |id: &'static str, name: IconName, enabled: bool| {
             div()
                 .id(id)
@@ -461,11 +452,6 @@ impl FileView {
             .flex_shrink_0()
             .border_b_1()
             .border_color(theme.border_subtle)
-            .child(button("fv-back", IconName::ChevronLeft, can_back).on_click(cx.listener(|_, _, _, cx| cx.emit(FileViewEvent::Back))))
-            .child(
-                button("fv-forward", IconName::ChevronRight, can_forward)
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(FileViewEvent::Forward))),
-            )
             .child(
                 div()
                     .id("fv-name")
@@ -519,7 +505,7 @@ impl FileView {
                     })));
             }
         }
-        row.child(button("fv-close", IconName::X, true).on_click(cx.listener(|_, _, _, cx| cx.emit(FileViewEvent::Close))))
+        row
     }
 
     fn render_banner(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
@@ -590,11 +576,9 @@ impl Render for FileView {
             .key_context("FileView")
             .on_drop(|_: &ExternalPaths, _, cx| cx.stop_propagation())
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_from_key(cx)))
-            .on_action(cx.listener(|_, _: &PanelBack, _, cx| cx.emit(FileViewEvent::Back)))
-            .on_action(cx.listener(|_, _: &PanelForward, _, cx| cx.emit(FileViewEvent::Forward)))
-            // エディタは、閉じる検索欄や選択が無いときに Esc を親へ回す。そのときだけ右パネルを閉じる。
-            .on_action(cx.listener(|_, _: &gpui_kit::base::input::Escape, _, cx| cx.emit(FileViewEvent::Close)))
-            .on_action(cx.listener(|_, _: &ClosePanel, _, cx| cx.emit(FileViewEvent::Close)))
+            // エディタは、閉じる検索欄や選択が無いときに Esc を親へ回す。そのときだけターミナルへ戻る。
+            .on_action(cx.listener(|_, _: &gpui_kit::base::input::Escape, _, cx| cx.emit(FileViewEvent::LeaveEditor)))
+            .on_action(cx.listener(|_, _: &LeaveEditor, _, cx| cx.emit(FileViewEvent::LeaveEditor)))
             .size_full()
             .flex()
             .flex_col()

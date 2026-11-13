@@ -46,14 +46,12 @@ gpui_kit::actions!(
 
 /// Command と文脈を GPUI のキーバインドにする。
 fn binding(key: &'static str, command: Command, context: Option<&'static str>) -> KeyBinding {
-    use crate::file_view::{PanelBack, PanelForward, SaveFile};
+    use crate::file_view::SaveFile;
     use crate::tree_view::ToggleTree;
     match command {
         Command::Close => KeyBinding::new(key, CloseItem, context),
         Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
         Command::Save => KeyBinding::new(key, SaveFile, context),
-        Command::PanelBack => KeyBinding::new(key, PanelBack, context),
-        Command::PanelForward => KeyBinding::new(key, PanelForward, context),
         other => default_binding(key, other),
     }
 }
@@ -87,7 +85,7 @@ fn default_binding(key: &'static str, command: Command) -> KeyBinding {
             _ => KeyBinding::new(key, ActivateProject9, None),
         },
         // 文脈の付くものは binding で扱う。
-        Command::Close | Command::ToggleTree | Command::Save | Command::PanelBack | Command::PanelForward => {
+        Command::Close | Command::ToggleTree | Command::Save => {
             unreachable!("binding で扱う")
         }
     }
@@ -213,7 +211,6 @@ pub struct WorkspaceView {
     /// ホーム画面で薄く出す（フォルダが見つからない）プロジェクト。
     pub(crate) missing_roots: HashSet<ProjectRoot>,
     /// 右パネルに開いたあとで、カーソルを置く位置（プロジェクト、1 始まりの行と列）。
-    pub(crate) pending_goto: Option<(ProjectId, u32, Option<u32>)>,
     /// ファイルツリー（左パネル）。
     pub(crate) tree: crate::tree_view::TreeState,
     /// プロジェクトごとの ProjectFs、監視、Git の状態。
@@ -221,9 +218,11 @@ pub struct WorkspaceView {
     /// 変更したファイルの一覧（「● N」を押すと出る）。
     pub(crate) changes_menu: Option<(ProjectId, crate::popup::Popup)>,
     /// プロジェクトごとの右パネル。
-    pub(crate) panels: HashMap<ProjectId, crate::right_panel::PanelSlot>,
+    pub(crate) editors: HashMap<ProjectId, crate::editor_column::EditorSlot>,
+    /// エディタ列のタブ列のスクロールと、最後に寄せたタブ。
+    pub(crate) editor_tab_scroll: (ScrollHandle, Option<(ProjectId, usize)>),
     /// 右パネルの出入りとエディタの移動の動き。
-    pub(crate) panel_anim: crate::right_panel::PanelAnim,
+    pub(crate) editor_anim: crate::editor_column::EditorAnim,
     /// 左パネル（ツリー）の出入り。
     pub(crate) tree_presence: crate::anim::Presence,
     /// タブと分割の動き。
@@ -305,13 +304,13 @@ impl WorkspaceView {
             allow_close: false,
             reduced_motion: crate::reduced_motion::reduced_motion(),
             anims: Default::default(),
-            panel_anim: Default::default(),
+            editor_anim: Default::default(),
             tree_presence: crate::anim::Presence::hidden(),
-            panels: HashMap::new(),
+            editors: HashMap::new(),
+            editor_tab_scroll: (ScrollHandle::new(), None),
             live: HashMap::new(),
             tree: crate::tree_view::TreeState::new(cx),
             changes_menu: None,
-            pending_goto: None,
             screen_fade: Fade::settled(1.0),
             showing_home: None,
             saved: None,
@@ -350,7 +349,7 @@ impl WorkspaceView {
     }
 
     /// 「前回の続き」。プロジェクトが 0 個のときだけ、保存した状態を戻す（ターミナルも保存どおりに起動する）。
-    pub(crate) fn resume_last_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn resume_last_session(&mut self, cx: &mut Context<Self>) {
         if !self.workspace.projects().is_empty() {
             return;
         }
@@ -366,12 +365,7 @@ impl WorkspaceView {
             self.recent.touch(root, now);
         }
         self.save_recent(cx);
-        // 開いていたファイルを右パネルに開き直す。
-        let files: Vec<(ProjectId, String)> =
-            self.workspace.projects().iter().filter_map(|p| p.open_file.clone().map(|f| (p.id, f))).collect();
-        for (project, rel) in files {
-            self.open_in_panel(project, rel, None, window, cx);
-        }
+        // 戻したタブのビューは、選ばれたときに作る（描画の ensure_active_view）。
         self.refocus_pane();
         self.refresh_active_branch(cx);
         cx.notify();
@@ -410,7 +404,7 @@ impl WorkspaceView {
         let has_pane = self.workspace.active_project().and_then(|p| p.active_tab()).is_some();
         if has_pane {
             self.refocus_pane();
-        } else if let Some(view) = self.active_panel_view() {
+        } else if let Some(view) = self.active_editor_view() {
             self.focused_pane = None;
             let focus = view.read(cx).focus_handle();
             window.focus(&focus, cx);
@@ -595,7 +589,7 @@ impl WorkspaceView {
             // 最後のタブを閉じると、フォーカスしていたビューが無くなる。そのままだと、次に作った
             // タブのターミナルへフォーカスが移らないため、右パネル（無ければワークスペース自身）に戻しておく。
             if self.focused_pane.take().is_some() || lost {
-                match self.active_panel_view() {
+                match self.active_editor_view() {
                     Some(view) => {
                         let focus = view.read(cx).focus_handle();
                         window.focus(&focus, cx);
@@ -667,9 +661,24 @@ impl WorkspaceView {
         }
     }
 
-    /// ターミナルの大きさが変わる動き（分割、右パネル、エディタの移動）の途中か。
+    /// タブの切り替え。エディタ列にフォーカスがあればファイルのタブ、それ以外はターミナルのタブ。
+    fn cycle_focused_tabs(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
+        let in_editor = self.active_editor_view().is_some_and(|v| v.read(cx).focus_handle().contains_focused(window, cx));
+        match self.workspace.active_project().map(|p| p.id) {
+            Some(project) if in_editor => {
+                if let Some(tabs) = self.workspace.editor_mut(project) {
+                    tabs.cycle(delta);
+                }
+                self.show_active_tab(project, window, cx);
+            }
+            _ => self.workspace.cycle_tab(delta),
+        }
+        cx.notify();
+    }
+
+    /// ターミナルの大きさが変わる動き（分割、エディタ列、ツリー、エディタの移動）の途中か。
     pub(crate) fn layout_animating(&self, now: Instant) -> bool {
-        self.anims.split_animating(now) || self.panel_animating(now)
+        self.anims.split_animating(now) || self.editor_animating(now) || self.tree_presence.is_animating(now)
     }
 
     /// 動きの間は、選択中のタブのターミナルが PTY にサイズを送らないようにする。
@@ -711,10 +720,18 @@ impl Render for WorkspaceView {
         let (bg, fg) = (theme.bg_window, theme.fg_default);
         self.sync_terminals(window, cx);
         self.sync_live(cx);
+        self.ensure_active_view(window, cx);
         self.anims.observe(self.workspace.active_project(), now, self.reduced_motion);
-        self.observe_panel(now);
+        let editor_shape =
+            self.workspace.active_project().map(|p| (p.id, p.editor.items().iter().map(|i| i.rel.clone()).collect()));
+        self.anims.observe_editor(editor_shape, now, self.reduced_motion);
+        self.observe_editor_column(now);
         self.observe_tree(now);
-        if self.anims.tabs_animating(now) || self.panel_animating(now) || self.tree_presence.is_animating(now) {
+        if self.anims.tabs_animating(now)
+            || self.anims.editor_tabs_animating(now)
+            || self.editor_animating(now)
+            || self.tree_presence.is_animating(now)
+        {
             window.request_animation_frame();
         }
         self.freeze_terminals(self.layout_animating(now), cx);
@@ -737,15 +754,14 @@ impl Render for WorkspaceView {
         let main = if home {
             self.render_home(cx, now)
         } else {
-            let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
             let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
             let main_w = window.viewport_size().width - crate::theme::size::RAIL_W;
-            let panel = self.panel_for_render(main_w, now);
+            let (tree, editor) = self.render_columns(main_w, now, cx);
+            let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
             let share = active_tab.map_or(1.0, |t| self.anims.split_share(t.id, now));
-            render_main_area(active_tab, &terminals, panel, share, cx)
+            render_main_area(active_tab, &terminals, share, tree, editor, cx)
         };
         let main = main.opacity(self.screen_fade.value(now));
-        let tree = if home { None } else { self.render_tree(cx, now) };
         let title_row = self.render_title_row(window, cx, now);
         let rail = self.render_rail(cx, now);
         let menu = self.render_shell_menu(window, cx, now);
@@ -769,14 +785,8 @@ impl Render for WorkspaceView {
                 this.workspace.split_active_tab();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &NextTab, _, cx| {
-                this.workspace.cycle_tab(1);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &PrevTab, _, cx| {
-                this.workspace.cycle_tab(-1);
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_focused_tabs(1, window, cx)))
+            .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_focused_tabs(-1, window, cx)))
             .on_action(cx.listener(|this, _: &ActivateProject1, _, cx| this.activate_project_at(0, cx)))
             .on_action(cx.listener(|this, _: &ActivateProject2, _, cx| this.activate_project_at(1, cx)))
             .on_action(cx.listener(|this, _: &ActivateProject3, _, cx| this.activate_project_at(2, cx)))
@@ -803,8 +813,7 @@ impl Render for WorkspaceView {
                     .min_h_0()
                     .relative()
                     .child(rail)
-                    .child(div().flex_1().min_w_0().h_full().child(main))
-                    .children(tree),
+                    .child(div().flex_1().min_w_0().h_full().child(main)),
             )
             .children(menu)
             .children(project_menu)

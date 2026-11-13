@@ -3,9 +3,13 @@
 mod anim;
 mod assets;
 mod changes_menu;
-mod close_flow;
 mod cli;
+mod close_flow;
+mod columns;
 mod dialog;
+mod editor_column;
+mod editor_tabs_view;
+mod file_icons;
 mod file_view;
 mod home;
 mod hover;
@@ -19,7 +23,6 @@ mod project_state;
 mod project_menu;
 mod rail;
 mod reduced_motion;
-mod right_panel;
 mod shell_menu;
 mod terminal_paint;
 mod terminal_view;
@@ -41,7 +44,7 @@ use futures::StreamExt;
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
-use crate::assets::FudeAssets;
+use crate::assets::AppAssets;
 use crate::cli::{Launch, parse_launch};
 use crate::instance::{HandOff, hand_off, report_error};
 use crate::theme::Theme;
@@ -114,7 +117,7 @@ fn main() {
     };
     let startup = Startup { session_path, last_session: saved.filter(|d| d.has_projects()), recent_path, recent, open };
 
-    application().with_assets(FudeAssets).run(move |cx: &mut App| {
+    application().with_assets(AppAssets).run(move |cx: &mut App| {
         init(cx);
         cx.text_system()
             .add_fonts(vec![Cow::Borrowed(MONO_REGULAR), Cow::Borrowed(MONO_BOLD)])

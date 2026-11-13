@@ -109,13 +109,14 @@ impl WorkspaceView {
                     .rounded(size::RADIUS_SM)
                     .bg(self.hover_bg(key, theme.bg_hover, now))
                     .child(div().w(px(10.)).font(mono_font()).text_color(color).child(letter))
+                    .child(crate::file_icons::file_icon(crate::file_icons::icon_for_file(rel.rsplit('/').next().unwrap_or_default())))
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().child(rel.clone()))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if this.changes_menu.as_ref().is_some_and(|(_, m)| m.closing()) {
                             return;
                         }
                         this.close_changes_menu(window, cx);
-                        this.open_in_panel(project, rel.clone(), Some(initial_mode(Some(mark))), window, cx);
+                        this.open_in_editor(project, rel.clone(), Some(initial_mode(Some(mark))), None, window, cx);
                     }))
                     .into_any_element()
             })

@@ -60,6 +60,12 @@ pub(crate) fn cancel_index(buttons: &[DialogButton]) -> Option<usize> {
     buttons.iter().position(|b| b.role == ButtonRole::Cancel)
 }
 
+/// 選んだあと、ターミナルへフォーカスを戻すか。選んだ処理がフォーカスを動かした（still_on_workspace が
+/// false。閉じたタブの隣のエディタなど）ときは、その場所を保つ。
+pub(crate) fn refocus_after_choose(still_on_workspace: bool) -> bool {
+    still_on_workspace
+}
+
 /// 出ているダイアログ。消える動きの間も持つ（on_choose は選んだ時点で取り出す）。
 pub(crate) struct OpenDialog {
     message: String,
@@ -93,7 +99,9 @@ impl WorkspaceView {
         d.popup.close(Instant::now());
         window.focus(&self.focus, cx);
         on_choose(index, self, window, cx);
-        self.refocus_pane();
+        if refocus_after_choose(self.focus.is_focused(window)) {
+            self.refocus_pane();
+        }
         cx.notify();
     }
 
@@ -180,7 +188,15 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ButtonRole, DialogButton, cancel_index, default_index, error_text, ok_dialog_buttons};
+    use super::{ButtonRole, DialogButton, cancel_index, default_index, error_text, ok_dialog_buttons, refocus_after_choose};
+
+    #[test]
+    fn choice_that_moved_focus_keeps_it() {
+        // 選んだ処理がフォーカスを動かした（隣のエディタのタブなど）なら、ターミナルへ戻さない。
+        assert!(!refocus_after_choose(false));
+        // 動かさなかった（キャンセルなど）なら、ターミナルへ戻す。
+        assert!(refocus_after_choose(true));
+    }
 
     fn b(label: &'static str, role: ButtonRole) -> DialogButton {
         DialogButton { label, role }

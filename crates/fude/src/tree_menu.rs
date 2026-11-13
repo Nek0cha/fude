@@ -203,6 +203,16 @@ impl WorkspaceView {
             _ => target.clone(),
         };
         let Ok(dest) = parent.join(&name) else { return };
+        if kind == EditKind::Rename {
+            let views = self.project_views(project);
+            let dirty: Vec<String> = views.iter().filter(|v| v.read(cx).is_dirty()).map(|v| v.read(cx).rel.clone()).collect();
+            let dirty: Vec<&str> = dirty.iter().map(String::as_str).collect();
+            if let Some(blocked) = crate::editor_column::rename_blocked(dest.as_str(), &dirty) {
+                let message = format!("{blocked} に保存していない変更があります。保存するか閉じてから、名前を変えてください。");
+                self.show_error(message, window, cx);
+                return;
+            }
+        }
         self.tree.edit = None;
         window.focus(&self.tree.focus, cx);
         let task = cx.background_spawn({
@@ -231,13 +241,13 @@ impl WorkspaceView {
                         return;
                     }
                     if kind == EditKind::Rename {
-                        this.panel_renamed(project, target.as_str(), dest.as_str(), cx);
+                        this.editor_renamed(project, target.as_str(), dest.as_str(), cx);
                     }
                     // 作り先のフォルダを開いて読み直す（監視の通知を待たない）。
                     this.tree.models.entry(project).or_default().expand(&parent);
                     this.load_tree_dir(project, parent.clone(), cx);
                     if kind == EditKind::NewFile {
-                        this.open_in_panel(project, dest.as_str().to_string(), None, window, cx);
+                        this.open_in_editor(project, dest.as_str().to_string(), None, None, window, cx);
                     }
                 })
                 .ok();

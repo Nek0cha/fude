@@ -65,6 +65,10 @@ pub(crate) struct LayoutAnims {
     /// タブごとの左のペインの幅の割合。
     pub split: HashMap<TabId, Fade>,
     prev: Option<(ProjectId, Vec<TabShape>)>,
+    /// エディタ列のファイルのタブの出入り（キーは相対パス）。
+    pub editor_opened: HashMap<String, Instant>,
+    pub editor_closing: Vec<ClosingTab>,
+    editor_prev: Option<(ProjectId, Vec<String>)>,
 }
 
 impl LayoutAnims {
@@ -102,6 +106,36 @@ impl LayoutAnims {
         self.opened.retain(|_, t| now.saturating_duration_since(*t) < TAB_IN);
         self.closing.retain(|c| !tab_close_progress(now.saturating_duration_since(c.started), reduced).2);
         self.prev = current;
+    }
+
+    /// エディタ列のタブの並び（選択中のプロジェクトのもの）を見て、出入りの動きを始める。
+    /// ClosingTab の title には相対パスを入れる。
+    pub fn observe_editor(&mut self, current: Option<(ProjectId, Vec<String>)>, now: Instant, reduced: bool) {
+        match (&self.editor_prev, &current) {
+            (Some((a, before)), Some((b, after))) if a == b => {
+                for (i, rel) in before.iter().enumerate() {
+                    if !after.contains(rel) {
+                        self.editor_closing.push(ClosingTab { index: i, title: rel.clone(), started: now });
+                    }
+                }
+                for rel in after {
+                    if !before.contains(rel) {
+                        self.editor_opened.insert(rel.clone(), now);
+                    }
+                }
+            }
+            _ => {
+                self.editor_opened.clear();
+                self.editor_closing.clear();
+            }
+        }
+        self.editor_opened.retain(|_, t| now.saturating_duration_since(*t) < TAB_IN);
+        self.editor_closing.retain(|c| !tab_close_progress(now.saturating_duration_since(c.started), reduced).2);
+        self.editor_prev = current;
+    }
+
+    pub fn editor_tabs_animating(&self, _now: Instant) -> bool {
+        !self.editor_opened.is_empty() || !self.editor_closing.is_empty()
     }
 
     pub fn split_share(&self, tab: TabId, now: Instant) -> f32 {
@@ -155,6 +189,31 @@ mod tests {
         // 動きを減らす設定では、幅は 0 のまま、文字だけ 80ms で消す。
         assert!(tab_close_progress(ms(80), true).2);
         assert_eq!(tab_close_progress(ms(0), true).1, 0.0);
+    }
+
+    #[test]
+    fn editor_tab_open_and_close_are_tracked() {
+        use super::LayoutAnims;
+        use fude_core::workspace::{ProjectRoot, Workspace};
+        use std::time::Instant;
+        let mut ws = Workspace::default();
+        let p1 = ws.open_project(ProjectRoot::Local("/w/a".into()));
+        let p2 = ws.open_project(ProjectRoot::Local("/w/b".into()));
+        let shape = |rels: &[&str]| Some((p1, rels.iter().map(|r| r.to_string()).collect::<Vec<_>>()));
+        let mut a = LayoutAnims::default();
+        let t0 = Instant::now();
+        a.observe_editor(shape(&["a"]), t0, false);
+        // 最初に見た形は動かさない。
+        assert!(a.editor_opened.is_empty());
+        a.observe_editor(shape(&["a", "b"]), t0, false);
+        assert!(a.editor_opened.contains_key("b"));
+        a.observe_editor(shape(&["a"]), t0, false);
+        assert_eq!(a.editor_closing.len(), 1);
+        assert_eq!((a.editor_closing[0].index, a.editor_closing[0].title.as_str()), (1, "b"));
+        assert!(a.editor_tabs_animating(t0));
+        // 別のプロジェクトに切り替えたら、動きを捨てる。
+        a.observe_editor(Some((p2, vec!["x".to_string()])), t0, false);
+        assert!(a.editor_opened.is_empty() && a.editor_closing.is_empty());
     }
 
     #[test]

@@ -15,6 +15,9 @@ pub enum HoverKey {
     AddProject,
     Tab(TabId),
     TabClose(TabId),
+    /// エディタ列のファイルのタブ（位置）と、その ×。
+    EditorTab(usize),
+    EditorTabClose(usize),
     AddTab,
     Split,
     CaptionMin,

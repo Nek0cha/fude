@@ -123,9 +123,9 @@ impl WorkspaceView {
             .on_click(cx.listener(|this, _, _, cx| this.prompt_open_project(cx)));
         let resume = self
             .home_button("home-resume", HoverKey::HomeResume, IconName::RotateCcwClock, "前回の続き", can_resume, cx, now)
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| {
                 if can_resume {
-                    this.resume_last_session(window, cx);
+                    this.resume_last_session(cx);
                 }
             }));
 

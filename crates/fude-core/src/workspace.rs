@@ -5,6 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 pub use crate::location::ProjectRoot;
+use crate::editor_tabs::EditorTabs;
 use crate::location::FileLocation;
 
 /// 新しく開くプロジェクトでターミナルを起動するか。
@@ -81,8 +82,8 @@ pub struct Project {
     pub active_tab: Option<TabId>,
     /// 既定のシェルの上書き（WSL から開いた /mnt の下のフォルダなど）。
     pub shell: Option<ShellKind>,
-    /// 右パネル（ターミナルが 0 枚ならメイン領域）に出しているファイルの相対パス。ビューが更新する。
-    pub open_file: Option<String>,
+    /// エディタ列のファイルのタブの並び。ビューが更新する。
+    pub editor: EditorTabs,
 }
 
 impl Project {
@@ -156,7 +157,7 @@ impl Workspace {
         };
         let name = root.name();
         let active_tab = tabs.first().map(|t| t.id);
-        self.projects.push(Project { id, root, name, active_tab, tabs, shell, open_file: None });
+        self.projects.push(Project { id, root, name, active_tab, tabs, shell, editor: EditorTabs::default() });
         self.active = Some(id);
         id
     }
@@ -169,7 +170,7 @@ impl Workspace {
         tabs: &[(Vec<ShellKind>, usize)],
         active_tab: Option<usize>,
         shell: Option<ShellKind>,
-        open_file: Option<String>,
+        editor: EditorTabs,
     ) -> ProjectId {
         let id = ProjectId(self.alloc());
         let mut built = Vec::new();
@@ -180,7 +181,7 @@ impl Workspace {
         }
         let active = built.get(active_tab.unwrap_or(0)).or(built.first()).map(|t| t.id);
         let name = root.name();
-        self.projects.push(Project { id, root, name, tabs: built, active_tab: active, shell, open_file });
+        self.projects.push(Project { id, root, name, tabs: built, active_tab: active, shell, editor });
         id
     }
 
@@ -190,10 +191,8 @@ impl Workspace {
         self.active = self.projects.get(i).map(|p| p.id);
     }
 
-    pub fn set_open_file(&mut self, id: ProjectId, rel: Option<String>) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
-            p.open_file = rel;
-        }
+    pub fn editor_mut(&mut self, id: ProjectId) -> Option<&mut EditorTabs> {
+        self.projects.iter_mut().find(|p| p.id == id).map(|p| &mut p.editor)
     }
 
     /// file を含むプロジェクトのうち、ルートが最も深いもの（相対パスが最も短いもの）と、その相対パス。
@@ -373,7 +372,9 @@ pub fn project_color_index(root: &ProjectRoot) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor_tabs::EditorItem;
     use crate::location::FileLocation;
+    use crate::panel::FileMode;
     use std::path::PathBuf;
 
     fn ws_with(roots: &[&str]) -> Workspace {
@@ -417,13 +418,13 @@ mod tests {
     }
 
     #[test]
-    fn set_open_file_updates_project() {
+    fn editor_mut_opens_and_closes_tabs() {
         let mut ws = ws_with(&["/w/a"]);
         let id = active(&ws).id;
-        ws.set_open_file(id, Some("src/a.rs".into()));
-        assert_eq!(active(&ws).open_file.as_deref(), Some("src/a.rs"));
-        ws.set_open_file(id, None);
-        assert_eq!(active(&ws).open_file, None);
+        ws.editor_mut(id).unwrap().open(EditorItem { rel: "src/a.rs".into(), mode: FileMode::Full });
+        assert_eq!(active(&ws).editor.active().unwrap().rel, "src/a.rs");
+        ws.editor_mut(id).unwrap().close(0);
+        assert!(active(&ws).editor.is_empty());
     }
 
     #[test]

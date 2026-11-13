@@ -13,7 +13,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::changes_menu::mark_style;
-use crate::theme::{Theme, mono_font, popup_shadow, size};
+use crate::file_icons::{file_icon, icon_for_file, icon_for_folder};
+use crate::theme::{Theme, mono_font, size};
 use crate::title_row::icon;
 use crate::tree_model::{TreeModel, TreeRow};
 use crate::workspace_view::WorkspaceView;
@@ -26,7 +27,6 @@ pub fn bind_tree_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", CloseTree, Some("Tree"))]);
 }
 
-pub(crate) const TREE_W: Pixels = px(280.);
 const ROW_H: Pixels = px(24.);
 const INDENT: f32 = 12.;
 
@@ -182,7 +182,7 @@ impl WorkspaceView {
             }
             cx.notify();
         } else {
-            self.open_in_panel(project, row.rel.as_str().to_string(), None, window, cx);
+            self.open_in_editor(project, row.rel.as_str().to_string(), None, None, window, cx);
         }
     }
 
@@ -202,8 +202,7 @@ impl WorkspaceView {
         if !self.tree.open && self.tree_presence.is_gone(now) {
             return None;
         }
-        let presence = self.tree_presence;
-        let project = self.workspace.active_project()?.id;
+            let project = self.workspace.active_project()?.id;
         let theme = *cx.global::<Theme>();
         let status = self.live.get(&project).and_then(|l| l.status.clone());
         let model = self.tree.models.entry(project).or_default();
@@ -243,7 +242,21 @@ impl WorkspaceView {
                     .map(|(i, row)| {
                         let is_selected = selected.as_ref() == Some(&row.rel);
                         let chevron = if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight };
-                        let lead = if row.is_dir { icon(chevron, theme.fg_dim) } else { icon(IconName::File, theme.fg_dim) };
+                        // フォルダは開閉の矢印とフォルダのアイコン、ファイルは拡張子のアイコン（設計書 §5.5）。
+                        let lead = if row.is_dir {
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(2.))
+                                .flex_shrink_0()
+                                .child(icon(chevron, theme.fg_dim))
+                                .child(file_icon(icon_for_folder(row.expanded)))
+                                .into_any_element()
+                        } else {
+                            // ファイルの行は、フォルダの矢印の分だけ右に寄せ、名前の頭を揃える。
+                            div().pl(px(16.)).flex_shrink_0().child(file_icon(icon_for_file(&row.name))).into_any_element()
+                        };
                         let deleted = row.mark == Some(fude_fs::git::GitMark::Deleted);
                         let mark = row.mark.map(|m| {
                             let (letter, color) = mark_style(m, &theme);
@@ -309,23 +322,12 @@ impl WorkspaceView {
                 .on_action(cx.listener(|this, _: &CloseTree, window, cx| this.close_tree(window, cx)))
                 // 絞り込み欄は、消すものが無いときに Esc を親へ回す。
                 .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| this.close_tree(window, cx)))
-                // 下のターミナルにクリックを渡さない。
+                // 重ねて出したとき、下のターミナルにクリックを渡さない。
                 .occlude()
-                .absolute()
-                .left(size::RAIL_W - TREE_W * 0.3 * (1.0 - presence.travel(now)))
-                .opacity(presence.value(now))
-                .top(px(0.))
-                .bottom(px(8.))
-                .w(TREE_W)
                 .flex()
                 .flex_col()
                 .gap(px(4.))
                 .p(px(6.))
-                .rounded(size::RADIUS_MD)
-                .bg(theme.bg_panel)
-                .border_1()
-                .border_color(theme.border_subtle)
-                .shadow(popup_shadow())
                 .text_size(px(13.))
                 .text_color(theme.fg_default)
                 .child(div().flex().flex_row().items_center().gap(px(4.)).children(filter.map(|f| div().flex_1().child(f))).child(toggle_changed))

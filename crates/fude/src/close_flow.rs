@@ -67,13 +67,13 @@ impl WorkspaceView {
         if self.workspace.projects().is_empty() {
             return FocusArea::Home;
         }
-        if let Some(view) = self.active_panel_view()
+        if let Some(view) = self.active_editor_view()
             && view.read(cx).focus_handle().contains_focused(window, cx)
         {
-            return FocusArea::RightPanel;
+            return FocusArea::Editor;
         }
         if self.tree.open && self.tree.focus.contains_focused(window, cx) {
-            return FocusArea::LeftPanel;
+            return FocusArea::Tree;
         }
         for (id, view) in self.terminal_views() {
             if view.read(cx).focus_handle().contains_focused(window, cx) {
@@ -89,7 +89,7 @@ impl WorkspaceView {
             return;
         }
         let focus = self.focus_area(window, cx);
-        let target = close_target(&self.workspace, focus, self.panel_open(), self.tree.open);
+        let target = close_target(&self.workspace, focus, self.tree.open);
         self.request_close(target, window, cx);
     }
 
@@ -97,8 +97,12 @@ impl WorkspaceView {
     pub(crate) fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         match target {
             CloseTarget::Nothing => {}
-            CloseTarget::RightPanel => self.close_panel(window, cx),
-            CloseTarget::LeftPanel => self.close_tree(window, cx),
+            CloseTarget::EditorTab(index) => {
+                if let Some(project) = self.workspace.active_project().map(|p| p.id) {
+                    self.close_editor_tab(project, index, window, cx);
+                }
+            }
+            CloseTarget::Tree => self.close_tree(window, cx),
             CloseTarget::Pane(pane) => self.confirm_busy(vec![pane], window, cx, move |this, _, cx| {
                 this.workspace.close_pane(pane);
                 this.refocus_pane();
@@ -136,7 +140,7 @@ impl WorkspaceView {
             this.confirm_busy(panes, window, cx, move |this, window, cx| {
                 this.workspace.close_project(project);
                 this.branches.remove(&project);
-                this.panels.remove(&project);
+                this.editors.remove(&project);
                 this.refresh_active_branch(cx);
                 this.restore_focus(window, cx);
                 this.after_project_closed(cx);
@@ -161,7 +165,7 @@ impl WorkspaceView {
         });
     }
 
-    /// project（None は全プロジェクト）の右パネルに未保存の変更があれば、保存・保存しない・キャンセルを聞く。
+    /// project（None は全プロジェクト）のエディタ列（選んでいないタブも含む）に未保存の変更があれば、保存・保存しない・キャンセルを聞く。
     fn confirm_unsaved(
         &mut self,
         project: Option<ProjectId>,
@@ -169,13 +173,11 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>) + 'static,
     ) {
-        let dirty: Vec<_> = self
-            .panels
-            .iter()
-            .filter(|(id, _)| project.is_none_or(|p| p == **id))
-            .filter_map(|(_, s)| s.view.clone())
-            .filter(|v| v.read(cx).is_dirty())
-            .collect();
+        let mut dirty = Vec::new();
+        for (_, slot) in self.editors.iter().filter(|(id, _)| project.is_none_or(|p| p == **id)) {
+            let pairs: Vec<(String, bool)> = slot.views.iter().map(|(rel, v)| (rel.clone(), v.read(cx).is_dirty())).collect();
+            dirty.extend(crate::editor_column::unsaved_views(&pairs).into_iter().filter_map(|rel| slot.views.get(&rel).cloned()));
+        }
         if dirty.is_empty() {
             then(self, window, cx);
             return;

@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::editor_tabs::{EditorItem, EditorTabs};
 use crate::keymap::Platform;
+use crate::panel::FileMode;
 use crate::workspace::{ProjectRoot, ShellKind, Workspace};
 
 pub const SESSION_VERSION: u32 = 1;
@@ -27,9 +29,25 @@ pub struct ProjectState {
     /// 既定のシェルの上書き。計画4の形式には無いため、無ければ None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<ShellKind>,
-    /// 開いていたファイルの相対パス。計画5より前の形式には無い。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub open_file: Option<String>,
+    /// エディタ列のファイルのタブの並び。計画5b より前の形式には無い。
+    #[serde(default)]
+    pub editor: EditorTabs,
+    /// 計画5の形式の、開いていた 1 つのファイル。読むだけで、書かない（`editor_tabs` でタブ 1 つにする）。
+    #[serde(default, skip_serializing)]
+    open_file: Option<String>,
+}
+
+impl ProjectState {
+    /// 戻すタブの並び。editor が空で計画5の open_file があれば、それをタブ 1 つにする。
+    fn editor_tabs(&self) -> EditorTabs {
+        let mut tabs = self.editor.clone();
+        if tabs.is_empty()
+            && let Some(rel) = &self.open_file
+        {
+            tabs.open(EditorItem { rel: rel.clone(), mode: FileMode::Full });
+        }
+        tabs
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -62,7 +80,8 @@ impl SessionData {
                     .collect(),
                 active_tab: p.active_tab.and_then(|id| p.tabs.iter().position(|t| t.id == id)),
                 shell: p.shell.clone(),
-                open_file: p.open_file.clone(),
+                editor: p.editor.clone(),
+                open_file: None,
             })
             .collect();
         let active = ws.active_project().and_then(|a| ws.projects().iter().position(|p| p.id == a.id));
@@ -114,7 +133,7 @@ impl Workspace {
             }
             let tabs: Vec<(Vec<ShellKind>, usize)> =
                 p.tabs.iter().filter(|t| !t.panes.is_empty()).map(|t| (t.panes.clone(), t.focused)).collect();
-            ws.push_restored(p.root.clone(), &tabs, p.active_tab, p.shell.clone(), p.open_file.clone());
+            ws.push_restored(p.root.clone(), &tabs, p.active_tab, p.shell.clone(), p.editor_tabs());
             if data.active == Some(i) {
                 active = Some(ws.projects().len() - 1);
             }
@@ -257,9 +276,10 @@ mod tests {
                     tabs: vec![TabState { panes: vec![ShellKind::Native, ubuntu()], focused: 1 }],
                     active_tab: Some(0),
                     shell: None,
+                    editor: EditorTabs::default(),
                     open_file: None,
                 },
-                ProjectState { root: wsl("Ubuntu", "/home/x"), tabs: vec![], active_tab: None, shell: None, open_file: None },
+                ProjectState { root: wsl("Ubuntu", "/home/x"), tabs: vec![], active_tab: None, shell: None, editor: EditorTabs::default(), open_file: None },
             ],
         };
         assert_eq!(SessionData::parse(text), Some(expected));
@@ -298,7 +318,8 @@ mod tests {
                 tabs: vec![TabState { panes: vec![ShellKind::Native], focused: 5 }],
                 active_tab: Some(7),
                 shell: None,
-                open_file: None,
+                editor: EditorTabs::default(),
+                    open_file: None,
             }],
         };
         let ws = Workspace::restore(&data, &|_| true);
@@ -307,8 +328,17 @@ mod tests {
         assert_eq!(p.tabs[0].focused, 0);
     }
 
+    fn tabs_of(rels: &[&str], active: usize) -> EditorTabs {
+        let mut t = EditorTabs::default();
+        for r in rels {
+            t.open(EditorItem { rel: (*r).into(), mode: FileMode::Full });
+        }
+        t.select(active);
+        t
+    }
+
     #[test]
-    fn restore_keeps_zero_tabs_and_open_file() {
+    fn restore_keeps_zero_tabs_and_editor_tabs() {
         let data = SessionData {
             version: 1,
             window: None,
@@ -318,15 +348,38 @@ mod tests {
                 tabs: vec![TabState { panes: vec![], focused: 0 }],
                 active_tab: None,
                 shell: None,
-                open_file: Some("src/a.rs".into()),
+                editor: tabs_of(&["src/a.rs"], 0),
+                    open_file: None,
             }],
         };
         let ws = Workspace::restore(&data, &|_| true);
         let p = ws.active_project().expect("先頭が選ばれる");
         assert!(p.tabs.is_empty());
         assert_eq!(p.active_tab, None);
-        assert_eq!(p.open_file.as_deref(), Some("src/a.rs"));
-        assert_eq!(SessionData::capture(&ws, None).projects[0].open_file.as_deref(), Some("src/a.rs"));
+        assert_eq!(p.editor.active().unwrap().rel, "src/a.rs");
+        assert_eq!(SessionData::capture(&ws, None).projects[0].editor, tabs_of(&["src/a.rs"], 0));
+    }
+
+    #[test]
+    fn old_session_open_file_becomes_one_tab() {
+        let text = r#"{"version":1,"window":null,"active":0,"projects":[{"root":{"local":"/w/a"},"tabs":[],"active_tab":null,"shell":null,"open_file":"src/a.rs"}]}"#;
+        let data = SessionData::parse(text).expect("計画5の形式も読める");
+        let ws = Workspace::restore(&data, &|_| true);
+        let p = ws.active_project().unwrap();
+        assert_eq!(p.editor.items().len(), 1);
+        assert_eq!(p.editor.active().unwrap().rel, "src/a.rs");
+    }
+
+    #[test]
+    fn editor_tabs_roundtrip_in_session() {
+        let mut ws = Workspace::default();
+        let id = ws.open_project(local("/w/a"));
+        *ws.editor_mut(id).unwrap() = tabs_of(&["a.rs", "b.rs"], 1);
+        let json = SessionData::capture(&ws, None).to_json();
+        assert!(!json.contains("open_file"), "古い形式の欄は書かない");
+        let parsed = SessionData::parse(&json).expect("読み直せる");
+        let restored = Workspace::restore(&parsed, &|_| true);
+        assert_eq!(restored.active_project().unwrap().editor, tabs_of(&["a.rs", "b.rs"], 1));
     }
 
     #[test]
@@ -373,7 +426,7 @@ mod tests {
             "projects":[{"root":{"local":"C:\\w"},"active_tab":0,"tabs":[{"panes":["native"],"focused":0}]}]}"#;
         let data = SessionData::parse(text).expect("計画4の形式も読める");
         assert_eq!(data.projects[0].shell, None);
-        assert_eq!(data.projects[0].open_file, None);
+        assert!(data.projects[0].editor.is_empty());
     }
 
     fn path_with(os: Platform, vars: &[(&str, &str)]) -> Option<PathBuf> {
