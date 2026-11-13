@@ -17,6 +17,16 @@ pub enum Request {
     /// 中身は payload。
     Write { root: String, path: RelPath },
     Branch { root: String },
+    WalkFiles { root: String },
+    CreateFile { root: String, path: RelPath },
+    CreateDir { root: String, path: RelPath },
+    Rename { root: String, from: RelPath, to: RelPath },
+    Remove { root: String, path: RelPath },
+    Metadata { root: String, path: RelPath },
+    /// ファイル（Linux の絶対パス）からプロジェクトのルートを探す（fude_core::location::find_project_root）。
+    FindRoot { file: String },
+    /// FUDE_TERMINAL_ID が terminal_id のシェルの上で、何かが動いているか。
+    Busy { terminal_id: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -29,7 +39,18 @@ pub enum Response {
     Data,
     Done,
     Branch { name: Option<String> },
-    Error { message: String, not_found: bool },
+    /// 一覧（Vec<RelPath> の JSON）は payload。
+    Paths,
+    Meta { meta: crate::FileMeta },
+    Root { path: String },
+    Busy { busy: bool },
+    /// already_exists は計画5で足した（古いサーバーの応答には無い）。
+    Error {
+        message: String,
+        not_found: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        already_exists: bool,
+    },
 }
 
 /// ヘッダーの 1 行の上限。

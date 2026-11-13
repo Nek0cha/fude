@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fude_core::git_head::read_branch;
 use ignore::WalkBuilder;
 
-use crate::{DirEntry, ProjectFs, RelPath};
+use crate::{DirEntry, FileMeta, ProjectFs, RelPath, WALK_MAX};
 
 /// 一時ファイルの名前を、同じプロセスの中の同時の書き込みで重ねないための通し番号。
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -96,6 +96,82 @@ impl ProjectFs for LocalFs {
 
     fn branch(&self) -> io::Result<Option<String>> {
         Ok(read_branch(&self.root))
+    }
+
+    fn walk_files(&self) -> io::Result<Vec<RelPath>> {
+        if !fs::metadata(&self.root)?.is_dir() {
+            return Err(io::Error::new(io::ErrorKind::NotADirectory, "ルートがフォルダではない"));
+        }
+        let walker = WalkBuilder::new(&self.root).hidden(false).parents(true).filter_entry(|e| e.file_name() != ".git").build();
+        let mut files = Vec::new();
+        for entry in walker {
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().is_some_and(|t| t.is_file() || (t.is_symlink() && entry.path().is_file())) {
+                continue;
+            }
+            let Ok(rel) = entry.path().strip_prefix(&self.root) else { continue };
+            let Ok(rel) = RelPath::new(&rel.to_string_lossy()) else { continue };
+            files.push(rel);
+            if files.len() >= WALK_MAX {
+                break;
+            }
+        }
+        files.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(files)
+    }
+
+    fn create_file(&self, rel: &RelPath) -> io::Result<()> {
+        let path = self.non_root(rel)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::OpenOptions::new().write(true).create_new(true).open(path).map(|_| ())
+    }
+
+    fn create_dir(&self, rel: &RelPath) -> io::Result<()> {
+        fs::create_dir_all(self.non_root(rel)?)
+    }
+
+    fn rename(&self, from: &RelPath, to: &RelPath) -> io::Result<()> {
+        let (from, to) = (self.non_root(from)?, self.non_root(to)?);
+        // 大文字小文字だけを変える名前の変更（Windows では同じファイル）は通す。
+        let same_file = match (fs::canonicalize(&from), fs::canonicalize(&to)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if fs::symlink_metadata(&to).is_ok() && !same_file {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("すでにある: {}", to.display())));
+        }
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(from, to)
+    }
+
+    fn remove(&self, rel: &RelPath) -> io::Result<()> {
+        let path = self.non_root(rel)?;
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.is_dir() { fs::remove_dir_all(path) } else { fs::remove_file(path) }
+    }
+
+    fn metadata(&self, rel: &RelPath) -> io::Result<FileMeta> {
+        let meta = fs::metadata(rel.to_path(&self.root))?;
+        let modified_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_millis() as u64);
+        Ok(FileMeta { is_dir: meta.is_dir(), len: meta.len(), modified_ms })
+    }
+}
+
+impl LocalFs {
+    /// ルート自身でなければ、実際のパス。
+    fn non_root(&self, rel: &RelPath) -> io::Result<PathBuf> {
+        if rel.is_root() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "ルート自身は対象にできない"));
+        }
+        Ok(rel.to_path(&self.root))
     }
 }
 
@@ -196,5 +272,45 @@ mod tests {
         fs::create_dir_all(dir.path().join(".git")).unwrap();
         fs::write(dir.path().join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
         assert_eq!(fs_.branch().unwrap(), Some("main".to_string()));
+    }
+
+    #[test]
+    fn walk_files_respects_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git").join("HEAD"), "x").unwrap();
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join("target").join("x"), "").unwrap();
+        fs::create_dir_all(root.join("src").join("ui")).unwrap();
+        fs::write(root.join("src").join("ui").join("b.rs"), "").unwrap();
+        fs::write(root.join("src").join("main.rs"), "").unwrap();
+        fs::write(root.join(".env"), "").unwrap();
+        let files = LocalFs::new(root.to_path_buf()).walk_files().unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.as_str()).collect();
+        assert_eq!(names, vec![".env", ".gitignore", "src/main.rs", "src/ui/b.rs"]);
+    }
+
+    #[test]
+    fn create_rename_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs_ = LocalFs::new(dir.path().to_path_buf());
+        fs_.create_file(&rel("a.txt")).unwrap();
+        assert_eq!(fs_.create_file(&rel("a.txt")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        fs_.create_file(&rel("b.txt")).unwrap();
+        assert_eq!(fs_.rename(&rel("a.txt"), &rel("b.txt")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        fs_.rename(&rel("a.txt"), &rel("c.txt")).unwrap();
+        assert!(dir.path().join("c.txt").is_file() && !dir.path().join("a.txt").exists());
+        fs_.create_dir(&rel("d/e")).unwrap();
+        fs_.write(&rel("d/e/f.txt"), b"x").unwrap();
+        let meta = fs_.metadata(&rel("d/e/f.txt")).unwrap();
+        assert!(!meta.is_dir && meta.len == 1 && meta.modified_ms > 0);
+        assert!(fs_.metadata(&rel("d")).unwrap().is_dir);
+        fs_.remove(&rel("d")).unwrap();
+        assert!(!dir.path().join("d").exists());
+        fs_.remove(&rel("c.txt")).unwrap();
+        assert!(fs_.remove(&RelPath::root()).is_err());
+        assert_eq!(fs_.metadata(&rel("none")).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 }

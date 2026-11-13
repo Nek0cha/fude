@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod local;
+pub mod procs;
 mod remote;
 pub mod serve;
 pub mod wire;
@@ -13,7 +14,7 @@ pub mod wire;
 pub mod wsl;
 
 pub use local::LocalFs;
-pub use remote::{Connector, RemoteClient, RemoteFs};
+pub use remote::{Connector, RemoteClient, RemoteFs, busy, find_root};
 
 /// プロジェクトのルートからの相対パス。"/" 区切り。空はルート自身。
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -101,6 +102,18 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
+/// ファイルの大きさと更新日時。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileMeta {
+    pub is_dir: bool,
+    pub len: u64,
+    /// 更新日時（UNIX ミリ秒）。取れなければ 0。
+    pub modified_ms: u64,
+}
+
+/// walk_files で返す件数の上限。
+pub const WALK_MAX: usize = 200_000;
+
 pub trait ProjectFs: Send + Sync {
     /// rel の直下。gitignore を尊重し、隠しファイルは出し、.git は出さない。ディレクトリが先、各々名前順。
     fn list_dir(&self, rel: &RelPath) -> io::Result<Vec<DirEntry>>;
@@ -109,6 +122,17 @@ pub trait ProjectFs: Send + Sync {
     fn write(&self, rel: &RelPath, data: &[u8]) -> io::Result<()>;
     /// ブランチ名（fude_core::git_head::read_branch と同じ規則）。
     fn branch(&self) -> io::Result<Option<String>>;
+    /// gitignore を尊重した全ファイル（.git を除く）。名前順。WALK_MAX 件で打ち切る。
+    fn walk_files(&self) -> io::Result<Vec<RelPath>>;
+    /// 空のファイルを作る。あれば AlreadyExists。
+    fn create_file(&self, rel: &RelPath) -> io::Result<()>;
+    /// フォルダを作る（途中のフォルダも）。
+    fn create_dir(&self, rel: &RelPath) -> io::Result<()>;
+    /// 名前を変える。to があれば AlreadyExists。
+    fn rename(&self, from: &RelPath, to: &RelPath) -> io::Result<()>;
+    /// 消す。フォルダは中身ごと。ルートは拒む。
+    fn remove(&self, rel: &RelPath) -> io::Result<()>;
+    fn metadata(&self, rel: &RelPath) -> io::Result<FileMeta>;
 }
 
 #[cfg(test)]

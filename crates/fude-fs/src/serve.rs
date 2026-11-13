@@ -18,7 +18,7 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write, build_id: &str) ->
                 write_frame(&mut output, &resp, &data)?;
             }
             Err(e) => {
-                let resp = Response::Error { message: format!("要求を読めない: {e}"), not_found: false };
+                let resp = Response::Error { message: format!("要求を読めない: {e}"), not_found: false, already_exists: false };
                 write_frame(&mut output, &resp, &[])?;
                 return Err(e);
             }
@@ -42,10 +42,43 @@ fn handle(req: Request, payload: &[u8], build_id: &str) -> (Response, Vec<u8>) {
         Request::Branch { root } => {
             local(&root).and_then(|fs| fs.branch()).map(|name| (Response::Branch { name }, Vec::new()))
         }
+        Request::WalkFiles { root } => local(&root).and_then(|fs| fs.walk_files()).and_then(|paths| {
+            let json = serde_json::to_vec(&paths).map_err(io::Error::other)?;
+            Ok((Response::Paths, json))
+        }),
+        Request::CreateFile { root, path } => done(local(&root).and_then(|fs| fs.create_file(&path))),
+        Request::CreateDir { root, path } => done(local(&root).and_then(|fs| fs.create_dir(&path))),
+        Request::Rename { root, from, to } => done(local(&root).and_then(|fs| fs.rename(&from, &to))),
+        Request::Remove { root, path } => done(local(&root).and_then(|fs| fs.remove(&path))),
+        Request::Metadata { root, path } => {
+            local(&root).and_then(|fs| fs.metadata(&path)).map(|meta| (Response::Meta { meta }, Vec::new()))
+        }
+        Request::FindRoot { file } => find_root(&file).map(|path| (Response::Root { path }, Vec::new())),
+        Request::Busy { terminal_id } => crate::procs::terminal_busy(Path::new("/proc"), &terminal_id)
+            .map(|busy| (Response::Busy { busy }, Vec::new())),
     };
     result.unwrap_or_else(|e| {
-        (Response::Error { message: e.to_string(), not_found: e.kind() == io::ErrorKind::NotFound }, Vec::new())
+        let resp = Response::Error {
+            message: e.to_string(),
+            not_found: e.kind() == io::ErrorKind::NotFound,
+            already_exists: e.kind() == io::ErrorKind::AlreadyExists,
+        };
+        (resp, Vec::new())
     })
+}
+
+fn done(result: io::Result<()>) -> io::Result<(Response, Vec<u8>)> {
+    result.map(|()| (Response::Done, Vec::new()))
+}
+
+/// file は絶対パスに限る。`.git` を持つ最初の祖先、無ければファイルの親。
+fn find_root(file: &str) -> io::Result<String> {
+    let file = Path::new(file);
+    if !file.is_absolute() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("絶対パスでない: {}", file.display())));
+    }
+    let root = fude_core::location::find_project_root(file, &|d| d.join(".git").exists());
+    Ok(root.to_string_lossy().into_owned())
 }
 
 /// root は絶対パスに限る（相対パスでは、サーバーの作業ディレクトリ次第で場所が変わるため）。
