@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 pub use crate::location::ProjectRoot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -12,7 +14,8 @@ pub struct TabId(u64);
 pub struct PaneId(u64);
 
 /// ターミナルで動かすシェルの種類。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ShellKind {
     Native,
     Wsl { distro: String },
@@ -125,6 +128,33 @@ impl Workspace {
         self.projects.push(Project { id, root, name, active_tab: Some(tab.id), tabs: vec![tab] });
         self.active = Some(id);
         id
+    }
+
+    /// 復元用。種類の並び（タブごとのペインと focused）からタブを作り、プロジェクトを末尾に足す。
+    /// 選択は変えない。tabs が空ならタブを作らない。active_tab と focused は範囲に収める。
+    pub(crate) fn push_restored(
+        &mut self,
+        root: ProjectRoot,
+        tabs: &[(Vec<ShellKind>, usize)],
+        active_tab: Option<usize>,
+    ) -> ProjectId {
+        let id = ProjectId(self.alloc());
+        let mut built = Vec::new();
+        for (kinds, focused) in tabs {
+            let panes = kinds.iter().map(|k| Pane { id: PaneId(self.alloc()), kind: k.clone(), title: None }).collect();
+            let focused = if *focused < kinds.len() { *focused } else { 0 };
+            built.push(Tab { id: TabId(self.alloc()), panes, focused });
+        }
+        let active = built.get(active_tab.unwrap_or(0)).or(built.first()).map(|t| t.id);
+        let name = root.name();
+        self.projects.push(Project { id, root, name, tabs: built, active_tab: active });
+        id
+    }
+
+    /// 復元用。位置で選ぶ（範囲外なら先頭、プロジェクトが無ければ未選択）。
+    pub(crate) fn select_restored(&mut self, index: Option<usize>) {
+        let i = index.filter(|&i| i < self.projects.len()).unwrap_or(0);
+        self.active = self.projects.get(i).map(|p| p.id);
     }
 
     pub fn activate_project(&mut self, id: ProjectId) {

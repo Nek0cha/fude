@@ -2,9 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::workspace::ShellKind;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProjectRoot {
     /// このマシンのフォルダ（Windows のパス、または macOS のパス）。
     Local(PathBuf),
