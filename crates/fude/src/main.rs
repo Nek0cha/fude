@@ -21,9 +21,9 @@ use crate::workspace_view::{WorkspaceView, bind_keys};
 const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Regular.ttf");
 const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Bold.ttf");
 
-/// ウィンドウの背景の方式。検証2の採用案（Windows は Mica、macOS は Blurred）。
+/// ウィンドウの背景の方式。Windows は MicaAlt（ユーザーが検証2の画面で選んだ見た目）、macOS は Blurred。
 const WINDOW_BACKGROUND: WindowBackgroundAppearance = if cfg!(windows) {
-    WindowBackgroundAppearance::MicaBackdrop
+    WindowBackgroundAppearance::MicaAltBackdrop
 } else {
     WindowBackgroundAppearance::Blurred
 };
