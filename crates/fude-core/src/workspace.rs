@@ -62,12 +62,14 @@ pub struct Project {
     pub name: String,
     pub tabs: Vec<Tab>,
     pub active_tab: Option<TabId>,
+    /// 既定のシェルの上書き（WSL から開いた /mnt の下のフォルダなど）。
+    pub shell: Option<ShellKind>,
 }
 
 impl Project {
-    /// 新しいターミナルの既定のシェル。WSL のプロジェクトなら WSL。
+    /// 新しいターミナルの既定のシェル。上書きがあればそれ、無ければ root から決まるもの。
     pub fn default_shell(&self) -> ShellKind {
-        self.root.default_shell()
+        self.shell.clone().unwrap_or_else(|| self.root.default_shell())
     }
 
     pub fn active_tab(&self) -> Option<&Tab> {
@@ -117,15 +119,21 @@ impl Workspace {
     /// root は呼び出し側で正規化済みとする。同じ root があればそれを選び、その id を返す。
     /// 新しいプロジェクトには既定のシェル（root.default_shell()）のタブを 1 つ作る。
     pub fn open_project(&mut self, root: ProjectRoot) -> ProjectId {
+        self.open_project_with(root, None)
+    }
+
+    /// open_project と同じ。新しく作るときは shell を既定のシェルの上書きとして持ち、最初のタブもそのシェルにする。
+    /// すでに開いていれば切り替えるだけ（shell は変えない）。
+    pub fn open_project_with(&mut self, root: ProjectRoot, shell: Option<ShellKind>) -> ProjectId {
         if let Some(p) = self.projects.iter().find(|p| p.root.same_place(&root)) {
             let id = p.id;
             self.active = Some(id);
             return id;
         }
         let id = ProjectId(self.alloc());
-        let tab = self.make_tab(root.default_shell());
+        let tab = self.make_tab(shell.clone().unwrap_or_else(|| root.default_shell()));
         let name = root.name();
-        self.projects.push(Project { id, root, name, active_tab: Some(tab.id), tabs: vec![tab] });
+        self.projects.push(Project { id, root, name, active_tab: Some(tab.id), tabs: vec![tab], shell });
         self.active = Some(id);
         id
     }
@@ -137,6 +145,7 @@ impl Workspace {
         root: ProjectRoot,
         tabs: &[(Vec<ShellKind>, usize)],
         active_tab: Option<usize>,
+        shell: Option<ShellKind>,
     ) -> ProjectId {
         let id = ProjectId(self.alloc());
         let mut built = Vec::new();
@@ -147,7 +156,7 @@ impl Workspace {
         }
         let active = built.get(active_tab.unwrap_or(0)).or(built.first()).map(|t| t.id);
         let name = root.name();
-        self.projects.push(Project { id, root, name, tabs: built, active_tab: active });
+        self.projects.push(Project { id, root, name, tabs: built, active_tab: active, shell });
         id
     }
 
@@ -570,5 +579,26 @@ mod tests {
             .collect();
         assert!(values.iter().all(|&v| v < 6));
         assert!(values.len() >= 2);
+    }
+
+    #[test]
+    fn open_with_shell_overrides_default() {
+        let mut ws = Workspace::default();
+        let ubuntu = ShellKind::Wsl { distro: "Ubuntu".into() };
+        ws.open_project_with(local(r"C:\w"), Some(ubuntu.clone()));
+        let p = active(&ws);
+        assert_eq!(p.tabs[0].panes[0].kind, ubuntu);
+        assert_eq!(p.default_shell(), ubuntu);
+    }
+
+    #[test]
+    fn reopen_keeps_original_shell() {
+        let mut ws = Workspace::default();
+        let ubuntu = ShellKind::Wsl { distro: "Ubuntu".into() };
+        let a = ws.open_project_with(local(r"C:\w"), Some(ubuntu.clone()));
+        let again = ws.open_project_with(local(r"C:\w"), None);
+        assert_eq!(again, a);
+        assert_eq!(ws.projects().len(), 1);
+        assert_eq!(active(&ws).default_shell(), ubuntu);
     }
 }

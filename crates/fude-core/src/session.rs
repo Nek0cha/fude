@@ -24,6 +24,9 @@ pub struct ProjectState {
     pub root: ProjectRoot,
     pub tabs: Vec<TabState>,
     pub active_tab: Option<usize>,
+    /// 既定のシェルの上書き。計画4の形式には無いため、無ければ None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ShellKind>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -55,6 +58,7 @@ impl SessionData {
                     .map(|t| TabState { panes: t.panes.iter().map(|x| x.kind.clone()).collect(), focused: t.focused })
                     .collect(),
                 active_tab: p.active_tab.and_then(|id| p.tabs.iter().position(|t| t.id == id)),
+                shell: p.shell.clone(),
             })
             .collect();
         let active = ws.active_project().and_then(|a| ws.projects().iter().position(|p| p.id == a.id));
@@ -90,9 +94,9 @@ impl Workspace {
             let mut tabs: Vec<(Vec<ShellKind>, usize)> =
                 p.tabs.iter().filter(|t| !t.panes.is_empty()).map(|t| (t.panes.clone(), t.focused)).collect();
             if tabs.is_empty() {
-                tabs.push((vec![p.root.default_shell()], 0));
+                tabs.push((vec![p.shell.clone().unwrap_or_else(|| p.root.default_shell())], 0));
             }
-            ws.push_restored(p.root.clone(), &tabs, p.active_tab);
+            ws.push_restored(p.root.clone(), &tabs, p.active_tab, p.shell.clone());
             if data.active == Some(i) {
                 active = Some(ws.projects().len() - 1);
             }
@@ -221,8 +225,9 @@ mod tests {
                     root: local(r"C:\w\a"),
                     tabs: vec![TabState { panes: vec![ShellKind::Native, ubuntu()], focused: 1 }],
                     active_tab: Some(0),
+                    shell: None,
                 },
-                ProjectState { root: wsl("Ubuntu", "/home/x"), tabs: vec![], active_tab: None },
+                ProjectState { root: wsl("Ubuntu", "/home/x"), tabs: vec![], active_tab: None, shell: None },
             ],
         };
         assert_eq!(SessionData::parse(text), Some(expected));
@@ -260,6 +265,7 @@ mod tests {
                 root: local("/w/a"),
                 tabs: vec![TabState { panes: vec![ShellKind::Native], focused: 5 }],
                 active_tab: Some(7),
+                shell: None,
             }],
         };
         let ws = Workspace::restore(&data, &|_| true);
@@ -278,6 +284,7 @@ mod tests {
                 root: wsl("Ubuntu", "/home/x"),
                 tabs: vec![TabState { panes: vec![], focused: 0 }],
                 active_tab: None,
+                shell: None,
             }],
         };
         let ws = Workspace::restore(&data, &|_| true);
@@ -285,6 +292,25 @@ mod tests {
         assert_eq!(p.tabs.len(), 1);
         assert_eq!(p.tabs[0].panes[0].kind, ubuntu());
         assert_eq!(p.active_tab, Some(p.tabs[0].id));
+    }
+
+    #[test]
+    fn shell_override_roundtrips() {
+        let mut ws = Workspace::default();
+        ws.open_project_with(local(r"C:\w"), Some(ubuntu()));
+        let data = SessionData::capture(&ws, None);
+        assert_eq!(data.projects[0].shell, Some(ubuntu()));
+        let parsed = SessionData::parse(&data.to_json()).expect("読み直せる");
+        let restored = Workspace::restore(&parsed, &|_| true);
+        assert_eq!(restored.active_project().unwrap().default_shell(), ubuntu());
+    }
+
+    #[test]
+    fn session_without_shell_field_parses() {
+        let text = r#"{"version":1,"window":null,"active":0,
+            "projects":[{"root":{"local":"C:\\w"},"active_tab":0,"tabs":[{"panes":["native"],"focused":0}]}]}"#;
+        let data = SessionData::parse(text).expect("計画4の形式も読める");
+        assert_eq!(data.projects[0].shell, None);
     }
 
     fn path_with(os: Platform, vars: &[(&str, &str)]) -> Option<PathBuf> {
