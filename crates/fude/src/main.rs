@@ -2,6 +2,7 @@
 
 mod assets;
 mod changes_menu;
+mod close_flow;
 mod cli;
 mod dialog;
 mod file_view;

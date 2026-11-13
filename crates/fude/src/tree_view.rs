@@ -22,13 +22,7 @@ gpui_kit::actions!(tree, [ToggleTree, CloseTree]);
 
 /// ツリーの開閉（⌘B、Windows は Ctrl+B。ターミナルの中では Ctrl+Shift+B。設計書 §10）と、Esc で閉じる。
 pub fn bind_tree_keys(cx: &mut App) {
-    match fude_core::keymap::Platform::current() {
-        fude_core::keymap::Platform::MacOs => cx.bind_keys([KeyBinding::new("cmd-b", ToggleTree, None)]),
-        fude_core::keymap::Platform::Windows => cx.bind_keys([
-            KeyBinding::new("ctrl-b", ToggleTree, Some("Workspace && !Terminal")),
-            KeyBinding::new("ctrl-shift-b", ToggleTree, None),
-        ]),
-    }
+    // 開閉のキーは fude_core::keymap（workspace_view::bind_keys）で登録する。
     cx.bind_keys([KeyBinding::new("escape", CloseTree, Some("Tree"))]);
 }
 

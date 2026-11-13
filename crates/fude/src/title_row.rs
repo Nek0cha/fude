@@ -134,10 +134,9 @@ impl WorkspaceView {
             .rounded(px(4.))
             .bg(close_bg)
             .child(svg().path(IconName::X.path()).size(px(12.)).text_color(close_color))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
-                this.workspace.close_tab(id);
-                cx.notify();
+                this.request_close(fude_core::close::CloseTarget::Tab(id), window, cx);
             }));
 
         self.hoverable(div().id(ElementId::Name(format!("tab-{id:?}").into())), key, cx)

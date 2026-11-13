@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fude_core::keymap::{Command, Platform, default_bindings};
+use fude_core::keymap::{Command, Platform, context_bindings, default_bindings};
 use fude_core::recent::RecentList;
 use fude_core::session::{self, SessionData, WindowGeom};
 use fude_core::settings::{LastProjectClosed, Settings};
@@ -40,12 +40,35 @@ gpui_kit::actions!(
         ActivateProject9,
         CopySelection,
         PasteText,
+        CloseItem,
     ]
 );
 
+/// Command と文脈を GPUI のキーバインドにする。
+fn binding(key: &'static str, command: Command, context: Option<&'static str>) -> KeyBinding {
+    use crate::file_view::{PanelBack, PanelForward, SaveFile};
+    use crate::tree_view::ToggleTree;
+    match command {
+        Command::Close => KeyBinding::new(key, CloseItem, context),
+        Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
+        Command::Save => KeyBinding::new(key, SaveFile, context),
+        Command::PanelBack => KeyBinding::new(key, PanelBack, context),
+        Command::PanelForward => KeyBinding::new(key, PanelForward, context),
+        other => default_binding(key, other),
+    }
+}
+
 /// fude_core の割り当て表を GPUI のキーバインドに変換して登録する。
 pub fn bind_keys(cx: &mut App) {
-    let bindings = default_bindings(Platform::current()).into_iter().map(|(key, command)| match command {
+    let platform = Platform::current();
+    let mut bindings: Vec<KeyBinding> =
+        default_bindings(platform).into_iter().map(|(key, command)| binding(key, command, None)).collect();
+    bindings.extend(context_bindings(platform).into_iter().map(|(key, command, context)| binding(key, command, Some(context))));
+    cx.bind_keys(bindings);
+}
+
+fn default_binding(key: &'static str, command: Command) -> KeyBinding {
+    match command {
         Command::NewTab => KeyBinding::new(key, NewTab, None),
         Command::SplitTab => KeyBinding::new(key, SplitTab, None),
         Command::NextTab => KeyBinding::new(key, NextTab, None),
@@ -63,8 +86,11 @@ pub fn bind_keys(cx: &mut App) {
             8 => KeyBinding::new(key, ActivateProject8, None),
             _ => KeyBinding::new(key, ActivateProject9, None),
         },
-    });
-    cx.bind_keys(bindings.collect::<Vec<_>>());
+        // 文脈の付くものは binding で扱う。
+        Command::Close | Command::ToggleTree | Command::Save | Command::PanelBack | Command::PanelForward => {
+            unreachable!("binding で扱う")
+        }
+    }
 }
 
 /// ブランチ名の読み方。
@@ -196,6 +222,8 @@ pub struct WorkspaceView {
     pub(crate) changes_menu: Option<(ProjectId, crate::popup::Popup)>,
     /// プロジェクトごとの右パネル。
     pub(crate) panels: HashMap<ProjectId, crate::right_panel::PanelSlot>,
+    /// 確かめ終えて、ウィンドウを閉じてよい（× の 2 回目）。
+    pub(crate) allow_close: bool,
     /// 確認ダイアログ。
     pub(crate) dialog: Option<crate::dialog::OpenDialog>,
     /// ホーム画面の「最近」の右クリックメニュー。
@@ -231,12 +259,17 @@ impl WorkspaceView {
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             let geom = geom_from_bounds(window.window_bounds());
-            view.update(cx, |this, _| {
+            // 未保存の変更と動いているターミナルを確かめてから閉じる（設計書 §5.12）。確かめ終えたら allow_close。
+            view.update(cx, |this, cx| {
                 this.last_geom = Some(geom);
-                this.save_now();
+                if this.allow_close {
+                    this.save_now();
+                    return true;
+                }
+                this.request_quit(window, cx);
+                false
             })
-            .ok();
-            true
+            .unwrap_or(true)
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -260,6 +293,7 @@ impl WorkspaceView {
             missing_roots: HashSet::new(),
             home_menu: None,
             dialog: None,
+            allow_close: false,
             panels: HashMap::new(),
             live: HashMap::new(),
             tree: crate::tree_view::TreeState::new(cx),
@@ -534,9 +568,11 @@ impl WorkspaceView {
             self.workspace.projects().iter().flat_map(|p| &p.tabs).flat_map(|t| &t.panes).map(|p| p.id).collect();
         self.terminals.retain(|id, _| alive.contains(id));
 
+        // フォーカスしていたビューが無くなった（タブやペインを閉じた）か。
+        let lost = window.focused(cx).is_none();
         let Some(project) = self.workspace.active_project() else {
             // 最後のプロジェクトを閉じたときも、ビューが無くなるので、ワークスペース自身に戻しておく。
-            if self.focused_pane.take().is_some() {
+            if self.focused_pane.take().is_some() || lost {
                 window.focus(&self.focus, cx);
             }
             return;
@@ -544,9 +580,15 @@ impl WorkspaceView {
         let root = project.root.clone();
         let Some(tab) = project.active_tab() else {
             // 最後のタブを閉じると、フォーカスしていたビューが無くなる。そのままだと、次に作った
-            // タブのターミナルへフォーカスが移らないため、ワークスペース自身に戻しておく。
-            if self.focused_pane.take().is_some() {
-                window.focus(&self.focus, cx);
+            // タブのターミナルへフォーカスが移らないため、右パネル（無ければワークスペース自身）に戻しておく。
+            if self.focused_pane.take().is_some() || lost {
+                match self.active_panel_view() {
+                    Some(view) => {
+                        let focus = view.read(cx).focus_handle();
+                        window.focus(&focus, cx);
+                    }
+                    None => window.focus(&self.focus, cx),
+                }
             }
             return;
         };
@@ -612,6 +654,15 @@ impl WorkspaceView {
         }
     }
 
+    /// 表示したことのあるターミナル。
+    pub(crate) fn terminal_views(&self) -> impl Iterator<Item = (PaneId, &Entity<TerminalView>)> {
+        self.terminals.iter().map(|(id, (view, _))| (*id, view))
+    }
+
+    pub(crate) fn terminal_view(&self, pane: PaneId) -> Option<&Entity<TerminalView>> {
+        self.terminals.get(&pane).map(|(view, _)| view)
+    }
+
     fn activate_project_at(&mut self, index: usize, cx: &mut Context<Self>) {
         self.workspace.activate_project_at(index);
         self.refresh_active_branch(cx);
@@ -673,6 +724,7 @@ impl Render for WorkspaceView {
             .track_focus(&self.focus)
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &crate::tree_view::ToggleTree, window, cx| this.toggle_tree(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseItem, window, cx| this.close_key(window, cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.new_default_tab();
                 cx.notify();
