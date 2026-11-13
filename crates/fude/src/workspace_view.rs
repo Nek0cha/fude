@@ -219,6 +219,8 @@ pub struct WorkspaceView {
     pub(crate) changes_menu: Option<(ProjectId, crate::popup::Popup)>,
     /// プロジェクトごとの右パネル。
     pub(crate) editors: HashMap<ProjectId, crate::editor_column::EditorSlot>,
+    /// エディタ列のタブ列のスクロールと、最後に寄せたタブ。
+    pub(crate) editor_tab_scroll: (ScrollHandle, Option<(ProjectId, usize)>),
     /// 右パネルの出入りとエディタの移動の動き。
     pub(crate) panel_anim: crate::editor_column::PanelAnim,
     /// 左パネル（ツリー）の出入り。
@@ -305,6 +307,7 @@ impl WorkspaceView {
             panel_anim: Default::default(),
             tree_presence: crate::anim::Presence::hidden(),
             editors: HashMap::new(),
+            editor_tab_scroll: (ScrollHandle::new(), None),
             live: HashMap::new(),
             tree: crate::tree_view::TreeState::new(cx),
             changes_menu: None,
@@ -707,9 +710,16 @@ impl Render for WorkspaceView {
         self.sync_terminals(window, cx);
         self.sync_live(cx);
         self.anims.observe(self.workspace.active_project(), now, self.reduced_motion);
+        let editor_shape =
+            self.workspace.active_project().map(|p| (p.id, p.editor.items().iter().map(|i| i.rel.clone()).collect()));
+        self.anims.observe_editor(editor_shape, now, self.reduced_motion);
         self.observe_panel(now);
         self.observe_tree(now);
-        if self.anims.tabs_animating(now) || self.panel_animating(now) || self.tree_presence.is_animating(now) {
+        if self.anims.tabs_animating(now)
+            || self.anims.editor_tabs_animating(now)
+            || self.panel_animating(now)
+            || self.tree_presence.is_animating(now)
+        {
             window.request_animation_frame();
         }
         self.freeze_terminals(self.layout_animating(now), cx);

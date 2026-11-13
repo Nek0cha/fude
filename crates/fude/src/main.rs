@@ -8,6 +8,7 @@ mod close_flow;
 mod columns;
 mod dialog;
 mod editor_column;
+mod editor_tabs_view;
 mod file_icons;
 mod file_view;
 mod home;
