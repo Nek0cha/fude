@@ -349,7 +349,7 @@ impl WorkspaceView {
     }
 
     /// 「前回の続き」。プロジェクトが 0 個のときだけ、保存した状態を戻す（ターミナルも保存どおりに起動する）。
-    pub(crate) fn resume_last_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn resume_last_session(&mut self, cx: &mut Context<Self>) {
         if !self.workspace.projects().is_empty() {
             return;
         }
@@ -365,11 +365,7 @@ impl WorkspaceView {
             self.recent.touch(root, now);
         }
         self.save_recent(cx);
-        // 戻したタブは、選ばれているものだけビューを作る（残りは選んだときに作る）。
-        let projects: Vec<ProjectId> = self.workspace.projects().iter().map(|p| p.id).collect();
-        for project in projects {
-            self.show_active_tab(project, window, cx);
-        }
+        // 戻したタブのビューは、選ばれたときに作る（描画の ensure_active_view）。
         self.refocus_pane();
         self.refresh_active_branch(cx);
         cx.notify();
@@ -724,6 +720,7 @@ impl Render for WorkspaceView {
         let (bg, fg) = (theme.bg_window, theme.fg_default);
         self.sync_terminals(window, cx);
         self.sync_live(cx);
+        self.ensure_active_view(window, cx);
         self.anims.observe(self.workspace.active_project(), now, self.reduced_motion);
         let editor_shape =
             self.workspace.active_project().map(|p| (p.id, p.editor.items().iter().map(|i| i.rel.clone()).collect()));

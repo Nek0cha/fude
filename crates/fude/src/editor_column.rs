@@ -278,6 +278,19 @@ impl WorkspaceView {
         }
     }
 
+    /// 描画のたびに呼ぶ。選択中のプロジェクトの選択中のタブにビューが無ければ作る
+    /// （セッションから戻したタブと、プロジェクトを切り替えたとき。作るのは選ばれたタブだけ）。
+    pub(crate) fn ensure_active_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.workspace.active_project() else { return };
+        let Some(rel) = p.editor.active().map(|i| i.rel.clone()) else { return };
+        let project = p.id;
+        let slot = self.editors.get(&project);
+        if slot.is_some_and(|s| s.views.contains_key(&rel) || s.loading.contains(&rel)) {
+            return;
+        }
+        self.create_view(project, rel, window, cx);
+    }
+
     /// project のエディタ列の index のタブを閉じる。未保存なら、保存・保存しない・キャンセルを聞く。
     pub(crate) fn close_editor_tab(&mut self, project: ProjectId, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let rel = self
