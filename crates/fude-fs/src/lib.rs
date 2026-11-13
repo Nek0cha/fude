@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod git;
 mod local;
 pub mod procs;
 mod remote;
@@ -133,6 +134,10 @@ pub trait ProjectFs: Send + Sync {
     /// 消す。フォルダは中身ごと。ルートは拒む。
     fn remove(&self, rel: &RelPath) -> io::Result<()>;
     fn metadata(&self, rel: &RelPath) -> io::Result<FileMeta>;
+    /// Git の状態。リポジトリでない、git が無い → Ok(None)。
+    fn git_status(&self) -> io::Result<Option<git::GitStatus>>;
+    /// rel の HEAD との差分（unified diff）。
+    fn git_diff(&self, rel: &RelPath) -> io::Result<String>;
 }
 
 #[cfg(test)]

@@ -54,6 +54,13 @@ fn handle(req: Request, payload: &[u8], build_id: &str) -> (Response, Vec<u8>) {
             local(&root).and_then(|fs| fs.metadata(&path)).map(|meta| (Response::Meta { meta }, Vec::new()))
         }
         Request::FindRoot { file } => find_root(&file).map(|path| (Response::Root { path }, Vec::new())),
+        Request::GitStatus { root } => local(&root).and_then(|fs| fs.git_status()).and_then(|status| {
+            let json = serde_json::to_vec(&status).map_err(io::Error::other)?;
+            Ok((Response::Status, json))
+        }),
+        Request::GitDiff { root, path } => {
+            local(&root).and_then(|fs| fs.git_diff(&path)).map(|patch| (Response::Patch, patch.into_bytes()))
+        }
         Request::Busy { terminal_id } => crate::procs::terminal_busy(Path::new("/proc"), &terminal_id)
             .map(|busy| (Response::Busy { busy }, Vec::new())),
     };

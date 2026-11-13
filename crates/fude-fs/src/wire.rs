@@ -27,6 +27,8 @@ pub enum Request {
     FindRoot { file: String },
     /// FUDE_TERMINAL_ID が terminal_id のシェルの上で、何かが動いているか。
     Busy { terminal_id: String },
+    GitStatus { root: String },
+    GitDiff { root: String, path: RelPath },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -44,6 +46,10 @@ pub enum Response {
     Meta { meta: crate::FileMeta },
     Root { path: String },
     Busy { busy: bool },
+    /// Option<GitStatus> の JSON は payload。
+    Status,
+    /// unified diff は payload。
+    Patch,
     /// already_exists は計画5で足した（古いサーバーの応答には無い）。
     Error {
         message: String,

@@ -216,6 +216,21 @@ impl ProjectFs for RemoteFs {
         self.done(Request::Remove { root: self.root.clone(), path: rel.clone() })
     }
 
+    fn git_status(&self) -> io::Result<Option<crate::git::GitStatus>> {
+        match self.call(Request::GitStatus { root: self.root.clone() }, &[])? {
+            (Response::Status, json) => serde_json::from_slice(&json)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Git の状態を読めない: {e}"))),
+            (resp, _) => Err(unexpected(resp)),
+        }
+    }
+
+    fn git_diff(&self, rel: &RelPath) -> io::Result<String> {
+        match self.call(Request::GitDiff { root: self.root.clone(), path: rel.clone() }, &[])? {
+            (Response::Patch, data) => Ok(String::from_utf8_lossy(&data).into_owned()),
+            (resp, _) => Err(unexpected(resp)),
+        }
+    }
+
     fn metadata(&self, rel: &RelPath) -> io::Result<FileMeta> {
         match self.call(Request::Metadata { root: self.root.clone(), path: rel.clone() }, &[])? {
             (Response::Meta { meta }, _) => Ok(meta),
@@ -369,6 +384,23 @@ mod tests {
         let start = Instant::now();
         assert!(c.call(&Request::Version, &[]).is_err());
         assert!(start.elapsed() >= Duration::from_millis(350));
+    }
+
+    #[test]
+    fn remote_git_status_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = RemoteFs::new(client(ServeConnector, Duration::from_secs(5)), dir.path().to_string_lossy().into());
+        assert_eq!(fs.git_status().unwrap(), None);
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(dir.path()).output().is_ok_and(|o| o.status.success())
+        };
+        if !git(&["init", "-q"]) {
+            return;
+        }
+        std::fs::write(dir.path().join("a.txt"), "1\n").unwrap();
+        let status = fs.git_status().unwrap().unwrap();
+        assert_eq!(status.mark(&rel("a.txt")), Some(crate::git::GitMark::Untracked));
+        assert_eq!(fs.git_diff(&rel("a.txt")).unwrap(), "");
     }
 
     #[test]

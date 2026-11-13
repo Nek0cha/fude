@@ -163,9 +163,21 @@ impl ProjectFs for LocalFs {
             .map_or(0, |d| d.as_millis() as u64);
         Ok(FileMeta { is_dir: meta.is_dir(), len: meta.len(), modified_ms })
     }
+
+    fn git_status(&self) -> io::Result<Option<crate::git::GitStatus>> {
+        crate::git::git_status(&self.root)
+    }
+
+    fn git_diff(&self, rel: &RelPath) -> io::Result<String> {
+        crate::git::git_diff(&self.root, rel)
+    }
 }
 
 impl LocalFs {
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
     /// ルート自身でなければ、実際のパス。
     fn non_root(&self, rel: &RelPath) -> io::Result<PathBuf> {
         if rel.is_root() {
