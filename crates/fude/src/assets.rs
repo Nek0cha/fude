@@ -10,4 +10,5 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     WindowMaximize,
     WindowRestore,
     WindowClose,
+    ArrowDown,
 ]);

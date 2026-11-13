@@ -30,6 +30,8 @@ gpui_kit::actions!(
         ActivateProject7,
         ActivateProject8,
         ActivateProject9,
+        CopySelection,
+        PasteText,
     ]
 );
 
@@ -40,6 +42,8 @@ pub fn bind_keys(cx: &mut App) {
         Command::SplitTab => KeyBinding::new(key, SplitTab, None),
         Command::NextTab => KeyBinding::new(key, NextTab, None),
         Command::PrevTab => KeyBinding::new(key, PrevTab, None),
+        Command::Copy => KeyBinding::new(key, CopySelection, Some("Terminal")),
+        Command::Paste => KeyBinding::new(key, PasteText, Some("Terminal")),
         Command::ActivateProject(n) => match n {
             1 => KeyBinding::new(key, ActivateProject1, None),
             2 => KeyBinding::new(key, ActivateProject2, None),

@@ -5,15 +5,26 @@ use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
+use fude_core::keymap::Platform;
+use fude_core::keys::{KeyOverrides, KeyRoute, RawKey, encode_key, route_key};
 use fude_core::workspace::ShellKind;
-use fude_term::{GridSize, Session, SessionEvent, spawn_spec};
+use fude_term::{GridSize, SelectKind, Session, SessionEvent, WheelAccum, alt_scroll_bytes, paste_bytes, spawn_spec};
 use futures::StreamExt;
+use gpui_kit::assets::IconName;
 use gpui_kit::*;
 
+use crate::hover::{HoverFades, HoverKey};
 use crate::terminal_paint::{CellMetrics, paint_terminal};
 use crate::theme::size::{TERM_FONT_SIZE, TERM_PAD_X, TERM_PAD_Y};
 use crate::theme::{Theme, mono_font};
+use crate::title_row::icon;
+use crate::workspace_view::{CopySelection, PasteText};
+
+/// 「最新へ」のボタンの大きさと、ペインの端からの距離。
+const TO_BOTTOM_SIZE: Pixels = px(28.);
+const TO_BOTTOM_INSET: Pixels = px(12.);
 
 /// ビューからワークスペースへ知らせること。
 pub enum TerminalEvent {
@@ -33,6 +44,12 @@ pub struct TerminalView {
     pub(crate) metrics: CellMetrics,
     /// 升目の領域。描画のたびに更新する。
     pub(crate) bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    overrides: KeyOverrides,
+    wheel: WheelAccum,
+    hover: HoverFades,
+    /// マウスで選択中なら Some（押してから動かしたか）。
+    drag: Option<bool>,
+    click_count: usize,
     _events: Task<()>,
 }
 
@@ -68,6 +85,11 @@ impl TerminalView {
             marked: None,
             metrics: CellMetrics::measure(window),
             bounds: Rc::new(Cell::new(None)),
+            overrides: KeyOverrides::defaults(),
+            wheel: WheelAccum::default(),
+            hover: HoverFades::default(),
+            drag: None,
+            click_count: 0,
             _events: events,
         }
     }
@@ -99,6 +121,151 @@ impl TerminalView {
         if let Some(s) = &self.session {
             s.write(bytes);
         }
+    }
+
+    fn grid_size(&self) -> GridSize {
+        self.session.as_ref().map_or(GridSize { cols: 80, rows: 24 }, |s| s.with_state(|st| st.size()))
+    }
+
+    /// ウィンドウの座標を、升目のセルにする。
+    fn cell_at(&self, pos: Point<Pixels>) -> Option<(u16, u16, bool)> {
+        let origin = self.bounds.get()?.origin;
+        Some(point_to_cell(pos - origin, self.metrics, self.grid_size()))
+    }
+
+    fn on_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        // 変換中のキーは IME が処理する。
+        if self.marked.is_some() {
+            return;
+        }
+        let Some(session) = &self.session else { return };
+        let ks = &ev.keystroke;
+        let m = ks.modifiers;
+        let raw = RawKey { key: &ks.key, shift: m.shift, ctrl: m.control, alt: m.alt, platform: m.platform };
+        if let KeyRoute::Encode(input) = route_key(&raw, Platform::current()) {
+            let modes = session.with_state(|st| st.modes());
+            if let Some(bytes) = encode_key(&input, modes, &self.overrides) {
+                session.write(bytes);
+            }
+            cx.stop_propagation();
+        }
+    }
+
+    fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        cx.emit(TerminalEvent::Focused);
+        let (Some(session), Some((row, col, right))) = (&self.session, self.cell_at(ev.position)) else { return };
+        let kind = match ev.click_count {
+            2 => SelectKind::Word,
+            n if n >= 3 => SelectKind::Line,
+            _ => SelectKind::Simple,
+        };
+        session.with_state(|st| st.start_selection(row, col, right, kind));
+        self.drag = Some(false);
+        self.click_count = ev.click_count;
+        cx.notify();
+    }
+
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.drag.is_none() || ev.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let (Some(session), Some((row, col, right))) = (&self.session, self.cell_at(ev.position)) else { return };
+        session.with_state(|st| st.update_selection(row, col, right));
+        self.drag = Some(true);
+        cx.notify();
+    }
+
+    fn on_mouse_up(&mut self, cx: &mut Context<Self>) {
+        // 押しただけで動かさなかったクリックは、選択を残さない。
+        if self.drag == Some(false)
+            && self.click_count <= 1
+            && let Some(s) = &self.session
+        {
+            s.with_state(|st| st.clear_selection());
+        }
+        self.drag = None;
+        cx.notify();
+    }
+
+    fn on_scroll(&mut self, ev: &ScrollEvent, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else { return };
+        let lines = match ev.delta {
+            ScrollDelta::Lines(p) => p.y,
+            ScrollDelta::Pixels(p) => p.y / self.metrics.line_h,
+        };
+        let n = self.wheel.feed(lines);
+        if n == 0 {
+            return;
+        }
+        let alt = session.with_state(|st| {
+            if st.alt_scroll() {
+                Some(st.modes().app_cursor)
+            } else {
+                st.scroll(n);
+                None
+            }
+        });
+        if let Some(app_cursor) = alt {
+            session.write(alt_scroll_bytes(n, app_cursor));
+        }
+        cx.notify();
+    }
+
+    fn copy(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.session.as_ref().and_then(|s| s.with_state(|st| st.selection_text())) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        let (Some(session), Some(text)) = (&self.session, cx.read_from_clipboard().and_then(|c| c.text())) else {
+            return;
+        };
+        let bracketed = session.with_state(|st| st.bracketed_paste());
+        session.write(paste_bytes(&text, bracketed));
+    }
+
+    /// 上へ遡っているときだけ出す「最新へ」のボタン。
+    fn render_to_bottom(&mut self, theme: &Theme, now: Instant, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let offset = self.session.as_ref().map_or(0, |s| s.with_state(|st| st.display_offset()));
+        if offset == 0 {
+            return None;
+        }
+        let key = HoverKey::ScrollToBottom;
+        let hover = Rgba { a: theme.bg_hover.a * self.hover.value(key, now), ..theme.bg_hover };
+        let face = div()
+            .size_full()
+            .rounded_full()
+            .bg(hover)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon(IconName::ArrowDown, theme.fg_default));
+        Some(
+            div()
+                .id("to-bottom")
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    this.hover.set(key, *hovered, Instant::now());
+                    cx.notify();
+                }))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(s) = &this.session {
+                        s.with_state(|st| st.scroll_to_bottom());
+                    }
+                    cx.notify();
+                }))
+                .absolute()
+                .right(TO_BOTTOM_INSET)
+                .bottom(TO_BOTTOM_INSET)
+                .size(TO_BOTTOM_SIZE)
+                .rounded_full()
+                .bg(theme.bg_panel)
+                .border_1()
+                .border_color(theme.border_subtle)
+                .child(face),
+        )
     }
 
     /// カーソルのセルの四角（ウィンドウの座標）。IME の候補ウィンドウの位置に使う。
@@ -190,6 +357,12 @@ impl EntityInputHandler for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.global::<Theme>();
+        let now = Instant::now();
+        self.hover.set_window_hovered(window.is_window_hovered(), now);
+        if self.hover.any_animating(now) {
+            window.request_animation_frame();
+        }
+        let to_bottom = self.render_to_bottom(&theme, now, cx);
         let focused = self.focus.is_focused(window);
         let entity = cx.entity();
         let focus = self.focus.clone();
@@ -226,13 +399,16 @@ impl Render for TerminalView {
             .id("terminal")
             .track_focus(&self.focus)
             .key_context("Terminal")
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| this.on_key(ev, cx)))
+            .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy(cx)))
+            .on_action(cx.listener(|this, _: &PasteText, _, cx| this.paste(cx)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    window.focus(&this.focus, cx);
-                    cx.emit(TerminalEvent::Focused);
-                }),
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| this.on_mouse_down(ev, window, cx)),
             )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| this.on_mouse_move(ev, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_mouse_up(cx)))
+            .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| this.on_scroll(ev, cx)))
             .relative()
             .size_full()
             .px(TERM_PAD_X)
@@ -241,6 +417,7 @@ impl Render for TerminalView {
             .text_size(TERM_FONT_SIZE)
             .child(grid)
             .children(message)
+            .children(to_bottom)
     }
 }
 
