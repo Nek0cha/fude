@@ -243,7 +243,11 @@ impl WorkspaceView {
                     .map(|(i, row)| {
                         let is_selected = selected.as_ref() == Some(&row.rel);
                         let chevron = if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight };
-                        let lead = if row.is_dir { icon(chevron, theme.fg_dim) } else { icon(IconName::File, theme.fg_dim) };
+                        let lead = if row.is_dir {
+                            icon(chevron, theme.fg_dim).into_any_element()
+                        } else {
+                            crate::file_icons::file_icon(crate::file_icons::icon_for_file(&row.name)).into_any_element()
+                        };
                         let deleted = row.mark == Some(fude_fs::git::GitMark::Deleted);
                         let mark = row.mark.map(|m| {
                             let (letter, color) = mark_style(m, &theme);

@@ -1,6 +1,6 @@
 //! ファイル名からアイコンを決める対応表と、同じ名前のタブの区別（設計書 §5.5、§4.1.3）。
 
-use gpui_kit::SharedString;
+use gpui_kit::{Img, SharedString, Styled, img, px};
 
 /// ファイル名の完全一致での対応（大文字小文字は区別しない）。拡張子より先に見る。
 const BY_NAME: &[(&str, &str)] = &[
@@ -117,6 +117,7 @@ const BY_EXT: &[(&str, &str)] = &[
     ("patch", "diff"),
 ];
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// 同梱するアイコンの名前の全部（`assets/file-icons/{name}.svg`）。
 pub(crate) const ICONS: &[&str] = &[
     "c",
@@ -206,9 +207,13 @@ pub(crate) fn icon_for_folder(open: bool) -> &'static str {
 }
 
 /// アセットの中のアイコンのパス。
-#[allow(dead_code)] // Task 6 で使う。
 pub(crate) fn icon_path(icon: &str) -> SharedString {
     format!("file-icons/{icon}.svg").into()
+}
+
+/// ファイルアイコンを 14px 四方で描く。色は少し暗くする（不透明度 0.8 で、背景に 20% 寄せる）。
+pub(crate) fn file_icon(icon: &'static str) -> Img {
+    img(icon_path(icon)).size(px(14.)).flex_shrink_0().opacity(0.8)
 }
 
 /// タブに出す (ファイル名, 親フォルダ名)。親フォルダ名は、同じファイル名が 2 つ以上あるときだけ付ける。
