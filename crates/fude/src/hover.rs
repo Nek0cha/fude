@@ -22,10 +22,20 @@ pub enum HoverKey {
     CaptionClose,
 }
 
-#[derive(Default)]
+/// 部品ごとのホバーの状態と、カーソルがウィンドウの上にあるかの状態を持つ。
+///
+/// カーソルがウィンドウの外へ出ても、GPUI は最後の位置で判定を続けるため、部品の
+/// on_hover(false) は呼ばれない。部品ごとの状態は GPUI の判定と揃えたまま残し、
+/// ウィンドウ全体の濃さ（window）を掛けて表示から消す。戻ると、そのまま色が戻る。
 pub struct HoverFades {
     fades: HashMap<HoverKey, Fade>,
-    window_hovered: bool,
+    window: Fade,
+}
+
+impl Default for HoverFades {
+    fn default() -> Self {
+        Self { fades: HashMap::new(), window: Fade::settled(1.0) }
+    }
 }
 
 impl HoverFades {
@@ -34,30 +44,19 @@ impl HoverFades {
         self.fades.entry(key).or_insert_with(|| Fade::settled(0.0)).animate_to(target, duration, ease_out, now);
     }
 
-    /// カーソルがウィンドウの上にあるかを伝える。外へ出た瞬間に 1 回だけ、すべてのホバーを外す。
-    /// Windows では、ウィンドウ操作ボタンとの行き来で一時的に「外」と判定されることがあり、
-    /// 「外」の間ずっと外し続けると、戻ってきたあとのホバーが効かなくなる。
+    /// カーソルがウィンドウの上にあるかを伝える。描画のたびに呼んでよい。
     pub fn set_window_hovered(&mut self, hovered: bool, now: Instant) {
-        if self.window_hovered && !hovered {
-            self.release_all(now);
-        }
-        self.window_hovered = hovered;
-    }
-
-    /// すべての部品のホバーを外す。カーソルがウィンドウの外へ出たときに使う。
-    pub fn release_all(&mut self, now: Instant) {
-        for fade in self.fades.values_mut() {
-            fade.animate_to(0.0, HOVER_OUT, ease_out, now);
-        }
+        let (target, duration) = if hovered { (1.0, HOVER_IN) } else { (0.0, HOVER_OUT) };
+        self.window.animate_to(target, duration, ease_out, now);
     }
 
     /// 0（ホバーしていない）〜 1（ホバー中）。登録の無い部品は 0。
     pub fn value(&self, key: HoverKey, now: Instant) -> f32 {
-        self.fades.get(&key).map_or(0.0, |f| f.value(now))
+        self.fades.get(&key).map_or(0.0, |f| f.value(now)) * self.window.value(now)
     }
 
     pub fn any_animating(&self, now: Instant) -> bool {
-        self.fades.values().any(|f| f.is_animating(now))
+        self.window.is_animating(now) || self.fades.values().any(|f| f.is_animating(now))
     }
 }
 
@@ -70,28 +69,30 @@ mod tests {
         Duration::from_millis(n)
     }
 
-    /// カーソルがウィンドウの外へ出たとき、部品ごとの「外れた」通知は届かないため、まとめて消す。
+    /// ボタンの上から外へ出て、同じボタンの上へ戻る。GPUI はボタンを「ホバー中」のまま扱い、
+    /// 通知を送り直さないため、戻った時点で色が出なければならない。
     #[test]
-    fn release_all_fades_out_every_key() {
-        let t0 = Instant::now();
-        let mut fades = HoverFades::default();
-        fades.set(HoverKey::CaptionClose, true, t0);
-        fades.set(HoverKey::AddTab, true, t0);
-        fades.release_all(t0 + ms(80));
-        assert_eq!(fades.value(HoverKey::CaptionClose, t0 + ms(200)), 0.0);
-        assert_eq!(fades.value(HoverKey::AddTab, t0 + ms(200)), 0.0);
-    }
-
-    /// 「外に出た」状態が続いても、消すのは切り替わった 1 回だけ。戻ってきたあとのホバーは効く。
-    #[test]
-    fn window_leave_releases_only_on_transition() {
+    fn return_to_same_button_restores_color() {
         let t0 = Instant::now();
         let mut fades = HoverFades::default();
         fades.set_window_hovered(true, t0);
-        fades.set_window_hovered(false, t0);
-        fades.set(HoverKey::AddTab, true, t0 + ms(10));
-        fades.set_window_hovered(false, t0 + ms(20));
-        assert_eq!(fades.value(HoverKey::AddTab, t0 + ms(200)), 1.0);
+        fades.set(HoverKey::CaptionMin, true, t0);
+        fades.set_window_hovered(false, t0 + ms(100));
+        assert_eq!(fades.value(HoverKey::CaptionMin, t0 + ms(300)), 0.0);
+        fades.set_window_hovered(true, t0 + ms(400));
+        assert_eq!(fades.value(HoverKey::CaptionMin, t0 + ms(600)), 1.0);
+    }
+
+    /// 「外」の判定が一瞬はさまっても、そのあいだに届いたホバーは戻ったあと効く。
+    #[test]
+    fn hover_set_while_outside_shows_after_return() {
+        let t0 = Instant::now();
+        let mut fades = HoverFades::default();
+        fades.set_window_hovered(true, t0);
+        fades.set_window_hovered(false, t0 + ms(10));
+        fades.set(HoverKey::CaptionMax, true, t0 + ms(10));
+        fades.set_window_hovered(true, t0 + ms(12));
+        assert_eq!(fades.value(HoverKey::CaptionMax, t0 + ms(200)), 1.0);
     }
 
     #[test]
