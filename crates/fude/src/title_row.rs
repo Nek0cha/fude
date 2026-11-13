@@ -184,12 +184,14 @@ impl WorkspaceView {
             .child(icon(name, fg))
     }
 
-    /// プロジェクト名とブランチ名。この計画では表示だけで、押しても何も起きない。
-    fn render_pill(&self, cx: &mut Context<Self>) -> Div {
+    /// プロジェクト名とブランチ名。クリックでツリーを開閉する（設計書 §4.3）。
+    fn render_pill(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = *cx.global::<Theme>();
-        let Some(project) = self.workspace.active_project() else { return div() };
+        let Some(project) = self.workspace.active_project() else { return div().id("pill") };
         let branch = self.branches.get(&project.id).cloned().flatten();
         div()
+            .id("pill")
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_tree(window, cx)))
             .h(px(24.))
             .px(px(10.))
             .flex()

@@ -21,6 +21,8 @@ mod terminal_paint;
 mod terminal_view;
 mod theme;
 mod title_row;
+mod tree_model;
+mod tree_view;
 mod workspace_view;
 mod wsl_host;
 
@@ -116,6 +118,7 @@ fn main() {
         theme::apply_component_theme(cx);
         bind_keys(cx);
         file_view::bind_file_view_keys(cx);
+        tree_view::bind_tree_keys(cx);
         // ウィンドウは 1 枚なので、閉じたらアプリも終える（macOS でアプリだけ残らないように）。
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {

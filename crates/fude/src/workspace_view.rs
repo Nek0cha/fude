@@ -188,6 +188,8 @@ pub struct WorkspaceView {
     pub(crate) missing_roots: HashSet<ProjectRoot>,
     /// 右パネルに開いたあとで、カーソルを置く位置（プロジェクト、1 始まりの行と列）。
     pub(crate) pending_goto: Option<(ProjectId, u32, Option<u32>)>,
+    /// ファイルツリー（左パネル）。
+    pub(crate) tree: crate::tree_view::TreeState,
     /// プロジェクトごとの ProjectFs、監視、Git の状態。
     pub(crate) live: HashMap<ProjectId, crate::project_state::ProjectLive>,
     /// 変更したファイルの一覧（「● N」を押すと出る）。
@@ -260,6 +262,7 @@ impl WorkspaceView {
             dialog: None,
             panels: HashMap::new(),
             live: HashMap::new(),
+            tree: crate::tree_view::TreeState::new(cx),
             changes_menu: None,
             pending_goto: None,
             screen_fade: Fade::settled(1.0),
@@ -626,6 +629,7 @@ impl Render for WorkspaceView {
             render_main_area(active_tab, &terminals, panel, main_w, cx)
         };
         let main = main.opacity(self.screen_fade.value(now));
+        let tree = if home { None } else { self.render_tree(cx, now) };
         let title_row = self.render_title_row(window, cx, now);
         let rail = self.render_rail(cx, now);
         let menu = self.render_shell_menu(window, cx, now);
@@ -638,6 +642,7 @@ impl Render for WorkspaceView {
             .id("workspace")
             .track_focus(&self.focus)
             .key_context("Workspace")
+            .on_action(cx.listener(|this, _: &crate::tree_view::ToggleTree, window, cx| this.toggle_tree(window, cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.new_default_tab();
                 cx.notify();
@@ -678,8 +683,10 @@ impl Render for WorkspaceView {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .child(rail)
-                    .child(div().flex_1().min_w_0().h_full().child(main)),
+                    .child(div().flex_1().min_w_0().h_full().child(main))
+                    .children(tree),
             )
             .children(menu)
             .children(project_menu)

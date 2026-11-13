@@ -99,6 +99,7 @@ impl WorkspaceView {
                 live._watcher = watcher;
                 live._events = Some(events);
                 this.refresh_status(project, Duration::ZERO, cx);
+                this.tree_live_ready(project, cx);
             })
             .ok();
         })
@@ -113,6 +114,7 @@ impl WorkspaceView {
                 view.update(cx, |v, cx| v.on_external_change(cx));
             }
         }
+        self.on_tree_changed(project, &batch, cx);
         if batch.git {
             self.refresh_branch(project, cx);
         }
