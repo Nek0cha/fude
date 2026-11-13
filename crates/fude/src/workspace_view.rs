@@ -6,6 +6,7 @@ use std::time::Instant;
 use fude_core::git_head::read_branch;
 use fude_core::keymap::{Command, Platform, default_bindings};
 use fude_core::workspace::{PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
+use fude_ipc::Message;
 use gpui_kit::*;
 
 use crate::hover::{HoverFades, HoverKey};
@@ -79,7 +80,8 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
-    pub fn new(initial_root: ProjectRoot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// 起動時の状態（復元したもの、または引数のプロジェクトを開いたもの）を受け取る。
+    pub fn new(workspace: Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.refresh_active_branch();
@@ -89,7 +91,7 @@ impl WorkspaceView {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut this = Self {
-            workspace: Workspace::default(),
+            workspace,
             branches: HashMap::new(),
             hover: HoverFades::default(),
             should_move: false,
@@ -100,7 +102,7 @@ impl WorkspaceView {
             focus,
             _activation: activation,
         };
-        this.open_project(initial_root);
+        this.refresh_active_branch();
         this.load_distros(cx);
         this
     }
@@ -134,6 +136,16 @@ impl WorkspaceView {
         let id = self.workspace.open_project(root);
         let branch = self.workspace.active_project().and_then(|p| read_branch(&p.root.host_path()));
         self.branches.insert(id, branch);
+    }
+
+    /// 2 つ目の起動から届いた要求。Open ならプロジェクトを開いて（開いていれば切り替えて）、どちらも前面に出す。
+    pub(crate) fn handle_message(&mut self, msg: Message, window: &mut Window, cx: &mut Context<Self>) {
+        if let Message::Open { root } = msg {
+            self.open_project(root);
+        }
+        window.activate_window();
+        cx.activate(true);
+        cx.notify();
     }
 
     /// 選択中のプロジェクトの既定のシェルでタブを作る。

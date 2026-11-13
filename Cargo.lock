@@ -1755,9 +1755,12 @@ name = "fude"
 version = "0.1.0"
 dependencies = [
  "fude-core",
+ "fude-ipc",
  "fude-term",
  "futures",
  "gpui-kit",
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

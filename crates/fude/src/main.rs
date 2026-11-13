@@ -1,7 +1,9 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod assets;
+mod cli;
 mod hover;
+mod instance;
 mod main_area;
 mod rail;
 mod shell_menu;
@@ -12,14 +14,16 @@ mod title_row;
 mod workspace_view;
 
 use std::borrow::Cow;
-use std::path::PathBuf;
 
-use fude_core::paths::simplify_verbatim;
-use fude_core::workspace::ProjectRoot;
+use fude_core::workspace::Workspace;
+use fude_ipc::Message;
+use futures::StreamExt;
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
 use crate::assets::FudeAssets;
+use crate::cli::{Launch, parse_launch};
+use crate::instance::{HandOff, hand_off, report_error};
 use crate::theme::Theme;
 use crate::workspace_view::{WorkspaceView, bind_keys};
 
@@ -29,22 +33,35 @@ const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-
 /// ウィンドウの背景の方式。Windows と macOS のどちらも Blurred（ユーザーが検証2の画面で選んだ見た目）。
 const WINDOW_BACKGROUND: WindowBackgroundAppearance = WindowBackgroundAppearance::Blurred;
 
-/// 起動時に開くプロジェクト。引数の 1 つ目、無ければ現在のディレクトリ。
-fn initial_root() -> ProjectRoot {
-    let cwd = std::env::current_dir().expect("現在のディレクトリを取得できない");
-    let root = match std::env::args_os().nth(1).map(PathBuf::from) {
-        Some(arg) if arg.is_dir() => arg,
-        Some(arg) => {
-            eprintln!("ディレクトリではないため、現在のディレクトリを開く: {}", arg.display());
-            cwd
-        }
-        None => cwd,
-    };
-    ProjectRoot::from_host_path(std::fs::canonicalize(&root).map(simplify_verbatim).unwrap_or(root))
-}
-
 fn main() {
-    let root = initial_root();
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let cwd = std::env::current_dir().expect("現在のディレクトリを取得できない");
+    let launch = match parse_launch(&args, &cwd) {
+        Ok(launch) => launch,
+        Err(e) => {
+            report_error(&e);
+            std::process::exit(2);
+        }
+    };
+    let name = fude_ipc::endpoint_name(&|k| std::env::var(k).ok());
+    let server = match hand_off(&name, &launch) {
+        Ok(HandOff::Delivered) => return,
+        Ok(HandOff::Serve(server)) => server,
+        Err(e) => {
+            report_error(&e);
+            std::process::exit(1);
+        }
+    };
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<Message>();
+    server.serve(move |m| {
+        tx.unbounded_send(m).ok();
+    });
+
+    let mut workspace = Workspace::default();
+    if let Launch::Open(root) = launch {
+        workspace.open_project(root);
+    }
+
     application().with_assets(FudeAssets).run(move |cx: &mut App| {
         init(cx);
         cx.text_system()
@@ -52,6 +69,13 @@ fn main() {
             .expect("同梱の等幅フォントを読み込めない");
         cx.set_global(Theme::dark());
         bind_keys(cx);
+        // ウィンドウは 1 枚なので、閉じたらアプリも終える（macOS でアプリだけ残らないように）。
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
 
         let base = TitleBar::window_options();
         let options = WindowOptions {
@@ -66,8 +90,22 @@ fn main() {
         };
         // gpui_kit::open_window は Root で包み、gpui-component のテーマの背景色（既定はライト）で
         // 全面を塗るため、ウィンドウの透過が見えなくなる。部品を使うまでは直接開く。
-        cx.open_window(options, move |window, cx| cx.new(|cx| WorkspaceView::new(root, window, cx)))
+        let handle = cx
+            .open_window(options, move |window, cx| cx.new(|cx| WorkspaceView::new(workspace, window, cx)))
             .expect("ウィンドウを開けない");
+        // 2 つ目の起動から届いた要求を、ウィンドウのビューで処理する。
+        handle
+            .update(cx, |_, window, cx| {
+                cx.spawn_in(window, async move |this, cx| {
+                    while let Some(msg) = rx.next().await {
+                        if this.update_in(cx, |view, window, cx| view.handle_message(msg, window, cx)).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            })
+            .expect("ウィンドウを更新できない");
         cx.activate(true);
     });
 }
