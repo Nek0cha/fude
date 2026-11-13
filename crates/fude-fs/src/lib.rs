@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod local;
+pub mod serve;
+pub mod wire;
 
 pub use local::LocalFs;
 
