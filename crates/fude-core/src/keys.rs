@@ -138,8 +138,8 @@ fn modifier_param(m: Modifiers) -> u8 {
 /// `ESC [ code ~` 形式のキー。修飾キーがあるときは `ESC [ code ; n ~` にする。
 fn tilde(code: u8, m: Modifiers) -> Vec<u8> {
     match modifier_param(m) {
-        1 => format!("[{code}~").into_bytes(),
-        param => format!("[{code};{param}~").into_bytes(),
+        1 => format!("\x1b[{code}~").into_bytes(),
+        param => format!("\x1b[{code};{param}~").into_bytes(),
     }
 }
 
@@ -147,7 +147,7 @@ fn tilde(code: u8, m: Modifiers) -> Vec<u8> {
 fn ss3_function(final_byte: u8, m: Modifiers) -> Vec<u8> {
     match modifier_param(m) {
         1 => vec![0x1b, b'O', final_byte],
-        param => format!("[1;{}{}", param, final_byte as char).into_bytes(),
+        param => format!("\x1b[1;{}{}", param, final_byte as char).into_bytes(),
     }
 }
 
