@@ -42,19 +42,27 @@ impl RemoteClient {
         self
     }
 
+    /// 使っていた接続が切れていた（サーバーが終わっていた）ときだけ、1 回つなぎ直して送り直す。
+    /// 時間切れと、つないだばかりの接続での失敗は送り直さない。
     pub fn call(&self, req: &Request, payload: &[u8]) -> io::Result<(Response, Vec<u8>)> {
         let mut guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let conn = match guard.as_mut() {
-            Some(conn) => conn,
-            None => guard.insert(self.open()?),
-        };
-        let timeout = if conn.fresh { self.first_timeout } else { self.timeout };
-        conn.fresh = false;
-        let result = exchange(conn, req, payload, timeout);
-        if result.is_err() {
+        let mut retried = false;
+        loop {
+            let conn = match guard.as_mut() {
+                Some(conn) => conn,
+                None => guard.insert(self.open()?),
+            };
+            let was_fresh = conn.fresh;
+            let timeout = if conn.fresh { self.first_timeout } else { self.timeout };
+            conn.fresh = false;
+            let result = exchange(conn, req, payload, timeout);
+            let Err(e) = &result else { return result };
             *guard = None;
+            if retried || was_fresh || e.kind() != io::ErrorKind::BrokenPipe {
+                return result;
+            }
+            retried = true;
         }
-        result
     }
 
     fn open(&self) -> io::Result<Conn> {
@@ -238,19 +246,40 @@ mod tests {
         }
     }
 
-    #[test]
-    fn restarts_after_server_exit() {
-        let connector = Arc::new(FlakyConnector(AtomicUsize::new(0)));
-        struct Shared(Arc<FlakyConnector>);
-        impl Connector for Shared {
-            fn connect(&self) -> io::Result<Pair> {
-                self.0.connect()
-            }
+    struct Shared<C>(Arc<C>);
+    impl<C: Connector> Connector for Shared<C> {
+        fn connect(&self) -> io::Result<Pair> {
+            self.0.connect()
         }
+    }
+
+    /// 使っていた接続が切れていたら（WSL の再起動など）、1 回だけつなぎ直して送り直す。
+    #[test]
+    fn reconnects_once_after_server_exit() {
+        let connector = Arc::new(FlakyConnector(AtomicUsize::new(0)));
         let c = client(Shared(connector.clone()), Duration::from_secs(5));
         assert_eq!(c.call(&Request::Version, &[]).unwrap().0, Response::Version { id: "first".into() });
-        assert!(c.call(&Request::Version, &[]).is_err());
+        std::thread::sleep(Duration::from_millis(100));
         assert_eq!(c.call(&Request::Version, &[]).unwrap().0, Response::Version { id: "test-id".into() });
+        assert_eq!(connector.0.load(Ordering::SeqCst), 2);
+    }
+
+    /// つないだばかりの接続で失敗したら、送り直さない（起動できないサーバーを何度も起こさない）。
+    struct DeadConnector(AtomicUsize);
+    impl Connector for DeadConnector {
+        fn connect(&self) -> io::Result<Pair> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            pipes(|_, _| {})
+        }
+    }
+
+    #[test]
+    fn fresh_connection_failure_is_not_retried() {
+        let connector = Arc::new(DeadConnector(AtomicUsize::new(0)));
+        let c = client(Shared(connector.clone()), Duration::from_secs(5));
+        assert!(c.call(&Request::Version, &[]).is_err());
+        assert_eq!(connector.0.load(Ordering::SeqCst), 1);
+        assert!(c.call(&Request::Version, &[]).is_err());
         assert_eq!(connector.0.load(Ordering::SeqCst), 2);
     }
 
