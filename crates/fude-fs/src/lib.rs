@@ -6,10 +6,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod local;
+mod remote;
 pub mod serve;
 pub mod wire;
+#[cfg(windows)]
+pub mod wsl;
 
 pub use local::LocalFs;
+pub use remote::{Connector, RemoteClient, RemoteFs};
 
 /// プロジェクトのルートからの相対パス。"/" 区切り。空はルート自身。
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

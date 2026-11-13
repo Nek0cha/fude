@@ -33,6 +33,19 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     }
 }
 
+/// fude.exe の場所を書いたファイルの候補。自分の隣の host-exe（開発中の試験用の置き場所）、
+/// ~/.config/fude/host-exe の順。
+fn host_exe_files(own_exe: Option<&Path>, home: Option<&str>) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Some(dir) = own_exe.and_then(Path::parent) {
+        files.push(dir.join("host-exe"));
+    }
+    if let Some(home) = home {
+        files.push(Path::new(home).join(".config/fude/host-exe"));
+    }
+    files
+}
+
 /// host-exe と distro と絶対パスから、起動するコマンドと引数を作る。
 fn open_command(host_exe: &str, distro: &str, abs: &Path) -> (String, Vec<String>) {
     let args = vec!["--wsl".to_string(), distro.to_string(), abs.to_string_lossy().into_owned()];
@@ -72,11 +85,13 @@ fn main() {
 /// path を Windows の fude に開かせ、その終了コードを返す（OPEN_WAIT を過ぎたら 0）。
 fn open(path: &Path) -> Result<i32, String> {
     let distro = std::env::var("WSL_DISTRO_NAME").ok().filter(|d| !d.is_empty()).ok_or(NOT_IN_WSL)?;
-    let home = std::env::var("HOME").map_err(|_| "HOME が無い".to_string())?;
-    let host_exe = std::fs::read_to_string(Path::new(&home).join(".config/fude/host-exe"))
+    let own_exe = std::env::current_exe().ok();
+    let home = std::env::var("HOME").ok();
+    let host_exe = host_exe_files(own_exe.as_deref(), home.as_deref())
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
         .map(|s| s.trim().to_string())
-        .ok()
-        .filter(|s| !s.is_empty())
+        .find(|s| !s.is_empty())
         .ok_or(NO_HOST_EXE)?;
     let abs = std::fs::canonicalize(path).map_err(|e| format!("フォルダを開けない: {}: {e}", path.display()))?;
     if !abs.is_dir() {
@@ -118,6 +133,13 @@ mod tests {
         assert_eq!(parse(&["version"]), Ok(Cli::Version));
         assert_eq!(parse(&["~/x"]), Ok(Cli::Open(PathBuf::from("~/x"))));
         assert!(parse(&["a", "b"]).is_err());
+    }
+
+    #[test]
+    fn host_exe_files_prefer_own_dir() {
+        let files = host_exe_files(Some(Path::new("/tmp/t/fude")), Some("/home/x"));
+        assert_eq!(files, vec![PathBuf::from("/tmp/t/host-exe"), PathBuf::from("/home/x/.config/fude/host-exe")]);
+        assert_eq!(host_exe_files(None, Some("/home/x")), vec![PathBuf::from("/home/x/.config/fude/host-exe")]);
     }
 
     #[test]

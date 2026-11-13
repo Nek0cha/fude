@@ -9,6 +9,7 @@ fude-core = { path = "../fude-core" }
 fude-term = { path = "../fude-term" }
 futures = "0.3"
 fude-ipc = { path = "../fude-ipc" }
+fude-fs = { path = "../fude-fs" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
