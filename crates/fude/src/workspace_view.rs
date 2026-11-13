@@ -41,6 +41,10 @@ gpui_kit::actions!(
         CopySelection,
         PasteText,
         CloseItem,
+        OpenPalette,
+        GoToFile,
+        FindInFiles,
+        FindInTerminal,
     ]
 );
 
@@ -52,6 +56,10 @@ fn binding(key: &'static str, command: Command, context: Option<&'static str>) -
         Command::Close => KeyBinding::new(key, CloseItem, context),
         Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
         Command::Save => KeyBinding::new(key, SaveFile, context),
+        Command::OpenPalette => KeyBinding::new(key, OpenPalette, context),
+        Command::GoToFile => KeyBinding::new(key, GoToFile, context),
+        Command::FindInFiles => KeyBinding::new(key, FindInFiles, context),
+        Command::FindInTerminal => KeyBinding::new(key, FindInTerminal, context),
         other => default_binding(key, other),
     }
 }
@@ -85,7 +93,13 @@ fn default_binding(key: &'static str, command: Command) -> KeyBinding {
             _ => KeyBinding::new(key, ActivateProject9, None),
         },
         // 文脈の付くものは binding で扱う。
-        Command::Close | Command::ToggleTree | Command::Save => {
+        Command::Close
+        | Command::ToggleTree
+        | Command::Save
+        | Command::OpenPalette
+        | Command::GoToFile
+        | Command::FindInFiles
+        | Command::FindInTerminal => {
             unreachable!("binding で扱う")
         }
     }

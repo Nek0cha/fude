@@ -30,12 +30,24 @@ pub enum Command {
     ToggleTree,
     /// エディタ列のファイルを保存する。
     Save,
+    /// コマンドパレットを開く。
+    OpenPalette,
+    /// ファイル検索に絞ったパレットを開く。
+    GoToFile,
+    /// 全体検索のパレットを開く。
+    FindInFiles,
+    /// ターミナル内の検索欄を開く。ターミナルの中だけで効く。
+    FindInTerminal,
 }
 
 /// ターミナル以外にフォーカスがあるときだけ効かせる文脈。
 pub const NOT_TERMINAL: &str = "Workspace && !Terminal";
 /// エディタ列のファイルの中だけで効かせる文脈。
 pub const FILE_VIEW: &str = "FileView";
+/// ターミナルの中だけで効かせる文脈。
+pub const TERMINAL: &str = "Terminal";
+/// gpui-kit の入力欄（エディタも含む）の文脈。
+pub const INPUT: &str = "Input";
 
 const PROJECT_KEYS_MAC: [&str; 9] = ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9"];
 const PROJECT_KEYS_WIN: [&str; 9] =
@@ -56,6 +68,9 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("cmd-v", Command::Paste),
                 ("cmd-w", Command::Close),
                 ("cmd-b", Command::ToggleTree),
+                ("cmd-k", Command::OpenPalette),
+                ("cmd-p", Command::GoToFile),
+                ("cmd-shift-f", Command::FindInFiles),
             ],
             PROJECT_KEYS_MAC,
         ),
@@ -71,6 +86,10 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 // Ctrl+W と Ctrl+B はシェルのキー操作と重なるため、どこでも効くのは Shift 付きだけ（§10）。
                 ("ctrl-shift-w", Command::Close),
                 ("ctrl-shift-b", Command::ToggleTree),
+                // Ctrl+K / Ctrl+P もシェルのキー操作と重なるため、どこでも効くのは Shift 付きだけ（§10）。
+                ("ctrl-shift-k", Command::OpenPalette),
+                ("ctrl-shift-p", Command::GoToFile),
+                ("ctrl-shift-f", Command::FindInFiles),
             ],
             PROJECT_KEYS_WIN,
         ),
@@ -84,11 +103,18 @@ pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'sta
     match platform {
         Platform::MacOs => vec![
             ("cmd-s", Command::Save, FILE_VIEW),
+            ("cmd-f", Command::FindInTerminal, TERMINAL),
+            // gpui-kit の入力欄は ⌘⇧F を置換に割り当てているため、全体検索を優先させる（置換は ⌘⌥F）。
+            ("cmd-shift-f", Command::FindInFiles, INPUT),
         ],
         Platform::Windows => vec![
             ("ctrl-w", Command::Close, NOT_TERMINAL),
             ("ctrl-b", Command::ToggleTree, NOT_TERMINAL),
             ("ctrl-s", Command::Save, FILE_VIEW),
+            ("ctrl-k", Command::OpenPalette, NOT_TERMINAL),
+            ("ctrl-p", Command::GoToFile, NOT_TERMINAL),
+            // Ctrl+F はシェル（1 文字進む、fish の補完の確定）に、Ctrl+Shift+F は全体検索に使う。
+            ("ctrl-alt-f", Command::FindInTerminal, TERMINAL),
         ],
     }
 }
@@ -185,6 +211,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn palette_and_search_keys() {
+        let mac = default_bindings(Platform::MacOs);
+        assert!(mac.contains(&("cmd-k", Command::OpenPalette)));
+        assert!(mac.contains(&("cmd-p", Command::GoToFile)));
+        assert!(mac.contains(&("cmd-shift-f", Command::FindInFiles)));
+        let win = default_bindings(Platform::Windows);
+        assert!(win.contains(&("ctrl-shift-k", Command::OpenPalette)));
+        assert!(win.contains(&("ctrl-shift-p", Command::GoToFile)));
+        assert!(win.contains(&("ctrl-shift-f", Command::FindInFiles)));
+        // ターミナルの Ctrl+K / Ctrl+P（行末まで消す、履歴）を奪わない（§10）。
+        assert!(!win.iter().any(|(k, _)| *k == "ctrl-k" || *k == "ctrl-p"));
+        let wctx = context_bindings(Platform::Windows);
+        assert!(wctx.contains(&("ctrl-k", Command::OpenPalette, NOT_TERMINAL)));
+        assert!(wctx.contains(&("ctrl-p", Command::GoToFile, NOT_TERMINAL)));
+    }
+
+    #[test]
+    fn terminal_find_keys() {
+        assert!(context_bindings(Platform::MacOs).contains(&("cmd-f", Command::FindInTerminal, TERMINAL)));
+        let win = context_bindings(Platform::Windows);
+        assert!(win.contains(&("ctrl-alt-f", Command::FindInTerminal, TERMINAL)));
+        // Ctrl+F はシェル（1 文字進む、fish の補完の確定）に渡す。
+        assert!(!win.iter().any(|(k, _, _)| *k == "ctrl-f"));
+    }
+
+    #[test]
+    fn mac_find_in_files_beats_editor_replace() {
+        assert!(context_bindings(Platform::MacOs).contains(&("cmd-shift-f", Command::FindInFiles, INPUT)));
     }
 
     #[test]
