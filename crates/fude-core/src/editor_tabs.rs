@@ -86,13 +86,25 @@ impl EditorTabs {
         self.items.iter().position(|i| i.rel == rel)
     }
 
-    /// ファイルかフォルダの名前の変更に、タブの相対パスを付いていかせる。
+    /// ファイルかフォルダの名前の変更に、タブの相対パスを付いていかせる。変えた先と同じパスのタブ
+    /// （消したファイルのタブが残っていた場合）は外し、同じパスのタブを 2 つ作らない。
     pub fn rename(&mut self, from: &str, to: &str) {
-        for item in &mut self.items {
-            if let Some(rel) = renamed_rel(&item.rel, from, to) {
-                item.rel = rel;
+        let active = self.active().map(|i| renamed_rel(&i.rel, from, to).unwrap_or_else(|| i.rel.clone()));
+        let renamed: Vec<Option<String>> = self.items.iter().map(|i| renamed_rel(&i.rel, from, to)).collect();
+        let targets: Vec<String> = renamed.iter().flatten().cloned().collect();
+        let items = std::mem::take(&mut self.items);
+        for (item, new) in items.into_iter().zip(renamed) {
+            match new {
+                Some(rel) => self.items.push(EditorItem { rel, ..item }),
+                None if targets.contains(&item.rel) => {}
+                None => self.items.push(item),
             }
         }
+        self.active = match active.and_then(|r| self.position(&r)) {
+            Some(i) => Some(i),
+            None if self.items.is_empty() => None,
+            None => Some(0),
+        };
     }
 
     pub fn is_empty(&self) -> bool {
@@ -175,6 +187,20 @@ mod tests {
         assert_eq!(t.active().unwrap().rel, "a");
         t.cycle(-1);
         assert_eq!(t.active().unwrap().rel, "b");
+    }
+
+    #[test]
+    fn rename_onto_open_tab_keeps_one() {
+        // b.rs のタブが残ったまま a.rs を b.rs に変えた。同じパスのタブを 2 つ作らない。
+        let mut t = EditorTabs::default();
+        for r in ["b.rs", "a.rs", "c.rs"] {
+            t.open(it(r));
+        }
+        t.select(1);
+        t.rename("a.rs", "b.rs");
+        let rels: Vec<&str> = t.items().iter().map(|i| i.rel.as_str()).collect();
+        assert_eq!(rels, ["b.rs", "c.rs"]);
+        assert_eq!(t.active().unwrap().rel, "b.rs");
     }
 
     #[test]

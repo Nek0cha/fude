@@ -9,7 +9,7 @@ use fude_core::workspace::ProjectId;
 use fude_fs::ProjectFs;
 use gpui_kit::*;
 
-use crate::dialog::{ButtonRole, Dialog, DialogButton};
+use crate::dialog::{ButtonRole, Dialog, DialogButton, error_text};
 use crate::columns::{Place, TREE_W, columns};
 use crate::file_view::{FileView, FileViewEvent, initial_mode};
 use crate::main_area::ColumnEl;
@@ -49,10 +49,38 @@ pub(crate) struct EditorSlot {
     loading: HashSet<String>,
     /// 作ったあと、Git の状態が届いたら表示の仕方を決め直すもの。
     auto_mode: HashSet<String>,
+    /// 作り終えたらフォーカスを当てるもの（人が開いた・選んだもの）。描画が裏で作るものは入れない。
+    focus_on_install: HashSet<String>,
+    /// ProjectFs を用意できなかったもの。開き直す・選び直すまで作り直さない（描画のたびに試さない）。
+    failed: HashSet<String>,
 }
 
 impl EditorSlot {
-    fn forget(&mut self, rel: &str) -> Option<Entity<FileView>> {
+    pub(crate) fn request_focus(&mut self, rel: &str) {
+        self.focus_on_install.insert(rel.to_string());
+    }
+
+    /// rel を作り終えたときにフォーカスを当てるか。一度使ったら消す。
+    pub(crate) fn take_focus_request(&mut self, rel: &str) -> bool {
+        self.focus_on_install.remove(rel)
+    }
+
+    pub(crate) fn mark_failed(&mut self, rel: &str) {
+        self.failed.insert(rel.to_string());
+    }
+
+    pub(crate) fn clear_failed(&mut self, rel: &str) {
+        self.failed.remove(rel);
+    }
+
+    /// rel のビューを作り始めてよいか（用意している途中でも、失敗したままでもない）。
+    pub(crate) fn can_create(&self, rel: &str) -> bool {
+        !self.loading.contains(rel) && !self.failed.contains(rel)
+    }
+
+    pub(crate) fn forget(&mut self, rel: &str) -> Option<Entity<FileView>> {
+        self.focus_on_install.remove(rel);
+        self.failed.remove(rel);
         self.goto.remove(rel);
         self.subs.remove(rel);
         self.loading.remove(rel);
@@ -61,7 +89,7 @@ impl EditorSlot {
     }
 
     /// 名前の変更に、表のキーを付いていかせる。
-    fn rename(&mut self, from: &str, to: &str) {
+    pub(crate) fn rename(&mut self, from: &str, to: &str) {
         fn rekey<V>(map: &mut HashMap<String, V>, from: &str, to: &str) {
             let keys: Vec<String> = map.keys().filter(|k| renamed_rel(k, from, to).is_some()).cloned().collect();
             for k in keys {
@@ -73,7 +101,11 @@ impl EditorSlot {
         rekey(&mut self.views, from, to);
         rekey(&mut self.goto, from, to);
         rekey(&mut self.subs, from, to);
-        self.auto_mode = self.auto_mode.iter().map(|k| renamed_rel(k, from, to).unwrap_or_else(|| k.clone())).collect();
+        let rename_set = |set: &HashSet<String>| set.iter().map(|k| renamed_rel(k, from, to).unwrap_or_else(|| k.clone())).collect();
+        self.auto_mode = rename_set(&self.auto_mode);
+        self.focus_on_install = rename_set(&self.focus_on_install);
+        // 失敗したものは、新しい名前で試し直させる。
+        self.failed.retain(|k| renamed_rel(k, from, to).is_none());
         // 用意している途中のものは捨て、新しい名前で作り直させる（選んだときに作る）。
         self.loading.retain(|k| renamed_rel(k, from, to).is_none());
     }
@@ -87,6 +119,33 @@ pub(crate) fn unsaved_views(views: &[(String, bool)]) -> Vec<String> {
 /// 監視で変わったと届いたもの（changed）のうち、開いているビュー（open）のもの。選んでいないタブも含む。
 pub(crate) fn watched_views(changed: &[&str], open: &[&str]) -> Vec<String> {
     open.iter().filter(|rel| changed.contains(rel)).map(|rel| rel.to_string()).collect()
+}
+
+/// 名前を dest に変えると、未保存の変更（dirty の相対パス）を持つタブを置き換えてしまうなら、そのパス。
+/// 置き換えたタブの変更を保存すると、名前を変えたファイルの中身を潰すため、名前の変更を止める。
+pub(crate) fn rename_blocked(dest: &str, dirty: &[&str]) -> Option<String> {
+    dirty.iter().find(|d| renamed_rel(d, dest, dest).is_some()).map(|d| d.to_string())
+}
+
+/// タブを閉じたあとのフォーカス。
+#[derive(Debug, PartialEq)]
+pub(crate) enum AfterClose {
+    /// 今のまま（ターミナルなどにあるフォーカスを動かさない）。
+    Keep,
+    /// エディタ列の、新しく選ばれたタブへ。
+    ShowActive,
+    /// エディタ列が空になった。もう一方の側（ターミナル）へ。
+    RestoreFocus,
+}
+
+pub(crate) fn focus_after_close(closed_was_active: bool, focus_in_editor: bool, now_empty: bool) -> AfterClose {
+    if now_empty {
+        AfterClose::RestoreFocus
+    } else if closed_was_active || focus_in_editor {
+        AfterClose::ShowActive
+    } else {
+        AfterClose::Keep
+    }
 }
 
 /// 開いたあとにすること。
@@ -248,6 +307,8 @@ impl WorkspaceView {
                 window.focus(&view.read(cx).focus_handle(), cx);
             }
             _ => {
+                slot.clear_failed(&rel);
+                slot.request_focus(&rel);
                 if let Some(at) = at {
                     slot.goto.insert(rel.clone(), at);
                 }
@@ -274,7 +335,12 @@ impl WorkspaceView {
         let Some(rel) = rel else { return };
         match self.editors.get(&project).and_then(|s| s.views.get(&rel)).cloned() {
             Some(view) => window.focus(&view.read(cx).focus_handle(), cx),
-            None => self.create_view(project, rel, window, cx),
+            None => {
+                let slot = self.editors.entry(project).or_default();
+                slot.clear_failed(&rel);
+                slot.request_focus(&rel);
+                self.create_view(project, rel, window, cx);
+            }
         }
     }
 
@@ -285,7 +351,7 @@ impl WorkspaceView {
         let Some(rel) = p.editor.active().map(|i| i.rel.clone()) else { return };
         let project = p.id;
         let slot = self.editors.get(&project);
-        if slot.is_some_and(|s| s.views.contains_key(&rel) || s.loading.contains(&rel)) {
+        if slot.is_some_and(|s| s.views.contains_key(&rel) || !s.can_create(&rel)) {
             return;
         }
         self.create_view(project, rel, window, cx);
@@ -302,19 +368,23 @@ impl WorkspaceView {
             .map(|i| i.rel.clone());
         let Some(rel) = rel else { return };
         let view = self.editors.get(&project).and_then(|s| s.views.get(&rel)).cloned();
+        let focus_in_editor = self.project_views(project).iter().any(|v| v.read(cx).focus_handle().contains_focused(window, cx));
         let close = move |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<WorkspaceView>| {
             // 確かめている間に並びが変わっていてもよいよう、位置は相対パスで引き直す。
             let Some(tabs) = this.workspace.editor_mut(project) else { return };
             let Some(index) = tabs.position(&rel) else { return };
+            let was_active = tabs.active_index() == Some(index);
             tabs.close(index);
             let now_empty = tabs.is_empty();
             let view = this.editors.get_mut(&project).and_then(|s| s.forget(&rel));
-            if now_empty {
-                // 消える動きの間だけ描き続ける。
-                this.editor_anim.closing = view;
-                this.restore_focus(window, cx);
-            } else {
-                this.show_active_tab(project, window, cx);
+            match focus_after_close(was_active, focus_in_editor, now_empty) {
+                AfterClose::RestoreFocus => {
+                    // 消える動きの間だけ描き続ける。
+                    this.editor_anim.closing = view;
+                    this.restore_focus(window, cx);
+                }
+                AfterClose::ShowActive => this.show_active_tab(project, window, cx),
+                AfterClose::Keep => {}
             }
             cx.notify();
         };
@@ -385,15 +455,22 @@ impl WorkspaceView {
         let task = cx.background_spawn(async move { project_fs(&root, &hosts) });
         let window_handle = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let fs: Arc<dyn ProjectFs> = match task.await {
-                Ok(fs) => fs,
-                Err(e) => {
-                    eprintln!("ファイルを開けない: {rel}: {e}");
-                    return;
-                }
-            };
+            let result = task.await;
             cx.update_window(window_handle, |_, window, cx| {
-                this.update(cx, |this, cx| this.install_view(project, rel, fs, window, cx)).ok();
+                this.update(cx, |this, cx| match result {
+                    Ok(fs) => this.install_view(project, rel, fs, window, cx),
+                    Err(e) => {
+                        let Some(slot) = this.editors.get_mut(&project) else { return };
+                        // 待っている間にタブを閉じたか名前が変わったなら、知らせない。
+                        if !slot.loading.remove(&rel) {
+                            return;
+                        }
+                        slot.mark_failed(&rel);
+                        slot.focus_on_install.remove(&rel);
+                        this.show_error(error_text("ファイルを開けません", &rel, &e), window, cx);
+                    }
+                })
+                .ok();
             })
             .ok();
         })
@@ -401,13 +478,14 @@ impl WorkspaceView {
     }
 
     fn install_view(&mut self, project: ProjectId, rel: String, fs: Arc<dyn ProjectFs>, window: &mut Window, cx: &mut Context<Self>) {
-        let slot = self.editors.entry(project).or_default();
-        // 待っている間に、タブを閉じたか名前が変わった。
+        // 待っている間に、プロジェクトかタブを閉じたか、名前が変わった。
+        let Some(slot) = self.editors.get_mut(&project) else { return };
         if !slot.loading.remove(&rel) {
             return;
         }
         let auto = slot.auto_mode.remove(&rel);
         let goto = slot.goto.remove(&rel);
+        let want_focus = slot.take_focus_request(&rel);
         let Some(p) = self.workspace.projects().iter().find(|p| p.id == project) else { return };
         let Some(item) = p.editor.position(&rel).map(|i| p.editor.items()[i].clone()) else { return };
         let is_active =
@@ -434,7 +512,8 @@ impl WorkspaceView {
         let slot = self.editors.entry(project).or_default();
         slot.views.insert(rel.clone(), view);
         slot.subs.insert(rel, sub);
-        if is_active {
+        // 描画が裏で作ったもの（プロジェクトを切り替えたとき）は、ターミナルからフォーカスを奪わない。
+        if is_active && want_focus {
             window.focus(&focus, cx);
         }
         cx.notify();
@@ -443,7 +522,53 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{AfterOpen, Opened, after_open, unsaved_views, watched_views};
+    use super::{
+        AfterClose, AfterOpen, EditorSlot, Opened, after_open, focus_after_close, rename_blocked, unsaved_views, watched_views,
+    };
+
+    #[test]
+    fn focus_request_is_consumed_and_follows_rename() {
+        let mut slot = EditorSlot::default();
+        slot.request_focus("a.rs");
+        slot.rename("a.rs", "b.rs");
+        assert!(!slot.take_focus_request("a.rs"));
+        assert!(slot.take_focus_request("b.rs"));
+        // 一度使ったら残らない（描画が作ったビューはフォーカスを取らない）。
+        assert!(!slot.take_focus_request("b.rs"));
+    }
+
+    #[test]
+    fn failed_tab_is_not_retried_until_cleared() {
+        let mut slot = EditorSlot::default();
+        slot.mark_failed("a.rs");
+        assert!(!slot.can_create("a.rs"));
+        // 開き直す・選び直すと、もう一度試す。
+        slot.clear_failed("a.rs");
+        assert!(slot.can_create("a.rs"));
+        slot.forget("a.rs");
+        assert!(slot.can_create("a.rs"));
+    }
+
+    #[test]
+    fn closing_background_tab_keeps_focus() {
+        // 選んでいないタブを閉じても、フォーカス（ターミナルなど）は動かさない。
+        assert_eq!(focus_after_close(false, false, false), AfterClose::Keep);
+        // 選択中のタブを閉じたら隣のタブへ。エディタ列にフォーカスがあったときも同じ。
+        assert_eq!(focus_after_close(true, false, false), AfterClose::ShowActive);
+        assert_eq!(focus_after_close(false, true, false), AfterClose::ShowActive);
+        // 最後のタブを閉じたら、もう一方の側（ターミナル）へ。
+        assert_eq!(focus_after_close(true, true, true), AfterClose::RestoreFocus);
+        assert_eq!(focus_after_close(false, false, true), AfterClose::RestoreFocus);
+    }
+
+    #[test]
+    fn rename_onto_unsaved_tab_is_blocked() {
+        let dirty = ["b.rs", "src/x/mod.rs"];
+        assert_eq!(rename_blocked("b.rs", &dirty).as_deref(), Some("b.rs"));
+        assert_eq!(rename_blocked("src/x", &dirty).as_deref(), Some("src/x/mod.rs"));
+        assert_eq!(rename_blocked("c.rs", &dirty), None);
+        assert_eq!(rename_blocked("src/xy", &dirty), None);
+    }
 
     #[test]
     fn unsaved_includes_inactive_tabs() {

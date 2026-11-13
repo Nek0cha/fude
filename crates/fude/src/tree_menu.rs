@@ -203,6 +203,16 @@ impl WorkspaceView {
             _ => target.clone(),
         };
         let Ok(dest) = parent.join(&name) else { return };
+        if kind == EditKind::Rename {
+            let views = self.project_views(project);
+            let dirty: Vec<String> = views.iter().filter(|v| v.read(cx).is_dirty()).map(|v| v.read(cx).rel.clone()).collect();
+            let dirty: Vec<&str> = dirty.iter().map(String::as_str).collect();
+            if let Some(blocked) = crate::editor_column::rename_blocked(dest.as_str(), &dirty) {
+                let message = format!("{blocked} に保存していない変更があります。保存するか閉じてから、名前を変えてください。");
+                self.show_error(message, window, cx);
+                return;
+            }
+        }
         self.tree.edit = None;
         window.focus(&self.tree.focus, cx);
         let task = cx.background_spawn({
