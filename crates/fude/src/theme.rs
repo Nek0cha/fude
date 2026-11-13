@@ -100,6 +100,9 @@ pub mod motion {
     pub const POPUP_IN: Duration = Duration::from_millis(120);
     pub const POPUP_OUT: Duration = Duration::from_millis(80);
 
+    /// ホーム画面とプロジェクトの画面の切り替え。
+    pub const SCREEN_FADE: Duration = Duration::from_millis(160);
+
     pub fn ease_out_quint(t: f32) -> f32 {
         1.0 - (1.0 - t).powi(5)
     }

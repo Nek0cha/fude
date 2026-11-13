@@ -1,6 +1,6 @@
 //! ルートのビュー。全体の配置と、アクションの処理を受け持つ。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,6 +10,7 @@ use fude_core::recent::RecentList;
 use fude_core::session::{self, SessionData, WindowGeom};
 use fude_core::settings::{LastProjectClosed, Settings};
 use fude_core::workspace::{OpenMode, PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
+use fude_core::motion::Fade;
 use fude_ipc::Message;
 use gpui_kit::*;
 
@@ -17,6 +18,7 @@ use crate::hover::{HoverFades, HoverKey};
 use crate::main_area::render_main_area;
 use crate::popup::Popup;
 use crate::terminal_view::{TerminalEvent, TerminalView};
+use crate::theme::motion::{SCREEN_FADE, ease_out};
 use crate::theme::{Theme, ui_font};
 use crate::wsl_host::{WslHosts, project_fs};
 
@@ -163,8 +165,8 @@ pub struct WorkspaceView {
     /// インストール済みの WSL のディストリビューション。起動時に 1 回だけ読む。
     pub(crate) distros: Vec<String>,
     /// WSL のプロジェクトのファイルへのアクセス（ディストリビューションごとの fude serve）。
-    wsl_hosts: Arc<WslHosts>,
-    focus: FocusHandle,
+    pub(crate) wsl_hosts: Arc<WslHosts>,
+    pub(crate) focus: FocusHandle,
     /// セッションの保存先。環境変数から決まらなければ保存しない。
     session_path: Option<PathBuf>,
     /// 最後に書いた内容と、書く予定の内容。同じ内容を何度も書かないために持つ。
@@ -181,6 +183,14 @@ pub struct WorkspaceView {
     recent_path: Option<PathBuf>,
     /// 「前回の続き」で戻す状態。最後にプロジェクトが 1 個以上あった時点のもの。
     pub(crate) last_session: Option<SessionData>,
+    /// ホーム画面で薄く出す（フォルダが見つからない）プロジェクト。
+    pub(crate) missing_roots: HashSet<ProjectRoot>,
+    /// ホーム画面の「最近」の右クリックメニュー。
+    pub(crate) home_menu: Option<(ProjectRoot, crate::popup::Popup)>,
+    /// ホーム画面とプロジェクトの画面の切り替えのフェード（新しい画面の不透明度）。
+    screen_fade: Fade,
+    /// 前の描画でホーム画面を出していたか。
+    showing_home: Option<bool>,
     _activation: Subscription,
     _bounds: Subscription,
     _quit: Subscription,
@@ -231,6 +241,10 @@ impl WorkspaceView {
             recent,
             recent_path,
             last_session,
+            missing_roots: HashSet::new(),
+            home_menu: None,
+            screen_fade: Fade::settled(1.0),
+            showing_home: None,
             saved: None,
             pending: None,
             save_task: None,
@@ -271,6 +285,16 @@ impl WorkspaceView {
         }
         let Some(data) = self.last_session.clone() else { return };
         self.workspace = Workspace::restore(&data, &|p| p.is_dir());
+        // 戻したプロジェクトも最近開いたものに記録する。選択中のものを最後にして、一覧の先頭にする。
+        let active = self.workspace.active_project().map(|p| p.id);
+        let mut roots: Vec<(bool, ProjectRoot)> =
+            self.workspace.projects().iter().map(|p| (Some(p.id) == active, p.root.clone())).collect();
+        roots.sort_by_key(|(is_active, _)| *is_active);
+        let now = now_secs();
+        for (_, root) in roots {
+            self.recent.touch(root, now);
+        }
+        self.save_recent(cx);
         self.refocus_pane();
         self.refresh_active_branch(cx);
         cx.notify();
@@ -535,13 +559,34 @@ impl Render for WorkspaceView {
         let (bg, fg) = (theme.bg_window, theme.fg_default);
         self.sync_terminals(window, cx);
         self.schedule_save(window, cx);
-        let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
-        let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
-        let main = render_main_area(active_tab, &terminals, cx);
+        let home = self.workspace.projects().is_empty();
+        if self.showing_home != Some(home) {
+            // 最初の描画ではフェードしない。
+            if self.showing_home.is_some() {
+                self.screen_fade = Fade::settled(0.0);
+                self.screen_fade.animate_to(1.0, SCREEN_FADE, ease_out, now);
+            }
+            if home {
+                self.check_missing_roots(cx);
+            }
+            self.showing_home = Some(home);
+        }
+        if self.screen_fade.is_animating(now) {
+            window.request_animation_frame();
+        }
+        let main = if home {
+            self.render_home(cx, now)
+        } else {
+            let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
+            let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
+            render_main_area(active_tab, &terminals, cx)
+        };
+        let main = main.opacity(self.screen_fade.value(now));
         let title_row = self.render_title_row(window, cx, now);
         let rail = self.render_rail(cx, now);
         let menu = self.render_shell_menu(window, cx, now);
         let project_menu = self.render_project_menu(window, cx, now);
+        let home_menu = self.render_home_menu(window, cx, now);
 
         div()
             .id("workspace")
@@ -590,6 +635,7 @@ impl Render for WorkspaceView {
             )
             .children(menu)
             .children(project_menu)
+            .children(home_menu)
     }
 }
 

@@ -13,4 +13,5 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     ArrowDown,
     FolderOpen,
     Copy,
+    RotateCcwClock,
 ]);

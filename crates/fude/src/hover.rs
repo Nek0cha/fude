@@ -24,6 +24,9 @@ pub enum HoverKey {
     ScrollToBottom,
     /// ＋の右クリックメニューの項目。
     MenuItem(usize),
+    HomeOpenFolder,
+    HomeResume,
+    HomeItem(usize),
 }
 
 /// 部品ごとのホバーの状態と、カーソルがウィンドウの上にあるかの状態を持つ。
