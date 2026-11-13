@@ -70,10 +70,10 @@ impl WorkspaceView {
         if let Some(view) = self.active_panel_view()
             && view.read(cx).focus_handle().contains_focused(window, cx)
         {
-            return FocusArea::RightPanel;
+            return FocusArea::Editor;
         }
         if self.tree.open && self.tree.focus.contains_focused(window, cx) {
-            return FocusArea::LeftPanel;
+            return FocusArea::Tree;
         }
         for (id, view) in self.terminal_views() {
             if view.read(cx).focus_handle().contains_focused(window, cx) {
@@ -89,7 +89,7 @@ impl WorkspaceView {
             return;
         }
         let focus = self.focus_area(window, cx);
-        let target = close_target(&self.workspace, focus, self.panel_open(), self.tree.open);
+        let target = close_target(&self.workspace, focus, self.tree.open);
         self.request_close(target, window, cx);
     }
 
@@ -97,8 +97,9 @@ impl WorkspaceView {
     pub(crate) fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         match target {
             CloseTarget::Nothing => {}
-            CloseTarget::RightPanel => self.close_panel(window, cx),
-            CloseTarget::LeftPanel => self.close_tree(window, cx),
+            // 計画5の 1 ファイルの間は、タブを閉じる＝右パネルを閉じる（Task 7 でタブごとに閉じる）。
+            CloseTarget::EditorTab(_) => self.close_panel(window, cx),
+            CloseTarget::Tree => self.close_tree(window, cx),
             CloseTarget::Pane(pane) => self.confirm_busy(vec![pane], window, cx, move |this, _, cx| {
                 this.workspace.close_pane(pane);
                 this.refocus_pane();

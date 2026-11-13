@@ -22,7 +22,7 @@ use crate::language::language_for;
 use crate::theme::{Theme, mono_font, size};
 use crate::title_row::icon;
 
-gpui_kit::actions!(file_view, [SaveFile, PanelBack, PanelForward, ClosePanel]);
+gpui_kit::actions!(file_view, [SaveFile, ClosePanel]);
 
 /// Esc で右パネルを閉じる（FileView の文脈）。
 pub fn bind_file_view_keys(cx: &mut App) {
@@ -590,8 +590,6 @@ impl Render for FileView {
             .key_context("FileView")
             .on_drop(|_: &ExternalPaths, _, cx| cx.stop_propagation())
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_from_key(cx)))
-            .on_action(cx.listener(|_, _: &PanelBack, _, cx| cx.emit(FileViewEvent::Back)))
-            .on_action(cx.listener(|_, _: &PanelForward, _, cx| cx.emit(FileViewEvent::Forward)))
             // エディタは、閉じる検索欄や選択が無いときに Esc を親へ回す。そのときだけ右パネルを閉じる。
             .on_action(cx.listener(|_, _: &gpui_kit::base::input::Escape, _, cx| cx.emit(FileViewEvent::Close)))
             .on_action(cx.listener(|_, _: &ClosePanel, _, cx| cx.emit(FileViewEvent::Close)))

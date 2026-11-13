@@ -24,20 +24,17 @@ pub enum Command {
     Copy,
     /// クリップボードの文字列をターミナルに貼り付ける。ターミナルの中だけで効く。
     Paste,
-    /// 閉じる（右パネル、ペイン、タブ、プロジェクトの順。設計書 §5.12）。
+    /// 閉じる（エディタのタブ、ツリー、ペイン、タブ、プロジェクトの順。設計書 §5.12）。
     Close,
     /// ファイルツリーの開閉。
     ToggleTree,
-    /// 右パネルのファイルを保存する。
+    /// エディタ列のファイルを保存する。
     Save,
-    /// 右パネルの履歴を戻る／進む。
-    PanelBack,
-    PanelForward,
 }
 
 /// ターミナル以外にフォーカスがあるときだけ効かせる文脈。
 pub const NOT_TERMINAL: &str = "Workspace && !Terminal";
-/// 右パネルのファイルの中だけで効かせる文脈。
+/// エディタ列のファイルの中だけで効かせる文脈。
 pub const FILE_VIEW: &str = "FileView";
 
 const PROJECT_KEYS_MAC: [&str; 9] = ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9"];
@@ -87,15 +84,11 @@ pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'sta
     match platform {
         Platform::MacOs => vec![
             ("cmd-s", Command::Save, FILE_VIEW),
-            ("ctrl--", Command::PanelBack, FILE_VIEW),
-            ("ctrl-shift--", Command::PanelForward, FILE_VIEW),
         ],
         Platform::Windows => vec![
             ("ctrl-w", Command::Close, NOT_TERMINAL),
             ("ctrl-b", Command::ToggleTree, NOT_TERMINAL),
             ("ctrl-s", Command::Save, FILE_VIEW),
-            ("alt-left", Command::PanelBack, FILE_VIEW),
-            ("alt-right", Command::PanelForward, FILE_VIEW),
         ],
     }
 }
@@ -178,11 +171,20 @@ mod tests {
         assert!(context_bindings(Platform::Windows).contains(&("ctrl-b", Command::ToggleTree, NOT_TERMINAL)));
         let mac = context_bindings(Platform::MacOs);
         assert!(mac.contains(&("cmd-s", Command::Save, FILE_VIEW)));
-        assert!(mac.contains(&("ctrl--", Command::PanelBack, FILE_VIEW)));
         let win = context_bindings(Platform::Windows);
         assert!(win.contains(&("ctrl-s", Command::Save, FILE_VIEW)));
-        assert!(win.contains(&("alt-left", Command::PanelBack, FILE_VIEW)));
-        assert!(win.contains(&("alt-right", Command::PanelForward, FILE_VIEW)));
+    }
+
+    #[test]
+    fn file_view_has_only_save() {
+        // 計画5の右パネルの履歴のキー（戻る／進む）は無くした。ファイルの中で効くのは保存だけ。
+        for platform in BOTH {
+            for (key, command, context) in context_bindings(platform) {
+                if context == FILE_VIEW {
+                    assert_eq!(command, Command::Save, "{key}");
+                }
+            }
+        }
     }
 
     #[test]

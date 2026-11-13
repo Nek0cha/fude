@@ -46,14 +46,12 @@ gpui_kit::actions!(
 
 /// Command と文脈を GPUI のキーバインドにする。
 fn binding(key: &'static str, command: Command, context: Option<&'static str>) -> KeyBinding {
-    use crate::file_view::{PanelBack, PanelForward, SaveFile};
+    use crate::file_view::SaveFile;
     use crate::tree_view::ToggleTree;
     match command {
         Command::Close => KeyBinding::new(key, CloseItem, context),
         Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
         Command::Save => KeyBinding::new(key, SaveFile, context),
-        Command::PanelBack => KeyBinding::new(key, PanelBack, context),
-        Command::PanelForward => KeyBinding::new(key, PanelForward, context),
         other => default_binding(key, other),
     }
 }
@@ -87,7 +85,7 @@ fn default_binding(key: &'static str, command: Command) -> KeyBinding {
             _ => KeyBinding::new(key, ActivateProject9, None),
         },
         // 文脈の付くものは binding で扱う。
-        Command::Close | Command::ToggleTree | Command::Save | Command::PanelBack | Command::PanelForward => {
+        Command::Close | Command::ToggleTree | Command::Save => {
             unreachable!("binding で扱う")
         }
     }
