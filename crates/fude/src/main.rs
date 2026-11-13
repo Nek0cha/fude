@@ -3,6 +3,7 @@
 mod assets;
 mod cli;
 mod dialog;
+mod file_view;
 mod home;
 mod hover;
 mod instance;
@@ -108,7 +109,9 @@ fn main() {
             .add_fonts(vec![Cow::Borrowed(MONO_REGULAR), Cow::Borrowed(MONO_BOLD)])
             .expect("同梱の等幅フォントを読み込めない");
         cx.set_global(Theme::dark());
+        theme::apply_component_theme(cx);
         bind_keys(cx);
+        file_view::bind_file_view_keys(cx);
         // ウィンドウは 1 枚なので、閉じたらアプリも終える（macOS でアプリだけ残らないように）。
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
