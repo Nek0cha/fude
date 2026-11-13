@@ -81,6 +81,8 @@ impl WorkspaceView {
                 )
             })
             .child(self.drag_area("title-gap", cx).flex_1().h_full().min_w(px(24.)))
+            .children(self.render_changes_button(cx, now))
+            .child(div().w(px(6.)).flex_shrink_0())
             .child(self.render_pill(cx))
             .child(div().w(px(8.)).h_full().flex_shrink_0())
             .when(cfg!(windows), |row| row.child(self.render_caption_buttons(window, cx, now)))

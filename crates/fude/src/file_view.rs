@@ -103,6 +103,9 @@ pub struct FileView {
     nav: (bool, bool),
     /// 読み込みのあとに置くカーソルの位置（0 始まりの行と列）。
     pending_cursor: Option<(u32, u32)>,
+    /// Git の状態を読む前に開いたため、表示の仕方を仮に決めている。状態が届いたら決め直す
+    /// （利用者が切り替えたら、決め直さない）。
+    auto_mode: bool,
     /// 読み込んで、まだエディタに入れていない中身。
     pending_doc: Option<TextDoc>,
     focus: FocusHandle,
@@ -127,6 +130,7 @@ impl FileView {
             nav: (false, false),
             pending_cursor: None,
             pending_doc: None,
+            auto_mode: false,
             focus: cx.focus_handle(),
             _subs: Vec::new(),
         };
@@ -146,12 +150,23 @@ impl FileView {
         self.mode
     }
 
+    /// Git の状態がまだ無いときに開いた（set_mark で表示の仕方を決め直す）。
+    pub fn set_auto_mode(&mut self, auto: bool) {
+        self.auto_mode = auto;
+    }
+
     pub fn set_nav(&mut self, can_back: bool, can_forward: bool) {
         self.nav = (can_back, can_forward);
     }
 
     /// Git の記号が変わったら（状態の読み直し）、差分を読み直す。
     pub fn set_mark(&mut self, mark: Option<GitMark>, cx: &mut Context<Self>) {
+        if self.auto_mode {
+            self.auto_mode = false;
+            if !self.dirty {
+                self.mode = initial_mode(mark);
+            }
+        }
         if self.mark != mark {
             self.mark = mark;
             if !has_diff(mark) && self.mode == FileMode::Diff {
@@ -175,6 +190,7 @@ impl FileView {
     }
 
     pub fn set_mode(&mut self, mode: FileMode, cx: &mut Context<Self>) {
+        self.auto_mode = false;
         if mode == FileMode::Full && self.mark == Some(GitMark::Deleted) {
             return;
         }

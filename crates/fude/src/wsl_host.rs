@@ -48,6 +48,11 @@ mod imp {
             WslHosts { clients: Default::default(), bin: default_bin(&|k| std::env::var(k).ok()) }
         }
 
+        /// WSL 側の fude の置き場所。
+        pub fn bin(&self) -> &str {
+            &self.bin
+        }
+
         /// 裏のスレッドから呼ぶ（WSL の起動を待つことがある）。LINUX_BIN が None なら Err（同梱されていない）。
         pub fn client(&self, distro: &str) -> io::Result<Arc<RemoteClient>> {
             let slot = {

@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod assets;
+mod changes_menu;
 mod cli;
 mod dialog;
 mod file_view;
@@ -11,6 +12,7 @@ mod language;
 mod main_area;
 mod open_file;
 mod popup;
+mod project_state;
 mod project_menu;
 mod rail;
 mod right_panel;

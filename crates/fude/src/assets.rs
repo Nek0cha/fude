@@ -17,4 +17,5 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     ChevronLeft,
     ChevronRight,
     ArrowUp,
+    FileDiff,
 ]);

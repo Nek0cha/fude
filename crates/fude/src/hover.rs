@@ -25,6 +25,8 @@ pub enum HoverKey {
     /// ＋の右クリックメニューの項目。
     MenuItem(usize),
     HomeOpenFolder,
+    /// タイトル行の変更件数。
+    Changes,
     HomeResume,
     HomeItem(usize),
 }

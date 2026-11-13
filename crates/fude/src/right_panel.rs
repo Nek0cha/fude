@@ -29,6 +29,8 @@ pub(crate) struct PanelSlot {
     pub view: Option<Entity<FileView>>,
     /// 開くのを待っているファイル（ProjectFs を裏で用意している間）。
     pub loading: Option<String>,
+    /// 次に作る FileView は、Git の状態が届いたら表示の仕方を決め直す。
+    pub auto_mode: bool,
     _sub: Option<Subscription>,
 }
 
@@ -66,10 +68,12 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let mark = self.git_mark(project, &rel);
+        let auto = mode.is_none() && self.status_pending(project);
         let item = PanelItem { rel, mode: mode.unwrap_or_else(|| initial_mode(mark)) };
         let next = item.rel.clone();
         self.confirm_leave(project, Some(&next), window, cx, move |this, window, cx| {
             this.panels.entry(project).or_default().history.open(item.clone());
+            this.panels.entry(project).or_default().auto_mode = auto;
             this.show_item(project, item, mark, window, cx);
         });
     }
@@ -192,11 +196,18 @@ impl WorkspaceView {
         }
         slot.loading = None;
         let (can_back, can_forward) = (slot.history.can_back(), slot.history.can_forward());
+        let auto = std::mem::take(&mut slot.auto_mode);
         let view = cx.new(|cx| {
             let mut v = FileView::new(fs, item.rel.clone(), item.mode, mark, cx);
             v.set_nav(can_back, can_forward);
+            v.set_auto_mode(auto);
             v
         });
+        // 状態がすでに届いていれば、すぐに決め直す。
+        if auto && !self.status_pending(project) {
+            let mark = self.git_mark(project, &item.rel);
+            view.update(cx, |v, cx| v.set_mark(mark, cx));
+        }
         let sub = cx.subscribe_in(&view, window, move |this, _, ev: &FileViewEvent, window, cx| match ev {
             FileViewEvent::Close => this.close_panel(window, cx),
             FileViewEvent::Back => this.panel_navigate(project, -1, window, cx),
@@ -217,12 +228,6 @@ impl WorkspaceView {
             window.focus(&focus, cx);
         }
         cx.notify();
-    }
-
-    /// Git の記号（Task 16 で状態を持つまでは None）。
-    pub(crate) fn git_mark(&self, project: ProjectId, rel: &str) -> Option<GitMark> {
-        let _ = (project, rel);
-        None
     }
 }
 

@@ -188,6 +188,10 @@ pub struct WorkspaceView {
     pub(crate) missing_roots: HashSet<ProjectRoot>,
     /// 右パネルに開いたあとで、カーソルを置く位置（プロジェクト、1 始まりの行と列）。
     pub(crate) pending_goto: Option<(ProjectId, u32, Option<u32>)>,
+    /// プロジェクトごとの ProjectFs、監視、Git の状態。
+    pub(crate) live: HashMap<ProjectId, crate::project_state::ProjectLive>,
+    /// 変更したファイルの一覧（「● N」を押すと出る）。
+    pub(crate) changes_menu: Option<(ProjectId, crate::popup::Popup)>,
     /// プロジェクトごとの右パネル。
     pub(crate) panels: HashMap<ProjectId, crate::right_panel::PanelSlot>,
     /// 確認ダイアログ。
@@ -211,6 +215,9 @@ impl WorkspaceView {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.refresh_active_branch(cx);
+                if let Some(id) = this.workspace.active_project().map(|p| p.id) {
+                    this.refresh_status(id, std::time::Duration::ZERO, cx);
+                }
                 cx.notify();
             }
         });
@@ -252,6 +259,8 @@ impl WorkspaceView {
             home_menu: None,
             dialog: None,
             panels: HashMap::new(),
+            live: HashMap::new(),
+            changes_menu: None,
             pending_goto: None,
             screen_fade: Fade::settled(1.0),
             showing_home: None,
@@ -439,7 +448,14 @@ impl WorkspaceView {
     /// 選択中のプロジェクトのブランチ名を読み直す。WSL のプロジェクトは裏で読み、届いたら描き直す。
     /// 読めなければ None にし、理由を出す（次にそのプロジェクトを選んだときにやり直す）。
     pub(crate) fn refresh_active_branch(&mut self, cx: &mut Context<Self>) {
-        let Some(p) = self.workspace.active_project() else { return };
+        if let Some(id) = self.workspace.active_project().map(|p| p.id) {
+            self.refresh_branch(id, cx);
+        }
+    }
+
+    /// project のブランチ名を読み直す。WSL のプロジェクトは裏で読み、届いたら描き直す。
+    pub(crate) fn refresh_branch(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        let Some(p) = self.workspace.projects().iter().find(|p| p.id == project) else { return };
         let id = p.id;
         let root = p.root.clone();
         let read = move |hosts: &WslHosts| {
@@ -583,6 +599,7 @@ impl Render for WorkspaceView {
         let theme = *cx.global::<Theme>();
         let (bg, fg) = (theme.bg_window, theme.fg_default);
         self.sync_terminals(window, cx);
+        self.sync_live(cx);
         self.schedule_save(window, cx);
         let home = self.workspace.projects().is_empty();
         if self.showing_home != Some(home) {
@@ -614,6 +631,7 @@ impl Render for WorkspaceView {
         let menu = self.render_shell_menu(window, cx, now);
         let project_menu = self.render_project_menu(window, cx, now);
         let home_menu = self.render_home_menu(window, cx, now);
+        let changes_menu = self.render_changes_menu(window, cx, now);
         let dialog = self.render_dialog(window, cx, now);
 
         div()
@@ -666,6 +684,7 @@ impl Render for WorkspaceView {
             .children(menu)
             .children(project_menu)
             .children(home_menu)
+            .children(changes_menu)
             .children(dialog)
     }
 }
