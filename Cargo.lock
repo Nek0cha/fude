@@ -1773,6 +1773,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fude-fs"
+version = "0.1.0"
+dependencies = [
+ "fude-core",
+ "ignore",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "fude-ipc"
 version = "0.1.0"
 dependencies = [
