@@ -3,7 +3,7 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fude_core::workspace::ProjectRoot;
 use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream, prelude::*};
@@ -11,11 +11,6 @@ use serde::{Deserialize, Serialize};
 
 /// 1 行の上限。これを超える要求は読まずに断る。
 const MAX_LINE: u64 = 64 * 1024;
-/// Windows でパイプが使用中のときの、接続し直す間隔。
-const BUSY_RETRY: Duration = Duration::from_millis(20);
-/// ERROR_PIPE_BUSY。
-#[cfg(windows)]
-const ERROR_PIPE_BUSY: i32 = 231;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -95,52 +90,28 @@ fn is_absent(err: &io::Error) -> bool {
     matches!(err.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused)
 }
 
-#[cfg(windows)]
-fn is_busy(err: &io::Error) -> bool {
-    err.raw_os_error() == Some(ERROR_PIPE_BUSY)
-}
-
-#[cfg(unix)]
-fn is_busy(_err: &io::Error) -> bool {
-    false
-}
-
-/// つなぐ。パイプが使用中なら deadline まで接続し直す。
-fn connect(name: &str, deadline: Instant) -> Result<Stream, SendError> {
-    let local = local_name(name).map_err(SendError::Io)?;
-    loop {
-        match Stream::connect(local.clone()) {
-            Ok(stream) => return Ok(stream),
-            Err(e) if is_absent(&e) => return Err(SendError::NotRunning),
-            Err(e) if is_busy(&e) && Instant::now() < deadline => std::thread::sleep(BUSY_RETRY),
-            Err(e) if is_busy(&e) => return Err(SendError::Timeout),
-            Err(e) => return Err(SendError::Io(e)),
-        }
-    }
-}
-
 /// 1 行の JSON を送り、応答の 1 行を timeout まで待つ。
 pub fn send(name: &str, msg: &Message, timeout: Duration) -> Result<(), SendError> {
-    let deadline = Instant::now() + timeout;
-    let stream = connect(name, deadline)?;
+    let local = local_name(name).map_err(SendError::Io)?;
     let mut line = serde_json::to_string(msg).expect("Message は必ず JSON にできる");
     line.push('\n');
-    // interprocess の Stream には読み取りのタイムアウトが無いため、別のスレッドで待つ。
+    // 接続、書き込み、応答の読み取りのすべてを別のスレッドで行い、timeout で見切る。
+    // interprocess の Windows の接続は、パイプが使用中だと期限なしで待ち、Stream には読み取りの
+    // タイムアウトも無いため。見切ったスレッドは、プロセスの終了とともに消える。
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = (|| -> io::Result<String> {
+        let result = (|| -> Result<String, SendError> {
+            let stream = Stream::connect(local).map_err(|e| if is_absent(&e) { SendError::NotRunning } else { SendError::Io(e) })?;
             let mut reader = BufReader::new(stream);
-            reader.get_mut().write_all(line.as_bytes())?;
+            reader.get_mut().write_all(line.as_bytes()).map_err(SendError::Io)?;
             let mut reply = String::new();
-            reader.take(MAX_LINE).read_line(&mut reply)?;
+            reader.take(MAX_LINE).read_line(&mut reply).map_err(SendError::Io)?;
             Ok(reply)
         })();
         tx.send(result).ok();
     });
-    let wait = deadline.saturating_duration_since(Instant::now());
-    let reply = match rx.recv_timeout(wait) {
-        Ok(Ok(reply)) => reply,
-        Ok(Err(e)) => return Err(SendError::Io(e)),
+    let reply = match rx.recv_timeout(timeout) {
+        Ok(result) => result?,
         Err(_) => return Err(SendError::Timeout),
     };
     match serde_json::from_str::<Reply>(reply.trim()) {

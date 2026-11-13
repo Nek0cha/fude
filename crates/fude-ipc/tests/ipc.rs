@@ -86,6 +86,33 @@ fn unresponsive_server_times_out() {
 }
 
 #[test]
+fn server_that_never_accepts_times_out_every_client() {
+    let n = name("stuck");
+    // 待ち受けるが、一度も受け付けない（固まった fude と同じ）。
+    let _listener = ListenerOptions::new().name(local_name(&n).unwrap()).create_sync().unwrap();
+    let threads: Vec<_> = (0..2)
+        .map(|_| {
+            let n = n.clone();
+            std::thread::spawn(move || {
+                let start = Instant::now();
+                let result = send(&n, &Message::Activate, Duration::from_millis(300));
+                (result, start.elapsed())
+            })
+        })
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    for t in threads {
+        while !t.is_finished() {
+            assert!(Instant::now() < deadline, "send が timeout を過ぎても戻らない");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (result, elapsed) = t.join().unwrap();
+        assert!(matches!(result, Err(SendError::Timeout)), "{result:?}");
+        assert!(elapsed < Duration::from_secs(2));
+    }
+}
+
+#[test]
 fn many_clients_all_delivered() {
     let n = name("many");
     let rx = serve(&n);
