@@ -5,6 +5,8 @@ use gpui_kit::{Font, FontFallbacks, Global, Rgba, font, rgb, rgba};
 
 pub const MONO_FAMILY: &str = "HackGen Console NF";
 
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // bg_panel、warn、danger は後続の計画（パネル、返事待ち）で使う
 pub struct Theme {
     pub bg_window: Rgba,
     pub bg_panel: Rgba,
