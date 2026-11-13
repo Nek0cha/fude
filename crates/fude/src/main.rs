@@ -4,6 +4,7 @@ mod assets;
 mod cli;
 mod hover;
 mod instance;
+mod language;
 mod main_area;
 mod popup;
 mod project_menu;
