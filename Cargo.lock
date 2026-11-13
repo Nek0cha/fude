@@ -1715,8 +1715,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fude"
+version = "0.1.0"
+dependencies = [
+ "fude-core",
+ "gpui-kit",
+]
+
+[[package]]
 name = "fude-core"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "futf"
