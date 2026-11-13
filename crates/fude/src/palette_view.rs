@@ -162,8 +162,29 @@ fn terminal_items(query: &str, sources: &PaletteSources) -> Vec<PaletteItem> {
         .collect()
 }
 
-fn file_items(_query: &str, _sources: &PaletteSources, _limit: usize) -> Vec<PaletteItem> {
-    Vec::new()
+fn file_items(query: &str, sources: &PaletteSources, limit: usize) -> Vec<PaletteItem> {
+    let Some((project, files)) = &sources.files else { return Vec::new() };
+    let paths: Vec<&str> = files.iter().map(String::as_str).collect();
+    rank(query, &paths, true, limit)
+        .into_iter()
+        .map(|r| {
+            let rel = paths[r.index];
+            let (dir, name) = match rel.rsplit_once('/') {
+                Some((dir, name)) => (Some(dir.to_string()), name),
+                None => (None, rel),
+            };
+            // あいまい検索はパス全体で行うので、ファイル名の中の位置に直す。
+            let start = (rel.chars().count() - name.chars().count()) as u32;
+            PaletteItem {
+                target: PaletteTarget::File(*project, rel.to_string()),
+                label: name.to_string(),
+                detail: dir,
+                hint: None,
+                positions: r.positions.into_iter().filter(|&p| p >= start).map(|p| p - start).collect(),
+                group: GROUP_FILES,
+            }
+        })
+        .collect()
 }
 
 /// ⌘P で出すファイルの数の上限。
@@ -273,6 +294,9 @@ impl WorkspaceView {
         let mut fade = Fade::settled(0.0);
         let duration = if self.reduced_motion { REDUCED } else { PALETTE_IN };
         fade.animate_to(1.0, duration, ease_out_quint, Instant::now());
+        if let Some(project) = self.workspace.active_project().map(|p| p.id) {
+            self.refresh_files(project, cx);
+        }
         self.palette = Some(PaletteState {
             input,
             base,
@@ -327,19 +351,37 @@ impl WorkspaceView {
                 p.tabs.iter().map(|t| TerminalSource { project: p.id, tab: t.id, title: t.title(), project_name: p.name.clone() })
             })
             .collect();
-        PaletteSources { projects: sources, terminals, files: None, has_project: self.workspace.active_project().is_some() }
+        let active = self.workspace.active_project().map(|p| p.id);
+        let files = active.and_then(|id| Some((id, self.live.get(&id)?.files.clone()?)));
+        PaletteSources { projects: sources, terminals, files, has_project: active.is_some() }
     }
 
-    /// 入力から一覧を作り直す。
+    /// 入力から一覧を作り直す。ファイルが多いと時間がかかるので裏で作り、古い世代の結果は捨てる。
+    /// 作り終えるまでは前の一覧を出したままにする。
     pub(crate) fn refresh_palette(&mut self, cx: &mut Context<Self>) {
         let sources = self.palette_sources();
         let Some(p) = self.palette.as_mut() else { return };
         let text = p.input.read(cx).value().to_string();
-        let (scope, query) = parse_input(&text, p.base);
+        let base = p.base;
         p.generation += 1;
-        p.items = build_items(scope, query, &sources, Platform::current());
-        p.selected = 0;
         p.error = None;
+        let generation = p.generation;
+        let task = cx.background_spawn(async move {
+            let (scope, query) = parse_input(&text, base);
+            build_items(scope, query, &sources, Platform::current())
+        });
+        cx.spawn(async move |this, cx| {
+            let items = task.await;
+            this.update(cx, |this, cx| {
+                let Some(p) = this.palette.as_mut().filter(|p| p.generation == generation) else { return };
+                p.items = items;
+                p.selected = 0;
+                p.scroll.scroll_to_item(0);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -383,7 +425,8 @@ impl WorkspaceView {
                 self.refresh_active_branch(cx);
                 self.refocus_pane();
             }
-            PaletteTarget::File(..) | PaletteTarget::Search(..) => {}
+            PaletteTarget::File(project, rel) => self.open_in_editor(project, rel, None, None, window, cx),
+            PaletteTarget::Search(..) => {}
         }
         cx.notify();
     }
@@ -545,12 +588,13 @@ impl WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::{
-        GROUP_COMMANDS, GROUP_PROJECTS, GROUP_TERMINALS, PaletteSources, PaletteTarget, ProjectSource, TerminalSource,
+        GROUP_COMMANDS, GROUP_FILES, GROUP_PROJECTS, GROUP_TERMINALS, PaletteSources, PaletteTarget, ProjectSource, TerminalSource,
         build_items,
     };
     use fude_core::keymap::Platform;
     use fude_core::palette::{PaletteCommand, Scope};
     use fude_core::workspace::{ProjectRoot, Workspace};
+    use std::sync::Arc;
 
     fn sources_with_one_project() -> PaletteSources {
         let mut ws = Workspace::default();
@@ -611,6 +655,31 @@ mod tests {
         // 最初のプロジェクトの行は、コマンドの見出しとプロジェクトの見出しの 2 つぶん後ろ。
         let first_project = items.iter().position(|i| i.group == GROUP_PROJECTS).unwrap();
         assert_eq!(super::row_index(&items, first_project), first_project + 2);
+    }
+
+    #[test]
+    fn files_scope_limits_and_ranks() {
+        let project = sources_with_one_project().terminals[0].project;
+        let files: Vec<String> = (0..500).map(|i| format!("src/f{i}.rs")).chain(["src/main.rs".to_string()]).collect();
+        let src = PaletteSources { files: Some((project, Arc::new(files))), has_project: true, ..Default::default() };
+        let items = build_items(Scope::Files, "main", &src, Platform::Windows);
+        assert_eq!(items[0].target, PaletteTarget::File(project, "src/main.rs".into()));
+        assert_eq!(items[0].label, "main.rs");
+        assert_eq!(items[0].detail.as_deref(), Some("src"));
+        assert!(build_items(Scope::Files, "", &src, Platform::Windows).len() <= 200);
+        // ⌘K で文字を打ったときのファイルは 30 件まで。
+        assert!(build_items(Scope::All, "f", &src, Platform::Windows).iter().filter(|i| i.group == GROUP_FILES).count() <= 30);
+    }
+
+    #[test]
+    fn file_positions_are_shifted_to_the_name() {
+        // あいまい検索はパス全体で行い、表示はファイル名なので、名前の中の位置に直す（名前の外の一致は落とす）。
+        let project = sources_with_one_project().terminals[0].project;
+        let src = PaletteSources { files: Some((project, Arc::new(vec!["src/main.rs".into()]))), has_project: true, ..Default::default() };
+        let items = build_items(Scope::Files, "main", &src, Platform::Windows);
+        assert_eq!(items[0].positions, [0, 1, 2, 3]);
+        let root_file = PaletteSources { files: Some((project, Arc::new(vec!["README.md".into()]))), has_project: true, ..Default::default() };
+        assert_eq!(build_items(Scope::Files, "", &root_file, Platform::Windows)[0].detail, None);
     }
 
     #[test]
