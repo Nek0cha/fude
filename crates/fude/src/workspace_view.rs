@@ -62,6 +62,21 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings.collect::<Vec<_>>());
 }
 
+/// ブランチ名の読み方。
+pub(crate) enum BranchRead {
+    /// その場で読む（ローカル）。
+    Now(PathBuf),
+    /// 裏で読む（WSL。止まっている WSL を起こすと数秒かかり、UI を止めてしまうため）。
+    Background(PathBuf),
+}
+
+pub(crate) fn branch_read(root: &ProjectRoot) -> BranchRead {
+    match root {
+        ProjectRoot::Local(path) => BranchRead::Now(path.clone()),
+        ProjectRoot::Wsl { .. } => BranchRead::Background(root.host_path()),
+    }
+}
+
 /// 状態が変わってから保存するまでの待ち時間。続けて変わったら、最後の変化から数え直す。
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 
@@ -117,7 +132,7 @@ impl WorkspaceView {
     pub fn new(workspace: Workspace, session_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
-                this.refresh_active_branch();
+                this.refresh_active_branch(cx);
                 cx.notify();
             }
         });
@@ -158,7 +173,7 @@ impl WorkspaceView {
             _bounds: bounds,
             _quit: quit,
         };
-        this.refresh_active_branch();
+        this.refresh_active_branch(cx);
         this.load_distros(cx);
         this
     }
@@ -199,16 +214,15 @@ impl WorkspaceView {
     }
 
     /// root は正規化済みとする。
-    pub(crate) fn open_project(&mut self, root: ProjectRoot) {
-        let id = self.workspace.open_project(root);
-        let branch = self.workspace.active_project().and_then(|p| read_branch(&p.root.host_path()));
-        self.branches.insert(id, branch);
+    pub(crate) fn open_project(&mut self, root: ProjectRoot, cx: &mut Context<Self>) {
+        self.workspace.open_project(root);
+        self.refresh_active_branch(cx);
     }
 
     /// 2 つ目の起動から届いた要求。Open ならプロジェクトを開いて（開いていれば切り替えて）、どちらも前面に出す。
     pub(crate) fn handle_message(&mut self, msg: Message, window: &mut Window, cx: &mut Context<Self>) {
         if let Message::Open { root } = msg {
-            self.open_project(root);
+            self.open_project(root, cx);
         }
         window.activate_window();
         cx.activate(true);
@@ -263,9 +277,26 @@ impl WorkspaceView {
         }
     }
 
-    pub(crate) fn refresh_active_branch(&mut self) {
-        if let Some(p) = self.workspace.active_project() {
-            self.branches.insert(p.id, read_branch(&p.root.host_path()));
+    /// 選択中のプロジェクトのブランチ名を読み直す。WSL のプロジェクトは裏で読み、届いたら描き直す。
+    pub(crate) fn refresh_active_branch(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.workspace.active_project() else { return };
+        let id = p.id;
+        match branch_read(&p.root) {
+            BranchRead::Now(path) => {
+                self.branches.insert(id, read_branch(&path));
+            }
+            BranchRead::Background(path) => {
+                let task = cx.background_spawn(async move { read_branch(&path) });
+                cx.spawn(async move |this, cx| {
+                    let branch = task.await;
+                    this.update(cx, |this, cx| {
+                        this.branches.insert(id, branch);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
         }
     }
 
@@ -288,7 +319,7 @@ impl WorkspaceView {
                 }
             };
             this.update(cx, |this, cx| {
-                this.open_project(root);
+                this.open_project(root, cx);
                 cx.notify();
             })
             .ok();
@@ -366,7 +397,7 @@ impl WorkspaceView {
 
     fn activate_project_at(&mut self, index: usize, cx: &mut Context<Self>) {
         self.workspace.activate_project_at(index);
-        self.refresh_active_branch();
+        self.refresh_active_branch(cx);
         cx.notify();
     }
 }
@@ -447,6 +478,16 @@ mod tests {
     use super::geom_from_bounds;
     use fude_core::session::WindowGeom;
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
+
+    #[test]
+    fn wsl_branch_is_read_in_background() {
+        use super::{BranchRead, branch_read};
+        use fude_core::workspace::ProjectRoot;
+        let wsl = ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() };
+        assert!(matches!(branch_read(&wsl), BranchRead::Background(_)));
+        let local = ProjectRoot::Local(std::path::PathBuf::from("/w/a"));
+        assert!(matches!(branch_read(&local), BranchRead::Now(_)));
+    }
 
     #[test]
     fn geom_from_bounds_maps_states() {

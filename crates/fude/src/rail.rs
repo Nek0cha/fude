@@ -94,7 +94,7 @@ impl WorkspaceView {
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.workspace.activate_project(id);
-                this.refresh_active_branch();
+                this.refresh_active_branch(cx);
                 cx.notify();
             }))
     }
