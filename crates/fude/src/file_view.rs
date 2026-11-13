@@ -551,6 +551,7 @@ impl Render for FileView {
             .id("file-view")
             .track_focus(&self.focus)
             .key_context("FileView")
+            .on_drop(|_: &ExternalPaths, _, cx| cx.stop_propagation())
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save(cx)))
             .on_action(cx.listener(|_, _: &PanelBack, _, cx| cx.emit(FileViewEvent::Back)))
             .on_action(cx.listener(|_, _: &PanelForward, _, cx| cx.emit(FileViewEvent::Forward)))

@@ -9,6 +9,7 @@ mod hover;
 mod instance;
 mod language;
 mod main_area;
+mod open_file;
 mod popup;
 mod project_menu;
 mod rail;
@@ -99,8 +100,8 @@ fn main() {
         .unwrap_or_default();
     let open = match launch {
         Launch::Open { root, shell } => InitialOpen::Project { root, shell },
-        // ファイルを開く処理は計画5の Task 15 で入れる。
-        Launch::OpenFile { .. } | Launch::Activate => InitialOpen::Nothing,
+        Launch::OpenFile { file, root_hint } => InitialOpen::File { file, root_hint },
+        Launch::Activate => InitialOpen::Nothing,
     };
     let startup = Startup { session_path, last_session: saved.filter(|d| d.has_projects()), recent_path, recent, open };
 

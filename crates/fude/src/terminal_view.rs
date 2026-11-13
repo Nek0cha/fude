@@ -427,6 +427,8 @@ impl Render for TerminalView {
             .id("terminal")
             .track_focus(&self.focus)
             .key_context("Terminal")
+            // ターミナルへのドロップ（パスの入力）は別の段階で入れる。ウィンドウの「開く」には回さない。
+            .on_drop(|_: &ExternalPaths, _, cx| cx.stop_propagation())
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| this.on_key(ev, cx)))
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy(cx)))
             .on_action(cx.listener(|this, _: &PasteText, _, cx| this.paste(cx)))

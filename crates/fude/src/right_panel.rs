@@ -203,6 +203,12 @@ impl WorkspaceView {
             FileViewEvent::Forward => this.panel_navigate(project, 1, window, cx),
             FileViewEvent::Dirty(_) | FileViewEvent::Saved => cx.notify(),
         });
+        if let Some((p, line, col)) = self.pending_goto
+            && p == project
+        {
+            self.pending_goto = None;
+            view.update(cx, |v, cx| v.goto(line, col, window, cx));
+        }
         let focus = view.read(cx).focus_handle();
         let slot = self.panels.entry(project).or_default();
         slot.view = Some(view);

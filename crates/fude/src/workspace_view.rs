@@ -107,6 +107,7 @@ pub(crate) fn last_project_closed_action(settings: &Settings, remaining: usize) 
 pub enum InitialOpen {
     Nothing,
     Project { root: ProjectRoot, shell: Option<ShellKind> },
+    File { file: fude_core::location::FileLocation, root_hint: Option<ProjectRoot> },
 }
 
 /// 起動のときに読んだもの。
@@ -185,6 +186,8 @@ pub struct WorkspaceView {
     pub(crate) last_session: Option<SessionData>,
     /// ホーム画面で薄く出す（フォルダが見つからない）プロジェクト。
     pub(crate) missing_roots: HashSet<ProjectRoot>,
+    /// 右パネルに開いたあとで、カーソルを置く位置（プロジェクト、1 始まりの行と列）。
+    pub(crate) pending_goto: Option<(ProjectId, u32, Option<u32>)>,
     /// プロジェクトごとの右パネル。
     pub(crate) panels: HashMap<ProjectId, crate::right_panel::PanelSlot>,
     /// 確認ダイアログ。
@@ -249,6 +252,7 @@ impl WorkspaceView {
             home_menu: None,
             dialog: None,
             panels: HashMap::new(),
+            pending_goto: None,
             screen_fade: Fade::settled(1.0),
             showing_home: None,
             saved: None,
@@ -259,8 +263,10 @@ impl WorkspaceView {
             _bounds: bounds,
             _quit: quit,
         };
-        if let InitialOpen::Project { root, shell } = open {
-            this.open_project(root, shell, cx);
+        match open {
+            InitialOpen::Project { root, shell } => this.open_project(root, shell, cx),
+            InitialOpen::File { file, root_hint } => this.open_file(file, root_hint, None, window, cx),
+            InitialOpen::Nothing => {}
         }
         this.refresh_active_branch(cx);
         this.load_distros(cx);
@@ -369,8 +375,10 @@ impl WorkspaceView {
 
     /// 2 つ目の起動から届いた要求。Open ならプロジェクトを開いて（開いていれば切り替えて）、どちらも前面に出す。
     pub(crate) fn handle_message(&mut self, msg: Message, window: &mut Window, cx: &mut Context<Self>) {
-        if let Message::Open { root, shell } = msg {
-            self.open_project(root, shell, cx);
+        match msg {
+            Message::Open { root, shell } => self.open_project(root, shell, cx),
+            Message::OpenFile { file, root_hint } => self.open_file(file, root_hint, None, window, cx),
+            Message::Activate => {}
         }
         window.activate_window();
         cx.activate(true);
@@ -637,6 +645,8 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(|this, _: &ActivateProject7, _, cx| this.activate_project_at(6, cx)))
             .on_action(cx.listener(|this, _: &ActivateProject8, _, cx| this.activate_project_at(7, cx)))
             .on_action(cx.listener(|this, _: &ActivateProject9, _, cx| this.activate_project_at(8, cx)))
+            // ターミナルとエディタの上以外に落とされたファイルとフォルダを開く（設計書 §5.1）。
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.open_dropped(paths, window, cx)))
             .size_full()
             .flex()
             .flex_col()
