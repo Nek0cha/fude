@@ -247,6 +247,8 @@ pub struct WorkspaceView {
     pub(crate) allow_close: bool,
     /// 確認ダイアログ。
     pub(crate) dialog: Option<crate::dialog::OpenDialog>,
+    /// プロジェクトごとの全体検索の結果のタブ。
+    pub(crate) searches: HashMap<ProjectId, (Entity<crate::search_view::SearchView>, Subscription)>,
     /// コマンドパレット。
     pub(crate) palette: Option<crate::palette_view::PaletteState>,
     /// ホーム画面の「最近」の右クリックメニュー。
@@ -317,6 +319,7 @@ impl WorkspaceView {
             missing_roots: HashSet::new(),
             home_menu: None,
             palette: None,
+            searches: HashMap::new(),
             dialog: None,
             allow_close: false,
             reduced_motion: crate::reduced_motion::reduced_motion(),
@@ -421,9 +424,8 @@ impl WorkspaceView {
         let has_pane = self.workspace.active_project().and_then(|p| p.active_tab()).is_some();
         if has_pane {
             self.refocus_pane();
-        } else if let Some(view) = self.active_editor_view() {
+        } else if let Some(focus) = self.active_editor_focus(cx) {
             self.focused_pane = None;
-            let focus = view.read(cx).focus_handle();
             window.focus(&focus, cx);
         } else {
             self.focused_pane = None;
@@ -680,7 +682,7 @@ impl WorkspaceView {
 
     /// タブの切り替え。エディタ列にフォーカスがあればファイルのタブ、それ以外はターミナルのタブ。
     fn cycle_focused_tabs(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
-        let in_editor = self.active_editor_view().is_some_and(|v| v.read(cx).focus_handle().contains_focused(window, cx));
+        let in_editor = self.active_editor_focus(cx).is_some_and(|f| f.contains_focused(window, cx));
         match self.workspace.active_project().map(|p| p.id) {
             Some(project) if in_editor => {
                 if let Some(tabs) = self.workspace.editor_mut(project) {
@@ -801,9 +803,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(|this, _: &GoToFile, window, cx| {
                 this.open_palette(fude_core::palette::Scope::Files, "", window, cx)
             }))
-            .on_action(cx.listener(|this, _: &FindInFiles, window, cx| {
-                this.open_palette(fude_core::palette::Scope::Search, "#", window, cx)
-            }))
+            .on_action(cx.listener(|this, _: &FindInFiles, window, cx| this.open_find_in_files(window, cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.new_default_tab();
                 cx.notify();

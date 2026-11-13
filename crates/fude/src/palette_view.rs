@@ -21,7 +21,7 @@ use crate::theme::{Theme, popup_shadow, size, ui_font};
 use crate::title_row::icon;
 use crate::workspace_view::WorkspaceView;
 
-gpui_kit::actions!(palette, [PaletteUp, PaletteDown, PaletteCancel]);
+gpui_kit::actions!(palette, [PaletteUp, PaletteDown, PaletteCancel, ToggleCase, ToggleWord, ToggleRegex]);
 
 /// パレットの入力欄の文脈。gpui-kit の入力欄の上下キーと Esc より優先させる（同じ深さで後から登録したものが勝つ）。
 const PALETTE_INPUT: &str = "Palette > Input";
@@ -31,6 +31,10 @@ pub fn bind_palette_keys(cx: &mut App) {
         KeyBinding::new("up", PaletteUp, Some(PALETTE_INPUT)),
         KeyBinding::new("down", PaletteDown, Some(PALETTE_INPUT)),
         KeyBinding::new("escape", PaletteCancel, Some(PALETTE_INPUT)),
+        // 全体検索の切り替え（VS Code と同じ Alt+C / Alt+W / Alt+R）。
+        KeyBinding::new("alt-c", ToggleCase, Some(PALETTE_INPUT)),
+        KeyBinding::new("alt-w", ToggleWord, Some(PALETTE_INPUT)),
+        KeyBinding::new("alt-r", ToggleRegex, Some(PALETTE_INPUT)),
     ]);
 }
 
@@ -246,6 +250,31 @@ fn placeholder(base: Scope) -> &'static str {
     }
 }
 
+/// 全体検索の切り替えのボタン（オンのときは枠と明るい文字）。
+fn palette_toggle(
+    id: &'static str,
+    label: &'static str,
+    on: bool,
+    theme: &Theme,
+    cx: &mut Context<WorkspaceView>,
+    change: fn(&mut SearchFlags),
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(22.))
+        .px(px(6.))
+        .flex()
+        .items_center()
+        .rounded(px(4.))
+        .font(crate::theme::mono_font())
+        .text_size(px(12.))
+        .text_color(if on { theme.fg_default } else { theme.fg_dim })
+        .when(on, |d| d.bg(theme.bg_hover).border_1().border_color(theme.accent))
+        .hover(|s| s.bg(theme.bg_hover))
+        .child(label)
+        .on_click(cx.listener(move |this, _, _, cx| this.toggle_search_flag(change, cx)))
+}
+
 /// 一覧の中の、selected の行の子の番号（グループの見出しも 1 行に数える）。
 fn row_index(items: &[PaletteItem], selected: usize) -> usize {
     let headers = items[..=selected.min(items.len().saturating_sub(1))]
@@ -385,6 +414,13 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn toggle_search_flag(&mut self, change: fn(&mut SearchFlags), cx: &mut Context<Self>) {
+        let Some(p) = self.palette.as_mut() else { return };
+        change(&mut p.search_flags);
+        p.error = None;
+        cx.notify();
+    }
+
     fn move_palette_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
         let Some(p) = self.palette.as_mut() else { return };
         let n = p.items.len() as i32;
@@ -401,6 +437,14 @@ impl WorkspaceView {
         let Some(item) = self.palette.as_ref().filter(|p| !p.closing).and_then(|p| p.items.get(p.selected).cloned()) else {
             return;
         };
+        // 正しくない検索の条件なら理由を出し、閉じない。
+        if let (PaletteTarget::Search(pattern), Some(p)) = (&item.target, self.palette.as_mut())
+            && let Err(e) = fude_fs::search::build_pattern(&crate::search_view::make_query(pattern, p.search_flags))
+        {
+            p.error = Some(e);
+            cx.notify();
+            return;
+        }
         self.close_palette(window, cx);
         self.run_palette_item(item, window, cx);
     }
@@ -426,7 +470,10 @@ impl WorkspaceView {
                 self.refocus_pane();
             }
             PaletteTarget::File(project, rel) => self.open_in_editor(project, rel, None, None, window, cx),
-            PaletteTarget::Search(..) => {}
+            PaletteTarget::Search(pattern) => {
+                let flags = self.palette.as_ref().map(|p| p.search_flags).unwrap_or_default();
+                self.start_search(crate::search_view::make_query(&pattern, flags), window, cx);
+            }
         }
         cx.notify();
     }
@@ -450,7 +497,7 @@ impl WorkspaceView {
             }
             PaletteCommand::OpenFolder => return self.prompt_open_project(cx),
             PaletteCommand::GoToFile => return self.open_palette(Scope::Files, "", window, cx),
-            PaletteCommand::FindInFiles => return self.open_palette(Scope::Search, "#", window, cx),
+            PaletteCommand::FindInFiles => return self.open_find_in_files(window, cx),
         };
         window.dispatch_action(action, cx);
     }
@@ -494,6 +541,18 @@ impl WorkspaceView {
         let error = p.error.clone().map(|e| div().px(px(12.)).py(px(6.)).text_size(px(12.)).text_color(theme.danger).child(e));
         let list_h = size::PALETTE_ROW_H * VISIBLE_ROWS as f32;
         let input = Input::new(&p.input).appearance(false).prefix(icon(IconName::Search, theme.fg_dim));
+        let text = p.input.read(cx).value().to_string();
+        let toggles = (parse_input(&text, p.base).0 == Scope::Search).then(|| {
+            let f = p.search_flags;
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(2.))
+                .flex_shrink_0()
+                .child(palette_toggle("palette-case", "Aa", f.case_sensitive, &theme, cx, |f| f.case_sensitive = !f.case_sensitive))
+                .child(palette_toggle("palette-word", "ab", f.whole_word, &theme, cx, |f| f.whole_word = !f.whole_word))
+                .child(palette_toggle("palette-regex", ".*", f.regex, &theme, cx, |f| f.regex = !f.regex))
+        });
         let body = div()
             .id("palette")
             .key_context("Palette")
@@ -501,6 +560,9 @@ impl WorkspaceView {
             .on_action(cx.listener(|this, _: &PaletteUp, _, cx| this.move_palette_selection(-1, cx)))
             .on_action(cx.listener(|this, _: &PaletteDown, _, cx| this.move_palette_selection(1, cx)))
             .on_action(cx.listener(|this, _: &PaletteCancel, window, cx| this.close_palette(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleCase, _, cx| this.toggle_search_flag(|f| f.case_sensitive = !f.case_sensitive, cx)))
+            .on_action(cx.listener(|this, _: &ToggleWord, _, cx| this.toggle_search_flag(|f| f.whole_word = !f.whole_word, cx)))
+            .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| this.toggle_search_flag(|f| f.regex = !f.regex, cx)))
             .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_palette(window, cx)))
             .opacity(value)
             .w(w)
@@ -514,7 +576,7 @@ impl WorkspaceView {
             .font(ui_font())
             .text_size(px(13.))
             .text_color(theme.fg_default)
-            .child(div().h(px(40.)).px(px(10.)).flex().items_center().child(input))
+            .child(div().h(px(40.)).px(px(10.)).flex().items_center().gap(px(6.)).child(div().flex_1().min_w_0().child(input)).children(toggles))
             .children(error)
             .when(!rows.is_empty(), |d| {
                 d.child(div().h(px(1.)).bg(theme.border_subtle)).child(

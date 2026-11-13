@@ -4,12 +4,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::panel::{FileMode, renamed_rel};
 
-/// エディタ列の 1 枚のタブ。今はファイルだけを扱う。
+/// 全体検索の結果のタブの rel。NUL を含むので、本物のファイルの相対パス（RelPath は NUL を拒む）とは重ならない。
+pub const SEARCH_TAB: &str = "\0search";
+
+/// エディタ列の 1 枚のタブ。ファイルか、全体検索の結果（プロジェクトに 1 枚）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditorItem {
-    /// プロジェクトのルートからの相対パス。
+    /// プロジェクトのルートからの相対パス。全体検索のタブは SEARCH_TAB。
     pub rel: String,
     pub mode: FileMode,
+}
+
+impl EditorItem {
+    /// 全体検索の結果のタブ。
+    pub fn search() -> EditorItem {
+        EditorItem { rel: SEARCH_TAB.to_string(), mode: FileMode::Full }
+    }
+
+    pub fn is_search(&self) -> bool {
+        self.rel == SEARCH_TAB
+    }
 }
 
 /// エディタ列のタブの並びと、選択中の位置。
@@ -27,6 +41,15 @@ pub enum Opened {
 }
 
 impl EditorTabs {
+    /// セッションに残すもの（全体検索のタブを除く。選択の位置も合わせて直す）。
+    pub fn persistable(&self) -> EditorTabs {
+        let mut tabs = self.clone();
+        if let Some(i) = tabs.items.iter().position(EditorItem::is_search) {
+            tabs.close(i);
+        }
+        tabs
+    }
+
     /// 同じ相対パスのタブがあればそれを選ぶだけにする。無ければ選択中のタブの右に足して選ぶ。
     pub fn open(&mut self, item: EditorItem) -> Opened {
         if let Some(i) = self.position(&item.rel) {
@@ -187,6 +210,27 @@ mod tests {
         assert_eq!(t.active().unwrap().rel, "a");
         t.cycle(-1);
         assert_eq!(t.active().unwrap().rel, "b");
+    }
+
+    #[test]
+    fn search_tab_is_single_and_not_persisted() {
+        let mut t = EditorTabs::default();
+        t.open(it("a.rs"));
+        t.open(EditorItem::search());
+        t.open(it("b.rs"));
+        assert_eq!(t.open(EditorItem::search()), Opened::Existing(1));
+        assert!(t.items()[1].is_search());
+        let p = t.persistable();
+        let rels: Vec<&str> = p.items().iter().map(|i| i.rel.as_str()).collect();
+        assert_eq!(rels, ["a.rs", "b.rs"]);
+        // 検索のタブを選んでいたら、残すほうは隣（右）を選ぶ。
+        assert_eq!(p.active().unwrap().rel, "b.rs");
+        // RelPath::new が拒む形（NUL を含む）であること。
+        assert!(SEARCH_TAB.contains('\0'));
+        let mut only = EditorTabs::default();
+        only.open(EditorItem::search());
+        assert!(only.persistable().is_empty());
+        assert_eq!(only.persistable().active(), None);
     }
 
     #[test]

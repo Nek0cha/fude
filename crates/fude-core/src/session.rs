@@ -80,7 +80,7 @@ impl SessionData {
                     .collect(),
                 active_tab: p.active_tab.and_then(|id| p.tabs.iter().position(|t| t.id == id)),
                 shell: p.shell.clone(),
-                editor: p.editor.clone(),
+                editor: p.editor.persistable(),
                 open_file: None,
             })
             .collect();
@@ -380,6 +380,19 @@ mod tests {
         let parsed = SessionData::parse(&json).expect("読み直せる");
         let restored = Workspace::restore(&parsed, &|_| true);
         assert_eq!(restored.active_project().unwrap().editor, tabs_of(&["a.rs", "b.rs"], 1));
+    }
+
+    #[test]
+    fn capture_skips_search_tab() {
+        use crate::editor_tabs::EditorItem;
+        let mut ws = Workspace::default();
+        let id = ws.open_project(ProjectRoot::Local("/w/a".into()));
+        let tabs = ws.editor_mut(id).unwrap();
+        tabs.open(EditorItem { rel: "a.rs".into(), mode: crate::panel::FileMode::Full });
+        tabs.open(EditorItem::search());
+        let data = SessionData::capture(&ws, None);
+        let rels: Vec<&str> = data.projects[0].editor.items().iter().map(|i| i.rel.as_str()).collect();
+        assert_eq!(rels, ["a.rs"]);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use fude_core::editor_tabs::{EditorItem, Opened};
+use fude_core::editor_tabs::{EditorItem, Opened, SEARCH_TAB};
 use fude_core::panel::{FileMode, renamed_rel};
 use fude_core::workspace::ProjectId;
 use fude_fs::ProjectFs;
@@ -249,7 +249,12 @@ impl WorkspaceView {
     /// エディタ列の中身（タブ列と、選択中のタブの FileView）。中身の幅は w に固定し、出入りの動きで折り返し直さない。
     fn render_editor_column(&mut self, project: ProjectId, w: Pixels, cx: &mut Context<Self>, now: std::time::Instant) -> Div {
         let tabs = self.render_editor_tabs(project, cx, now);
-        let view = self.active_editor_view().or_else(|| self.editor_anim.closing.clone());
+        let search_active = self.workspace.active_project().and_then(|p| p.editor.active()).is_some_and(EditorItem::is_search);
+        let view: Option<AnyView> = if search_active {
+            self.searches.get(&project).map(|(v, _)| v.clone().into())
+        } else {
+            self.active_editor_view().or_else(|| self.editor_anim.closing.clone()).map(Into::into)
+        };
         div()
             .w(w)
             .h_full()
@@ -269,6 +274,54 @@ impl WorkspaceView {
         let p = self.workspace.active_project()?;
         let rel = &p.editor.active()?.rel;
         self.editors.get(&p.id)?.views.get(rel).cloned()
+    }
+
+    /// 選択中のタブのビュー（ファイルか全体検索）のフォーカス。
+    pub(crate) fn active_editor_focus(&self, cx: &App) -> Option<FocusHandle> {
+        let p = self.workspace.active_project()?;
+        if p.editor.active()?.is_search() {
+            return self.searches.get(&p.id).map(|(v, _)| v.read(cx).focus_handle());
+        }
+        self.active_editor_view().map(|v| v.read(cx).focus_handle())
+    }
+
+    /// 全体検索のパレットを開く。前回の文字列と切り替えを引き継ぐ。
+    pub(crate) fn open_find_in_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let last = self
+            .workspace
+            .active_project()
+            .and_then(|p| self.searches.get(&p.id))
+            .and_then(|(v, _)| v.read(cx).query.clone());
+        let initial = format!("#{}", last.as_ref().map_or("", |q| q.pattern.as_str()));
+        self.open_palette(fude_core::palette::Scope::Search, &initial, window, cx);
+        if let (Some(p), Some(q)) = (self.palette.as_mut(), last) {
+            p.search_flags = crate::search_view::flags_of(&q);
+        }
+    }
+
+    /// 選択中のプロジェクトで全体検索を始め、結果のタブを開いて選ぶ。
+    pub(crate) fn start_search(&mut self, query: fude_fs::search::SearchQuery, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.workspace.active_project().map(|p| p.id) else { return };
+        let Some(fs) = self.live_fs(project) else {
+            self.show_error("プロジェクトのファイルをまだ読めません。少し待ってから検索してください".into(), window, cx);
+            return;
+        };
+        if !self.searches.contains_key(&project) {
+            let view = cx.new(crate::search_view::SearchView::new);
+            let sub = cx.subscribe_in(&view, window, move |this, _, ev: &crate::search_view::SearchViewEvent, window, cx| match ev {
+                crate::search_view::SearchViewEvent::Open { rel, line, col } => {
+                    this.open_in_editor(project, rel.clone(), Some(FileMode::Full), Some((*line, Some(*col))), window, cx)
+                }
+            });
+            self.searches.insert(project, (view, sub));
+        }
+        let view = self.searches[&project].0.clone();
+        view.update(cx, |v, cx| v.run(fs, query, cx));
+        if let Some(tabs) = self.workspace.editor_mut(project) {
+            tabs.open(EditorItem::search());
+        }
+        window.focus(&view.read(cx).focus_handle(), cx);
+        cx.notify();
     }
 
     /// project で作った FileView の全部（選んでいないタブのものも含む）。
@@ -333,6 +386,12 @@ impl WorkspaceView {
     pub(crate) fn show_active_tab(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
         let rel = self.workspace.projects().iter().find(|p| p.id == project).and_then(|p| p.editor.active()).map(|i| i.rel.clone());
         let Some(rel) = rel else { return };
+        if rel == SEARCH_TAB {
+            if let Some((view, _)) = self.searches.get(&project) {
+                window.focus(&view.read(cx).focus_handle(), cx);
+            }
+            return;
+        }
         match self.editors.get(&project).and_then(|s| s.views.get(&rel)).cloned() {
             Some(view) => window.focus(&view.read(cx).focus_handle(), cx),
             None => {
@@ -348,7 +407,7 @@ impl WorkspaceView {
     /// （セッションから戻したタブと、プロジェクトを切り替えたとき。作るのは選ばれたタブだけ）。
     pub(crate) fn ensure_active_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.workspace.active_project() else { return };
-        let Some(rel) = p.editor.active().map(|i| i.rel.clone()) else { return };
+        let Some(rel) = p.editor.active().filter(|i| !i.is_search()).map(|i| i.rel.clone()) else { return };
         let project = p.id;
         let slot = self.editors.get(&project);
         if slot.is_some_and(|s| s.views.contains_key(&rel) || !s.can_create(&rel)) {
@@ -368,7 +427,10 @@ impl WorkspaceView {
             .map(|i| i.rel.clone());
         let Some(rel) = rel else { return };
         let view = self.editors.get(&project).and_then(|s| s.views.get(&rel)).cloned();
-        let focus_in_editor = self.project_views(project).iter().any(|v| v.read(cx).focus_handle().contains_focused(window, cx));
+        let search_focused =
+            self.searches.get(&project).is_some_and(|(v, _)| v.read(cx).focus_handle().contains_focused(window, cx));
+        let focus_in_editor =
+            search_focused || self.project_views(project).iter().any(|v| v.read(cx).focus_handle().contains_focused(window, cx));
         let close = move |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<WorkspaceView>| {
             // 確かめている間に並びが変わっていてもよいよう、位置は相対パスで引き直す。
             let Some(tabs) = this.workspace.editor_mut(project) else { return };

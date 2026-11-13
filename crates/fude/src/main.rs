@@ -23,6 +23,7 @@ mod popup;
 mod project_state;
 mod project_menu;
 mod rail;
+mod search_view;
 mod reduced_motion;
 mod shell_menu;
 mod terminal_paint;

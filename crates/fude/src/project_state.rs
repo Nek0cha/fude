@@ -58,6 +58,7 @@ impl WorkspaceView {
     pub(crate) fn sync_live(&mut self, cx: &mut Context<Self>) {
         let ids: Vec<(ProjectId, ProjectRoot)> = self.workspace.projects().iter().map(|p| (p.id, p.root.clone())).collect();
         self.live.retain(|id, _| ids.iter().any(|(i, _)| i == id));
+        self.searches.retain(|id, _| ids.iter().any(|(i, _)| i == id));
         for (id, root) in ids {
             if self.live.contains_key(&id) {
                 continue;
