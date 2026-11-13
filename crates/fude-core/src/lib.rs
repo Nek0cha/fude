@@ -1,4 +1,5 @@
 pub mod close;
+pub mod editor_tabs;
 pub mod git_head;
 pub mod keymap;
 pub mod keys;

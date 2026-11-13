@@ -1,7 +1,7 @@
 //! 右パネルの履歴と、外部での変更への対応の規則（設計書 §4.1 の右パネル、§5.3）。
 
 /// ファイルの表示の仕方。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileMode {
     /// HEAD との差分（閲覧専用）。
     Diff,
