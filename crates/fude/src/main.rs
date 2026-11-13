@@ -3,10 +3,11 @@
 mod anim;
 mod assets;
 mod changes_menu;
+mod cli;
 mod close_flow;
 mod columns;
-mod cli;
 mod dialog;
+mod file_icons;
 mod file_view;
 mod home;
 mod hover;
@@ -16,8 +17,8 @@ mod layout_anim;
 mod main_area;
 mod open_file;
 mod popup;
-mod project_state;
 mod project_menu;
+mod project_state;
 mod rail;
 mod reduced_motion;
 mod right_panel;
@@ -61,13 +62,22 @@ fn initial_bounds(saved: Option<WindowGeom>, cx: &App) -> WindowBounds {
         .iter()
         .map(|d| {
             let b = d.bounds();
-            (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height))
+            (
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+                f32::from(b.size.width),
+                f32::from(b.size.height),
+            )
         })
         .collect();
     match saved.filter(|g| window_is_visible(g, &displays)) {
         Some(g) => {
             let bounds = Bounds::new(point(px(g.x), px(g.y)), size(px(g.width), px(g.height)));
-            if g.maximized { WindowBounds::Maximized(bounds) } else { WindowBounds::Windowed(bounds) }
+            if g.maximized {
+                WindowBounds::Maximized(bounds)
+            } else {
+                WindowBounds::Windowed(bounds)
+            }
         }
         None => WindowBounds::Windowed(Bounds::centered(None, size(px(1200.), px(780.)), cx)),
     }
@@ -113,55 +123,70 @@ fn main() {
         Launch::OpenFile { file, root_hint } => InitialOpen::File { file, root_hint },
         Launch::Activate => InitialOpen::Nothing,
     };
-    let startup = Startup { session_path, last_session: saved.filter(|d| d.has_projects()), recent_path, recent, open };
+    let startup = Startup {
+        session_path,
+        last_session: saved.filter(|d| d.has_projects()),
+        recent_path,
+        recent,
+        open,
+    };
 
-    application().with_assets(FudeAssets).run(move |cx: &mut App| {
-        init(cx);
-        cx.text_system()
-            .add_fonts(vec![Cow::Borrowed(MONO_REGULAR), Cow::Borrowed(MONO_BOLD)])
-            .expect("同梱の等幅フォントを読み込めない");
-        cx.set_global(Theme::dark());
-        theme::apply_component_theme(cx);
-        bind_keys(cx);
-        file_view::bind_file_view_keys(cx);
-        tree_view::bind_tree_keys(cx);
-        // ウィンドウは 1 枚なので、閉じたらアプリも終える（macOS でアプリだけ残らないように）。
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-
-        let base = TitleBar::window_options();
-        let options = WindowOptions {
-            titlebar: base.titlebar.map(|t| TitlebarOptions {
-                traffic_light_position: Some(point(px(18.), px(13.))),
-                ..t
-            }),
-            window_background: WINDOW_BACKGROUND,
-            window_bounds: Some(initial_bounds(saved_window, cx)),
-            window_min_size: Some(size(px(640.), px(400.))),
-            ..base
-        };
-        // gpui_kit::open_window は Root で包み、gpui-component のテーマの背景色（既定はライト）で
-        // 全面を塗るため、ウィンドウの透過が見えなくなる。部品を使うまでは直接開く。
-        let handle = cx
-            .open_window(options, move |window, cx| cx.new(|cx| WorkspaceView::new(startup, window, cx)))
-            .expect("ウィンドウを開けない");
-        // 2 つ目の起動から届いた要求を、ウィンドウのビューで処理する。
-        handle
-            .update(cx, |_, window, cx| {
-                cx.spawn_in(window, async move |this, cx| {
-                    while let Some(msg) = rx.next().await {
-                        if this.update_in(cx, |view, window, cx| view.handle_message(msg, window, cx)).is_err() {
-                            break;
-                        }
-                    }
-                })
-                .detach();
+    application()
+        .with_assets(FudeAssets)
+        .run(move |cx: &mut App| {
+            init(cx);
+            cx.text_system()
+                .add_fonts(vec![Cow::Borrowed(MONO_REGULAR), Cow::Borrowed(MONO_BOLD)])
+                .expect("同梱の等幅フォントを読み込めない");
+            cx.set_global(Theme::dark());
+            theme::apply_component_theme(cx);
+            bind_keys(cx);
+            file_view::bind_file_view_keys(cx);
+            tree_view::bind_tree_keys(cx);
+            // ウィンドウは 1 枚なので、閉じたらアプリも終える（macOS でアプリだけ残らないように）。
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
             })
-            .expect("ウィンドウを更新できない");
-        cx.activate(true);
-    });
+            .detach();
+
+            let base = TitleBar::window_options();
+            let options = WindowOptions {
+                titlebar: base.titlebar.map(|t| TitlebarOptions {
+                    traffic_light_position: Some(point(px(18.), px(13.))),
+                    ..t
+                }),
+                window_background: WINDOW_BACKGROUND,
+                window_bounds: Some(initial_bounds(saved_window, cx)),
+                window_min_size: Some(size(px(640.), px(400.))),
+                ..base
+            };
+            // gpui_kit::open_window は Root で包み、gpui-component のテーマの背景色（既定はライト）で
+            // 全面を塗るため、ウィンドウの透過が見えなくなる。部品を使うまでは直接開く。
+            let handle = cx
+                .open_window(options, move |window, cx| {
+                    cx.new(|cx| WorkspaceView::new(startup, window, cx))
+                })
+                .expect("ウィンドウを開けない");
+            // 2 つ目の起動から届いた要求を、ウィンドウのビューで処理する。
+            handle
+                .update(cx, |_, window, cx| {
+                    cx.spawn_in(window, async move |this, cx| {
+                        while let Some(msg) = rx.next().await {
+                            if this
+                                .update_in(cx, |view, window, cx| {
+                                    view.handle_message(msg, window, cx)
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                })
+                .expect("ウィンドウを更新できない");
+            cx.activate(true);
+        });
 }
