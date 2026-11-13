@@ -114,10 +114,11 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let mode = at.map(|_| fude_core::panel::FileMode::Full);
-        self.open_in_panel(project, rel, mode, window, cx);
+        // 開き直し（同じファイル）は open_in_panel の中ですぐ行を移すため、先に入れておく。
         if let Some((line, col)) = at {
             self.pending_goto = Some((project, line, col));
         }
+        self.open_in_panel(project, rel, mode, window, cx);
     }
 
     #[cfg(windows)]

@@ -11,7 +11,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::*;
 
-use crate::dialog::{ButtonRole, Dialog, DialogButton};
+use crate::dialog::{ButtonRole, Dialog, DialogButton, error_text};
 use crate::hover::HoverKey;
 use crate::popup::{ITEM_H, Popup, place};
 use crate::theme::{Theme, size};
@@ -191,7 +191,7 @@ impl WorkspaceView {
         let Some(edit) = self.tree.edit.as_ref() else { return };
         let name = edit.input.read(cx).value().trim().to_string();
         if let Err(why) = validate_name(&name) {
-            eprintln!("{why}: {name}");
+            self.show_error(format!("{why}: {name}"), window, cx);
             return;
         }
         let (project, kind, target) = (edit.project, edit.kind, edit.target.clone());
@@ -207,6 +207,7 @@ impl WorkspaceView {
         window.focus(&self.tree.focus, cx);
         let task = cx.background_spawn({
             let dest = dest.clone();
+            let target = target.clone();
             async move {
                 match kind {
                     EditKind::NewFile => fs.create_file(&dest),
@@ -221,8 +222,16 @@ impl WorkspaceView {
             cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |this, cx| {
                     if let Err(e) = result {
-                        eprintln!("ツリーの操作に失敗した: {}: {e}", dest.as_str());
+                        let what = match kind {
+                            EditKind::NewFile => "ファイルを作れません",
+                            EditKind::NewFolder => "フォルダを作れません",
+                            EditKind::Rename => "名前を変えられません",
+                        };
+                        this.show_error(error_text(what, dest.as_str(), &e), window, cx);
                         return;
+                    }
+                    if kind == EditKind::Rename {
+                        this.panel_renamed(project, target.as_str(), dest.as_str(), cx);
                     }
                     // 作り先のフォルダを開いて読み直す（監視の通知を待たない）。
                     this.tree.models.entry(project).or_default().expand(&parent);
@@ -246,10 +255,11 @@ impl WorkspaceView {
                 DialogButton { label: "キャンセル", role: ButtonRole::Cancel },
                 DialogButton { label: "削除", role: ButtonRole::Danger },
             ],
-            on_choose: Box::new(move |i, this, _, cx| {
+            on_choose: Box::new(move |i, this, window, cx| {
                 if i != 1 {
                     return;
                 }
+                let window_handle = window.window_handle();
                 let Some(fs) = this.live_fs(project) else { return };
                 let rel = row.rel.clone();
                 let task = cx.background_spawn(async move { fs.remove(&rel) });
@@ -257,9 +267,12 @@ impl WorkspaceView {
                     row.rel.as_str().rsplit_once('/').and_then(|(p, _)| RelPath::new(p).ok()).unwrap_or_else(RelPath::root);
                 cx.spawn(async move |this, cx| {
                     let result = task.await;
-                    this.update(cx, |this, cx| match result {
-                        Ok(()) => this.load_tree_dir(project, parent, cx),
-                        Err(e) => eprintln!("削除できない: {}: {e}", row.rel.as_str()),
+                    cx.update_window(window_handle, |_, window, cx| {
+                        this.update(cx, |this, cx| match result {
+                            Ok(()) => this.load_tree_dir(project, parent, cx),
+                            Err(e) => this.show_error(error_text("削除できません", row.rel.as_str(), &e), window, cx),
+                        })
+                        .ok();
                     })
                     .ok();
                 })

@@ -8,7 +8,8 @@ use fude_core::close::{CloseTarget, FocusArea, close_target};
 use fude_core::workspace::{PaneId, ProjectId, ShellKind};
 use gpui_kit::*;
 
-use crate::dialog::{ButtonRole, Dialog, DialogButton};
+use crate::dialog::{ButtonRole, Dialog, DialogButton, error_text};
+use crate::file_view::FileView;
 use crate::workspace_view::{WorkspaceView, terminal_id};
 
 /// WSL のターミナルの稼働の確認を待つ時間。過ぎたら動いているとみなす（設計書 §5.12）。
@@ -190,20 +191,47 @@ impl WorkspaceView {
                 DialogButton { label: "保存しない", role: ButtonRole::Danger },
                 DialogButton { label: "キャンセル", role: ButtonRole::Cancel },
             ],
-            on_choose: Box::new(move |i, this, window, cx| {
-                match i {
-                    0 => {
-                        for v in &dirty {
-                            v.update(cx, |v, cx| v.save(cx));
-                        }
-                    }
-                    1 => {}
-                    _ => return,
-                }
-                then(this, window, cx);
+            on_choose: Box::new(move |i, this, window, cx| match i {
+                0 => this.save_then(dirty, window, cx, then),
+                1 => then(this, window, cx),
+                _ => {}
             }),
         };
         self.show_dialog(dialog, window, cx);
+    }
+
+    /// views を保存し、すべて書き終えてから then を呼ぶ。1 つでも失敗したら then は呼ばず、失敗を知らせる
+    /// （閉じる・終えるを取りやめ、未保存の中身を残す）。
+    pub(crate) fn save_then(
+        &mut self,
+        views: Vec<Entity<FileView>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>) + 'static,
+    ) {
+        let tasks: Vec<(String, Task<io::Result<()>>)> =
+            views.iter().map(|v| (v.read(cx).rel.clone(), v.update(cx, |v, cx| v.save(cx)))).collect();
+        let window_handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let mut failures = Vec::new();
+            for (rel, task) in tasks {
+                if let Err(e) = task.await {
+                    failures.push(error_text("保存できません", &rel, &e));
+                }
+            }
+            cx.update_window(window_handle, |_, window, cx| {
+                this.update(cx, |this, cx| {
+                    if failures.is_empty() {
+                        then(this, window, cx);
+                    } else {
+                        this.show_error(failures.join("\n\n"), window, cx);
+                    }
+                })
+                .ok();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// panes のどれかで何かが動いていれば、確かめてから then を呼ぶ。設定で無効なら確かめない。

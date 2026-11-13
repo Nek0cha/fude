@@ -6,7 +6,7 @@
 use std::io;
 use std::sync::Arc;
 
-use fude_core::panel::{ExternalAction, FileMode, external_change};
+use fude_core::panel::{ExternalAction, FileMode, ReadOutcome, external_change};
 use fude_core::text::{OpenError, TextDoc, decode_text, encode_text};
 use fude_fs::git::{GitMark, LineMark, line_marks};
 use fude_fs::{ProjectFs, RelPath};
@@ -17,6 +17,7 @@ use gpui_kit::component::input::Editor;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::dialog::error_text;
 use crate::language::language_for;
 use crate::theme::{Theme, mono_font, size};
 use crate::title_row::icon;
@@ -39,6 +40,11 @@ pub(crate) fn has_diff(mark: Option<GitMark>) -> bool {
     matches!(mark, Some(GitMark::Modified | GitMark::Added | GitMark::Deleted))
 }
 
+/// 保存が終わった時点のエディタの中身 current が、保存した中身 saved と違えば未保存のまま。
+pub(crate) fn dirty_after_save(current: &str, saved: &str) -> bool {
+    current != saved
+}
+
 pub(crate) fn open_error_text(e: OpenError) -> String {
     match e {
         OpenError::Binary => "バイナリのため開けない".into(),
@@ -55,6 +61,8 @@ pub enum FileViewEvent {
     /// 未保存の状態が変わった。
     Dirty,
     Saved,
+    /// キーでの保存に失敗した（知らせる文）。
+    SaveFailed(String),
 }
 
 /// 上部の帯。
@@ -168,6 +176,13 @@ impl FileView {
             }
             _ => self.pending_cursor = Some(pos),
         }
+        cx.notify();
+    }
+
+    /// ツリーで名前が変わった。新しいパスで読み直しの要否を確かめる（見つからないの帯を消すため）。
+    pub fn set_rel(&mut self, rel: String, cx: &mut Context<Self>) {
+        self.rel = rel;
+        self.on_external_change(cx);
         cx.notify();
     }
 
@@ -341,9 +356,9 @@ impl FileView {
         cx.notify();
     }
 
-    /// 保存する（⌘S）。改行と BOM は開いたときの形のまま。
-    pub fn save(&mut self, cx: &mut Context<Self>) {
-        let Body::Text { doc, editor, .. } = &self.body else { return };
+    /// 保存する。改行と BOM は開いたときの形のまま。書き終えたら結果を返す。
+    pub fn save(&mut self, cx: &mut Context<Self>) -> Task<io::Result<()>> {
+        let Body::Text { doc, editor, .. } = &self.body else { return Task::ready(Ok(())) };
         let text = editor.read(cx).value().to_string();
         let bytes = encode_text(doc, &text);
         let fs = self.fs.clone();
@@ -352,20 +367,39 @@ impl FileView {
         let task = cx.background_spawn(async move { fs.write(&rel?, &written) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            this.update(cx, |this, cx| match result {
-                Ok(()) => {
+            if result.is_ok() {
+                this.update(cx, |this, cx| {
+                    // 書いている間に打った文字は、保存した中身に入っていない。
+                    let current = match &this.body {
+                        Body::Text { editor, .. } => editor.read(cx).value().to_string(),
+                        _ => text.clone(),
+                    };
                     this.disk = Some(bytes);
+                    this.dirty = dirty_after_save(&current, &text);
                     this.saved_text = text;
-                    this.dirty = false;
                     this.banner = None;
                     cx.emit(FileViewEvent::Dirty);
                     cx.emit(FileViewEvent::Saved);
                     this.load_diff(cx);
                     cx.notify();
-                }
-                Err(e) => eprintln!("保存できない: {}: {e}", this.rel),
-            })
-            .ok();
+                })
+                .ok();
+            }
+            result
+        })
+    }
+
+    /// キー（⌘S / Ctrl+S）での保存。失敗したら持ち主に知らせる。
+    fn save_from_key(&mut self, cx: &mut Context<Self>) {
+        let task = self.save(cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = task.await {
+                this.update(cx, |this, cx| {
+                    let message = error_text("保存できません", &this.rel, &e);
+                    cx.emit(FileViewEvent::SaveFailed(message));
+                })
+                .ok();
+            }
         })
         .detach();
     }
@@ -378,16 +412,21 @@ impl FileView {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
-                let exists = !matches!(&result, Err(e) if e.kind() == io::ErrorKind::NotFound);
-                if let Ok(bytes) = &result
-                    && this.disk.as_ref() == Some(bytes)
-                {
-                    return;
-                }
-                match external_change(this.dirty, exists) {
+                let outcome = match &result {
+                    Ok(bytes) if this.disk.as_ref() == Some(bytes) => ReadOutcome::Same,
+                    Ok(_) => ReadOutcome::Changed,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => ReadOutcome::Missing,
+                    Err(_) => ReadOutcome::Failed,
+                };
+                match external_change(this.dirty, outcome) {
                     ExternalAction::Reload => this.loaded(result, cx),
                     ExternalAction::AskKeepOrReload => this.banner = Some(Banner::ChangedOutside),
                     ExternalAction::MarkMissing => this.banner = Some(Banner::Missing),
+                    // 同じ中身で戻ってきた（名前の変更、stash など）なら、見つからないの帯を消す。
+                    ExternalAction::Ignore if outcome == ReadOutcome::Same && this.banner == Some(Banner::Missing) => {
+                        this.banner = None;
+                    }
+                    ExternalAction::Ignore => return,
                 }
                 cx.notify();
             })
@@ -550,7 +589,7 @@ impl Render for FileView {
             .track_focus(&self.focus)
             .key_context("FileView")
             .on_drop(|_: &ExternalPaths, _, cx| cx.stop_propagation())
-            .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save(cx)))
+            .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_from_key(cx)))
             .on_action(cx.listener(|_, _: &PanelBack, _, cx| cx.emit(FileViewEvent::Back)))
             .on_action(cx.listener(|_, _: &PanelForward, _, cx| cx.emit(FileViewEvent::Forward)))
             // エディタは、閉じる検索欄や選択が無いときに Esc を親へ回す。そのときだけ右パネルを閉じる。
@@ -568,7 +607,7 @@ impl Render for FileView {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_diff, initial_mode, open_error_text};
+    use super::{dirty_after_save, has_diff, initial_mode, open_error_text};
     use fude_core::panel::FileMode;
     use fude_core::text::OpenError;
     use fude_fs::git::GitMark;
@@ -580,6 +619,13 @@ mod tests {
         assert_eq!(initial_mode(Some(GitMark::Deleted)), FileMode::Diff);
         assert_eq!(initial_mode(Some(GitMark::Untracked)), FileMode::Full);
         assert_eq!(initial_mode(None), FileMode::Full);
+    }
+
+    #[test]
+    fn typing_during_save_stays_dirty() {
+        // 保存の書き込み中に打った文字は、保存した中身に入っていないので未保存のまま。
+        assert!(dirty_after_save("abcd", "abc"));
+        assert!(!dirty_after_save("abc", "abc"));
     }
 
     #[test]

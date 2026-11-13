@@ -1,6 +1,7 @@
 //! 確認ダイアログ。未保存の変更、ツリーの削除、動いているターミナルを閉じるときに出す（設計書 §4.3、§5.12）。
 //! Enter は最初の Primary か Danger、Esc と外側のクリックは Cancel。出ている間は、ほかの操作を受け付けない。
 
+use std::io;
 use std::time::Instant;
 
 use gpui_kit::*;
@@ -31,9 +32,27 @@ pub(crate) struct Dialog {
     pub on_choose: OnChoose,
 }
 
-/// Enter で選ぶボタン。
+/// Enter で選ぶボタン。ボタンが 1 つだけなら、それを選ぶ。
 pub(crate) fn default_index(buttons: &[DialogButton]) -> Option<usize> {
-    buttons.iter().position(|b| matches!(b.role, ButtonRole::Primary | ButtonRole::Danger))
+    buttons
+        .iter()
+        .position(|b| matches!(b.role, ButtonRole::Primary | ButtonRole::Danger))
+        .or_else(|| (buttons.len() == 1).then_some(0))
+}
+
+/// 知らせるだけのダイアログのボタン（Enter でも Esc でも閉じる）。
+pub(crate) fn ok_dialog_buttons() -> Vec<DialogButton> {
+    vec![DialogButton { label: "OK", role: ButtonRole::Cancel }]
+}
+
+/// ファイル操作の失敗を知らせる文。what は「保存できません」など、name は対象の名前。
+pub(crate) fn error_text(what: &str, name: &str, e: &io::Error) -> String {
+    let reason = if e.kind() == io::ErrorKind::AlreadyExists {
+        "同じ名前のものがすでにあります".to_string()
+    } else {
+        e.to_string()
+    };
+    format!("{what}: {name}\n{reason}")
 }
 
 /// Esc と外側のクリックで選ぶボタン。
@@ -55,6 +74,12 @@ impl WorkspaceView {
         let popup = Popup::open(point(px(0.), px(0.)), window, cx);
         self.dialog = Some(OpenDialog { message, buttons, on_choose: Some(on_choose), popup });
         cx.notify();
+    }
+
+    /// 失敗を知らせる（OK だけのダイアログ）。
+    pub(crate) fn show_error(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = Dialog { message, buttons: ok_dialog_buttons(), on_choose: Box::new(|_, _, _, _| {}) };
+        self.show_dialog(dialog, window, cx);
     }
 
     /// 選ぶ前の（消える動きに入っていない）ダイアログがあるか。
@@ -155,7 +180,7 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ButtonRole, DialogButton, cancel_index, default_index};
+    use super::{ButtonRole, DialogButton, cancel_index, default_index, error_text, ok_dialog_buttons};
 
     fn b(label: &'static str, role: ButtonRole) -> DialogButton {
         DialogButton { label, role }
@@ -170,5 +195,23 @@ mod tests {
         assert_eq!(default_index(&close), Some(1));
         assert_eq!(cancel_index(&close), Some(0));
         assert_eq!(cancel_index(&[b("OK", ButtonRole::Primary)]), None);
+    }
+
+    #[test]
+    fn ok_dialog_closes_with_enter_and_esc() {
+        let ok = ok_dialog_buttons();
+        assert_eq!(ok.len(), 1);
+        assert_eq!(default_index(&ok), Some(0));
+        assert_eq!(cancel_index(&ok), Some(0));
+    }
+
+    #[test]
+    fn error_text_for_io_errors() {
+        let exists = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "x");
+        assert_eq!(error_text("名前を変えられません", "b.rs", &exists), "名前を変えられません: b.rs
+同じ名前のものがすでにあります");
+        let other = std::io::Error::other("ディスクがいっぱい");
+        assert_eq!(error_text("保存できません", "a.rs", &other), "保存できません: a.rs
+ディスクがいっぱい");
     }
 }

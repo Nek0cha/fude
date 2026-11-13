@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use fude_core::panel::{FileMode, PanelHistory, PanelItem};
+use fude_core::panel::{FileMode, PanelHistory, PanelItem, renamed_rel};
 use fude_core::workspace::ProjectId;
 use fude_fs::ProjectFs;
 use fude_fs::git::GitMark;
@@ -143,10 +143,38 @@ impl WorkspaceView {
         let item = PanelItem { rel, mode: mode.unwrap_or_else(|| initial_mode(mark)) };
         let next = item.rel.clone();
         self.confirm_leave(project, Some(&next), window, cx, move |this, window, cx| {
-            this.panels.entry(project).or_default().history.open(item.clone());
-            this.panels.entry(project).or_default().auto_mode = auto;
+            let slot = this.panels.entry(project).or_default();
+            let new = slot.history.open(item.clone());
+            // 今表示しているファイルを開き直したなら、作り直さない（未保存の変更を残す）。
+            let same = slot.view.clone().filter(|v| !new && slot.loading.is_none() && v.read(cx).rel == item.rel);
+            if let Some(view) = same {
+                if let Some(mode) = mode {
+                    view.update(cx, |v, cx| v.set_mode(mode, cx));
+                }
+                if let Some((p, line, col)) = this.pending_goto
+                    && p == project
+                {
+                    this.pending_goto = None;
+                    view.update(cx, |v, cx| v.goto(line, col, window, cx));
+                }
+                window.focus(&view.read(cx).focus_handle(), cx);
+                cx.notify();
+                return;
+            }
+            slot.auto_mode = auto;
             this.show_item(project, item, mark, window, cx);
         });
+    }
+
+    /// ツリーで from の名前が to に変わった。開いているファイルと履歴のパスを合わせる。
+    pub(crate) fn panel_renamed(&mut self, project: ProjectId, from: &str, to: &str, cx: &mut Context<Self>) {
+        let Some(slot) = self.panels.get_mut(&project) else { return };
+        slot.history.rename(from, to);
+        let Some(view) = slot.view.clone() else { return };
+        let Some(rel) = renamed_rel(&view.read(cx).rel, from, to) else { return };
+        view.update(cx, |v, cx| v.set_rel(rel.clone(), cx));
+        self.workspace.set_open_file(project, Some(rel));
+        cx.notify();
     }
 
     /// 戻る（delta = -1）／進む（+1）。
@@ -215,9 +243,10 @@ impl WorkspaceView {
                     _ => return,
                 };
                 if let Replace::Save = choice {
-                    view.update(cx, |v, cx| v.save(cx));
+                    this.save_then(vec![view], window, cx, then);
+                } else {
+                    then(this, window, cx);
                 }
-                then(this, window, cx);
             }),
         };
         self.show_dialog(dialog, window, cx);
@@ -284,6 +313,7 @@ impl WorkspaceView {
             FileViewEvent::Back => this.panel_navigate(project, -1, window, cx),
             FileViewEvent::Forward => this.panel_navigate(project, 1, window, cx),
             FileViewEvent::Dirty | FileViewEvent::Saved => cx.notify(),
+            FileViewEvent::SaveFailed(message) => this.show_error(message.clone(), window, cx),
         });
         if let Some((p, line, col)) = self.pending_goto
             && p == project
