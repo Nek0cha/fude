@@ -28,14 +28,15 @@ const PROJECT_KEYS_WIN: [&str; 9] =
 
 /// GPUI のキーストローク表記（"cmd-t" など）と Command の組の一覧。
 /// Windows では、ターミナルの Ctrl+T / Ctrl+D と衝突しないよう Shift 付きにする。
+/// Shift と記号の組み合わせは、GPUI が受け取る形（Shift を外し、記号を `{` `}` にした形）で書く。
 pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
     let (fixed, projects) = match platform {
         Platform::MacOs => (
             [
                 ("cmd-t", Command::NewTab),
                 ("cmd-d", Command::SplitTab),
-                ("cmd-shift-]", Command::NextTab),
-                ("cmd-shift-[", Command::PrevTab),
+                ("cmd-}", Command::NextTab),
+                ("cmd-{", Command::PrevTab),
             ],
             PROJECT_KEYS_MAC,
         ),
@@ -43,8 +44,8 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
             [
                 ("ctrl-shift-t", Command::NewTab),
                 ("ctrl-shift-d", Command::SplitTab),
-                ("ctrl-shift-]", Command::NextTab),
-                ("ctrl-shift-[", Command::PrevTab),
+                ("ctrl-}", Command::NextTab),
+                ("ctrl-{", Command::PrevTab),
             ],
             PROJECT_KEYS_WIN,
         ),
@@ -68,6 +69,17 @@ mod tests {
     #[test]
     fn windows_new_tab_is_ctrl_shift_t() {
         assert!(default_bindings(Platform::Windows).contains(&("ctrl-shift-t", Command::NewTab)));
+    }
+
+    /// GPUI は Shift と記号の組み合わせを、Shift を外した記号（`{` `}`）で受け取る。
+    #[test]
+    fn tab_cycling_uses_shifted_bracket_chars() {
+        let mac = default_bindings(Platform::MacOs);
+        assert!(mac.contains(&("cmd-}", Command::NextTab)));
+        assert!(mac.contains(&("cmd-{", Command::PrevTab)));
+        let win = default_bindings(Platform::Windows);
+        assert!(win.contains(&("ctrl-}", Command::NextTab)));
+        assert!(win.contains(&("ctrl-{", Command::PrevTab)));
     }
 
     #[test]
