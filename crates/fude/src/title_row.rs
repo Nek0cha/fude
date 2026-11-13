@@ -9,6 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::hover::HoverKey;
+use crate::layout_anim::{tab_close_progress, tab_open_progress, tab_width_estimate};
 use crate::theme::{Theme, size};
 use crate::workspace_view::WorkspaceView;
 
@@ -20,13 +21,46 @@ pub(crate) fn icon(name: IconName, color: Rgba) -> Svg {
 
 impl WorkspaceView {
     pub(crate) fn render_title_row(&mut self, window: &mut Window, cx: &mut Context<Self>, now: Instant) -> Div {
-        let tabs: Vec<AnyElement> = match self.workspace.active_project() {
+        let mut tabs: Vec<AnyElement> = match self.workspace.active_project() {
             Some(p) => {
                 let active = p.active_tab;
-                p.tabs.iter().map(|t| self.render_tab(t, Some(t.id) == active, cx, now).into_any_element()).collect()
+                p.tabs
+                    .iter()
+                    .map(|t| {
+                        let el = self.render_tab(t, Some(t.id) == active, cx, now);
+                        // 出てきたタブは幅を広げながら、文字をフェードインする（設計書 §6.3）。
+                        match self.anims.opened.get(&t.id) {
+                            Some(start) => {
+                                let f = tab_open_progress(now.saturating_duration_since(*start), self.reduced_motion);
+                                let w = tab_width_estimate(&t.title()) * f;
+                                div().max_w(px(w)).overflow_hidden().flex_shrink_0().opacity(f).child(el).into_any_element()
+                            }
+                            None => el.into_any_element(),
+                        }
+                    })
+                    .collect()
             }
             None => Vec::new(),
         };
+        // 閉じたタブは、文字を消してから幅を縮める。
+        let theme = *cx.global::<Theme>();
+        for c in &self.anims.closing {
+            let (text, width, _) = tab_close_progress(now.saturating_duration_since(c.started), self.reduced_motion);
+            let ghost = div()
+                .h(size::TAB_H)
+                .w(px(tab_width_estimate(&c.title) * width))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .text_size(px(13.))
+                .text_color(Rgba { a: theme.fg_dim.a * text, ..theme.fg_dim })
+                .child(c.title.clone())
+                .into_any_element();
+            tabs.insert(c.index.min(tabs.len()), ghost);
+        }
         let add_tab = self
             .tool_button("add-tab", HoverKey::AddTab, IconName::Plus, cx, now)
             .on_click(cx.listener(|this, _, _, cx| {

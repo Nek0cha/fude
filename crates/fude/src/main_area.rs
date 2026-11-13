@@ -29,11 +29,13 @@ pub(crate) fn layout_for(has_tabs: bool, panel_open: bool) -> Layout {
 }
 
 /// 選択中のタブのペインを横に均等に並べ、間に 1px の線を引く。panel があれば右に置く。main_w はメイン領域の幅。
+/// split_share は左のペインの幅の割合（分割の動きの途中も含む）。
 pub fn render_main_area(
     tab: Option<&Tab>,
     terminals: &HashMap<PaneId, Entity<TerminalView>>,
     panel: Option<AnyView>,
     main_w: Pixels,
+    split_share: f32,
     cx: &App,
 ) -> Div {
     let theme = *cx.global::<Theme>();
@@ -44,7 +46,12 @@ pub fn render_main_area(
             if i > 0 {
                 row = row.child(line());
             }
-            let mut cell = div().flex_1().min_w_0().h_full().overflow_hidden();
+            // 左のペインは割合で幅を決め、右のペインは残りを使う。分割の解除の途中は、右に空きが残る。
+            let mut cell = if i == 0 && (tab.panes.len() > 1 || split_share < 1.0) {
+                div().w(relative(split_share)).flex_shrink_0().h_full().overflow_hidden()
+            } else {
+                div().flex_1().min_w_0().h_full().overflow_hidden()
+            };
             if let Some(view) = terminals.get(&pane.id) {
                 cell = cell.child(view.clone());
             }

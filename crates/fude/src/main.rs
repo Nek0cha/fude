@@ -11,6 +11,7 @@ mod home;
 mod hover;
 mod instance;
 mod language;
+mod layout_anim;
 mod main_area;
 mod open_file;
 mod popup;

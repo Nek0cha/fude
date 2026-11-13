@@ -57,6 +57,10 @@ pub struct TerminalView {
     click_count: usize,
     /// マウスが乗っているリンク（行、始まりの列、終わりの列（含まない）、行き先）。
     hover_link: Option<(u16, u16, u16, LinkTarget)>,
+    /// 動きの間は PTY にサイズを送らない（描画の closure から読むため Cell）。
+    resize_frozen: Rc<Cell<bool>>,
+    /// 作った時刻（中身のフェードイン）。
+    created_at: Instant,
     _events: Task<()>,
 }
 
@@ -99,12 +103,24 @@ impl TerminalView {
             drag: None,
             click_count: 0,
             hover_link: None,
+            resize_frozen: Rc::new(Cell::new(false)),
+            created_at: Instant::now(),
             _events: events,
         }
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    /// 動きの間は true にする。false に戻したら、次の描画で最終的なサイズを 1 回だけ送る。
+    pub fn set_resize_frozen(&mut self, frozen: bool, cx: &mut Context<Self>) {
+        if self.resize_frozen.get() != frozen {
+            self.resize_frozen.set(frozen);
+            if !frozen {
+                cx.notify();
+            }
+        }
     }
 
     fn handle_events(&mut self, events: Vec<SessionEvent>, cx: &mut Context<Self>) {
@@ -330,6 +346,11 @@ impl TerminalView {
     }
 }
 
+/// 描画で測った大きさ measured を PTY に送るか。動きの間（frozen）と、今と同じなら送らない（設計書 §6.3）。
+pub(crate) fn resize_target(frozen: bool, measured: GridSize, current: GridSize) -> Option<GridSize> {
+    (!frozen && measured != current).then_some(measured)
+}
+
 /// 行の文字と列の対応（Snapshot::row_chars）から、col の上にあるリンクと、その列の範囲を返す。
 pub(crate) fn link_at(chars: &[(char, u16)], col: u16) -> Option<(u16, u16, LinkTarget)> {
     let text: String = chars.iter().map(|(c, _)| *c).collect();
@@ -453,6 +474,12 @@ impl Render for TerminalView {
         let underline = self.hover_link.as_ref().map(|(row, start, end, _)| (*row, *start, *end));
         let link_color = theme.fg_default;
         let bounds_cell = self.bounds.clone();
+        let frozen = self.resize_frozen.clone();
+        let age = now.saturating_duration_since(self.created_at);
+        let opacity = crate::theme::motion::ease_out((age.as_secs_f32() / crate::theme::motion::TERM_IN.as_secs_f32()).min(1.0));
+        if opacity < 1.0 {
+            window.request_animation_frame();
+        }
 
         let grid = canvas(
             move |bounds, _, _| {
@@ -460,7 +487,10 @@ impl Render for TerminalView {
                 if let Some(s) = &session {
                     let w = f32::from(bounds.size.width);
                     let h = f32::from(bounds.size.height);
-                    s.resize(GridSize::from_pixels(w, h, f32::from(metrics.cell_w), f32::from(metrics.line_h)));
+                    let measured = GridSize::from_pixels(w, h, f32::from(metrics.cell_w), f32::from(metrics.line_h));
+                    if let Some(size) = resize_target(frozen.get(), measured, s.with_state(|st| st.size())) {
+                        s.resize(size);
+                    }
                 }
                 session
             },
@@ -504,6 +534,7 @@ impl Render for TerminalView {
             .when(self.hover_link.is_some(), |d| d.cursor_pointer())
             .relative()
             .size_full()
+            .opacity(opacity)
             .px(TERM_PAD_X)
             .py(TERM_PAD_Y)
             .font(mono_font())
@@ -546,6 +577,16 @@ mod tests {
         assert!(made_selection(true, 1));
         assert!(made_selection(false, 2));
         assert!(made_selection(false, 3));
+    }
+
+    #[test]
+    fn frozen_terminal_does_not_resize() {
+        use super::resize_target;
+        let a = GridSize { cols: 80, rows: 24 };
+        let b = GridSize { cols: 100, rows: 24 };
+        assert_eq!(resize_target(true, b, a), None);
+        assert_eq!(resize_target(false, a, a), None);
+        assert_eq!(resize_target(false, b, a), Some(b));
     }
 
     #[test]
