@@ -1,6 +1,7 @@
 //! GUI に依存しないターミナルの中身。VT の解析と画面バッファ、PTY のセッションを扱う。
 
 pub mod input;
+pub mod links;
 pub mod palette;
 pub mod session;
 pub mod shell;

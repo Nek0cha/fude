@@ -108,6 +108,12 @@ impl Snapshot {
         }
         text.trim_end().to_string()
     }
+
+    /// 行の文字と、その文字が始まる列（spacer を除く。全角は 2 列を使う）。リンクの位置をセルに戻すために使う。
+    pub fn row_chars(&self, row: u16) -> Vec<(char, u16)> {
+        let Some(line) = self.lines.get(usize::from(row)) else { return Vec::new() };
+        line.iter().enumerate().filter(|(_, c)| !c.spacer).map(|(i, c)| (c.c, i as u16)).collect()
+    }
 }
 
 /// Term からの通知を溜める。
@@ -281,6 +287,14 @@ mod tests {
 
     fn snap(t: &TermState) -> Snapshot {
         t.snapshot(&test_palette(), true)
+    }
+
+    #[test]
+    fn row_chars_map_wide_chars_to_columns() {
+        let s = snap(&term(20, 5, "あa b"));
+        let chars = s.row_chars(0);
+        assert_eq!(&chars[..4], &[('あ', 0), ('a', 2), (' ', 3), ('b', 4)]);
+        assert!(s.row_chars(99).is_empty());
     }
 
     #[test]

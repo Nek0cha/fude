@@ -12,8 +12,10 @@ use fude_core::workspace::{ProjectRoot, ShellKind};
 use fude_term::{
     GridSize, SelectKind, Session, SessionEvent, WheelAccum, alt_scroll_bytes, alt_scroll_lines, paste_bytes, spawn_spec,
 };
+use fude_term::links::{LinkTarget, find_links};
 use futures::StreamExt;
 use gpui_kit::assets::IconName;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::hover::{HoverFades, HoverKey};
@@ -29,6 +31,8 @@ const TO_BOTTOM_INSET: Pixels = px(12.);
 
 /// ビューからワークスペースへ知らせること。
 pub enum TerminalEvent {
+    /// 出力の中のパスや URL をクリックした。
+    OpenLink(LinkTarget),
     Title(Option<String>),
     Exited { success: bool },
     /// クリックでこのペインにフォーカスした。
@@ -51,6 +55,8 @@ pub struct TerminalView {
     /// マウスで選択中なら Some（押してから動かしたか）。
     drag: Option<bool>,
     click_count: usize,
+    /// マウスが乗っているリンク（行、始まりの列、終わりの列（含まない）、行き先）。
+    hover_link: Option<(u16, u16, u16, LinkTarget)>,
     _events: Task<()>,
 }
 
@@ -92,6 +98,7 @@ impl TerminalView {
             hover: HoverFades::default(),
             drag: None,
             click_count: 0,
+            hover_link: None,
             _events: events,
         }
     }
@@ -168,7 +175,27 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// マウスが乗った行だけリンクを探す（常に下線を出すと画面が散らかるため）。
+    fn update_hover_link(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let found = (|| {
+            let session = self.session.as_ref()?;
+            let (row, col, _) = self.cell_at(pos)?;
+            let palette = cx.global::<Theme>().term_palette;
+            let chars = session.with_state(|st| st.snapshot(&palette, false).row_chars(row));
+            let (start, end, target) = link_at(&chars, col)?;
+            Some((row, start, end, target))
+        })();
+        if found != self.hover_link {
+            self.hover_link = found;
+            cx.notify();
+        }
+    }
+
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if ev.pressed_button.is_none() {
+            self.update_hover_link(ev.position, cx);
+            return;
+        }
         if self.drag.is_none() || ev.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -193,6 +220,19 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, cx: &mut Context<Self>) {
+        // 押して動かさずに離したら、乗っているリンクを開く（ドラッグなら今までどおり選択）。
+        if self.drag == Some(false)
+            && self.click_count == 1
+            && let Some((_, _, _, target)) = self.hover_link.clone()
+        {
+            self.drag = None;
+            if let Some(s) = &self.session {
+                s.with_state(|st| st.clear_selection());
+            }
+            cx.emit(TerminalEvent::OpenLink(target));
+            cx.notify();
+            return;
+        }
         if let Some(moved) = self.drag.take() {
             if !made_selection(moved, self.click_count)
                 && let Some(s) = &self.session
@@ -288,6 +328,19 @@ impl TerminalView {
         let at = point(origin.x + m.cell_w * f32::from(cursor.col), origin.y + m.line_h * f32::from(cursor.row));
         Some(Bounds::new(at, size(m.cell_w, m.line_h)))
     }
+}
+
+/// 行の文字と列の対応（Snapshot::row_chars）から、col の上にあるリンクと、その列の範囲を返す。
+pub(crate) fn link_at(chars: &[(char, u16)], col: u16) -> Option<(u16, u16, LinkTarget)> {
+    let text: String = chars.iter().map(|(c, _)| *c).collect();
+    find_links(&text).into_iter().find_map(|link| {
+        let start = chars.get(link.start)?.1;
+        let end = match chars.get(link.end) {
+            Some((_, c)) => *c,
+            None => chars.get(link.end.checked_sub(1)?)?.1 + 1,
+        };
+        (start <= col && col < end).then_some((start, end, link.target))
+    })
 }
 
 /// 右クリックで行うこと。
@@ -397,6 +450,8 @@ impl Render for TerminalView {
         let session = self.session.clone();
         let marked = self.marked.clone();
         let metrics = self.metrics;
+        let underline = self.hover_link.as_ref().map(|(row, start, end, _)| (*row, *start, *end));
+        let link_color = theme.fg_default;
         let bounds_cell = self.bounds.clone();
 
         let grid = canvas(
@@ -413,6 +468,12 @@ impl Render for TerminalView {
                 if let Some(s) = session {
                     let snap = s.with_state(|st| st.snapshot(&theme.term_palette, focused));
                     paint_terminal(&snap, marked.as_deref(), bounds.origin, metrics, &theme, window, cx);
+                    if let Some((row, start, end)) = underline {
+                        let x = bounds.origin.x + metrics.cell_w * f32::from(start);
+                        let y = bounds.origin.y + metrics.line_h * f32::from(row + 1) - px(2.);
+                        let w = metrics.cell_w * f32::from(end - start);
+                        window.paint_quad(fill(Bounds::new(point(x, y), size(w, px(1.))), link_color));
+                    }
                 }
                 window.handle_input(&focus, ElementInputHandler::new(bounds, entity), cx);
             },
@@ -440,6 +501,7 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| this.on_mouse_move(ev, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_mouse_up(cx)))
             .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| this.on_scroll(ev, cx)))
+            .when(self.hover_link.is_some(), |d| d.cursor_pointer())
             .relative()
             .size_full()
             .px(TERM_PAD_X)
@@ -484,6 +546,19 @@ mod tests {
         assert!(made_selection(true, 1));
         assert!(made_selection(false, 2));
         assert!(made_selection(false, 3));
+    }
+
+    #[test]
+    fn link_at_maps_columns() {
+        use super::link_at;
+        use fude_term::links::LinkTarget;
+        // "あ src/a.rs" — 全角の「あ」は 2 列を使う。
+        let chars = vec![('あ', 0), (' ', 2), ('s', 3), ('r', 4), ('c', 5), ('/', 6), ('a', 7), ('.', 8), ('r', 9), ('s', 10)];
+        let (start, end, target) = link_at(&chars, 5).unwrap();
+        assert_eq!((start, end), (3, 11));
+        assert_eq!(target, LinkTarget::Path { path: "src/a.rs".into(), line: None, col: None });
+        assert!(link_at(&chars, 1).is_none());
+        assert!(link_at(&chars, 11).is_none());
     }
 
     #[test]

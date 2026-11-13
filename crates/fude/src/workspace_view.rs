@@ -558,8 +558,11 @@ impl WorkspaceView {
             }
             let terminal_id = terminal_id(id);
             let view = cx.new(|cx| TerminalView::new(&kind, &root, &terminal_id, window, cx));
-            let sub = cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
+            let link_kind = kind.clone();
+            let link_root = root.clone();
+            let sub = cx.subscribe_in(&view, window, move |this, _, event: &TerminalEvent, window, cx| {
                 match event {
+                    TerminalEvent::OpenLink(target) => this.open_link(target.clone(), &link_kind, &link_root, window, cx),
                     TerminalEvent::Title(title) => this.workspace.set_pane_title(id, title.clone()),
                     TerminalEvent::Exited { success: true } => {
                         this.workspace.close_pane(id);
@@ -580,6 +583,32 @@ impl WorkspaceView {
             self.focused_pane = Some(target);
             let handle = view.read(cx).focus_handle();
             window.focus(&handle, cx);
+        }
+    }
+
+    /// ターミナルの出力のリンクを開く。URL はブラウザで、パスは右パネルで（見つからなければ何もしない）。
+    fn open_link(
+        &mut self,
+        target: fude_term::links::LinkTarget,
+        kind: &ShellKind,
+        root: &ProjectRoot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use fude_core::location::FileLocation;
+        use fude_term::links::{LinkTarget, resolve_link};
+        match target {
+            LinkTarget::Url(url) => cx.open_url(&url),
+            LinkTarget::Path { path, line, col } => {
+                let Some(file) = resolve_link(&path, kind, root) else { return };
+                // ローカルはその場で確かめる。WSL は確かめずに開く（無ければ右パネルが「見つからない」と出す）。
+                if let FileLocation::Local(p) = &file
+                    && !p.is_file()
+                {
+                    return;
+                }
+                self.open_file(file, None, line.map(|l| (l, col)), window, cx);
+            }
         }
     }
 
