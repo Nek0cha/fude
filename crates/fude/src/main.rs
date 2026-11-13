@@ -88,8 +88,8 @@ fn main() {
         Some(data) => Workspace::restore(data, &|p| p.is_dir()),
         None => Workspace::default(),
     };
-    if let Launch::Open(root) = launch {
-        workspace.open_project(root);
+    if let Launch::Open { root, shell } = launch {
+        workspace.open_project_with(root, shell);
     }
 
     application().with_assets(FudeAssets).run(move |cx: &mut App| {

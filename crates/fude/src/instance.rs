@@ -19,7 +19,7 @@ pub enum HandOff {
 fn message_of(launch: &Launch) -> Message {
     match launch {
         Launch::Activate => Message::Activate,
-        Launch::Open(root) => Message::Open { root: root.clone() },
+        Launch::Open { root, shell } => Message::Open { root: root.clone(), shell: shell.clone() },
     }
 }
 

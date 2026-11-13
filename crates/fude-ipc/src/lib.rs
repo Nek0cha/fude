@@ -5,7 +5,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use fude_core::workspace::ProjectRoot;
+use fude_core::workspace::{ProjectRoot, ShellKind};
 use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream, prelude::*};
 use serde::{Deserialize, Serialize};
 
@@ -15,8 +15,13 @@ const MAX_LINE: u64 = 64 * 1024;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
-    /// プロジェクトを開いて（開いていれば切り替えて）前面に出す。
-    Open { root: ProjectRoot },
+    /// プロジェクトを開いて（開いていれば切り替えて）前面に出す。shell は新しく開くときの既定のシェルの上書き
+    /// （WSL 側の fude が付ける。計画4の fude からの要求には無い）。
+    Open {
+        root: ProjectRoot,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<ShellKind>,
+    },
     /// 前面に出すだけ。
     Activate,
 }
@@ -215,5 +220,11 @@ mod tests {
         assert_eq!(name_with(&[("USERNAME", "neko"), ("FUDE_INSTANCE", "dev")]), "fude-dev-neko");
         assert_eq!(name_with(&[("USERNAME", "a b/c")]), "fude-a_b_c");
         assert_eq!(name_with(&[]), "fude-user");
+    }
+
+    #[test]
+    fn open_without_shell_parses() {
+        let msg: Message = serde_json::from_str(r#"{"type":"open","root":{"local":"C:\\w"}}"#).unwrap();
+        assert_eq!(msg, Message::Open { root: ProjectRoot::Local(std::path::PathBuf::from(r"C:\w")), shell: None });
     }
 }

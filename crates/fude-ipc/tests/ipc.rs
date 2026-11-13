@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use fude_core::workspace::ProjectRoot;
+use fude_core::workspace::{ProjectRoot, ShellKind};
 use fude_ipc::{BindError, Message, SendError, Server, local_name, send};
 use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
 
@@ -35,10 +35,13 @@ fn send_without_server_is_not_running() {
 fn message_roundtrip() {
     let n = name("roundtrip");
     let rx = serve(&n);
-    let open = Message::Open { root: ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() } };
+    let open = Message::Open { root: ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() }, shell: None };
     send(&n, &open, TIMEOUT).unwrap();
     send(&n, &Message::Activate, TIMEOUT).unwrap();
-    let local = Message::Open { root: ProjectRoot::Local(PathBuf::from(r"C:\w\a")) };
+    let local = Message::Open {
+        root: ProjectRoot::Local(PathBuf::from(r"C:\w\a")),
+        shell: Some(ShellKind::Wsl { distro: "Ubuntu".into() }),
+    };
     send(&n, &local, TIMEOUT).unwrap();
     assert_eq!(rx.recv_timeout(TIMEOUT).unwrap(), open);
     assert_eq!(rx.recv_timeout(TIMEOUT).unwrap(), Message::Activate);

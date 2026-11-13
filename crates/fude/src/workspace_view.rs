@@ -213,16 +213,16 @@ impl WorkspaceView {
         self.focused_pane = None;
     }
 
-    /// root は正規化済みとする。
-    pub(crate) fn open_project(&mut self, root: ProjectRoot, cx: &mut Context<Self>) {
-        self.workspace.open_project(root);
+    /// root は正規化済みとする。shell は新しく開くときの既定のシェルの上書き。
+    pub(crate) fn open_project(&mut self, root: ProjectRoot, shell: Option<ShellKind>, cx: &mut Context<Self>) {
+        self.workspace.open_project_with(root, shell);
         self.refresh_active_branch(cx);
     }
 
     /// 2 つ目の起動から届いた要求。Open ならプロジェクトを開いて（開いていれば切り替えて）、どちらも前面に出す。
     pub(crate) fn handle_message(&mut self, msg: Message, window: &mut Window, cx: &mut Context<Self>) {
-        if let Message::Open { root } = msg {
-            self.open_project(root, cx);
+        if let Message::Open { root, shell } = msg {
+            self.open_project(root, shell, cx);
         }
         window.activate_window();
         cx.activate(true);
@@ -319,7 +319,7 @@ impl WorkspaceView {
                 }
             };
             this.update(cx, |this, cx| {
-                this.open_project(root, cx);
+                this.open_project(root, None, cx);
                 cx.notify();
             })
             .ok();
