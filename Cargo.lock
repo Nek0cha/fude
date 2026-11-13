@@ -1808,6 +1808,7 @@ dependencies = [
 name = "fude-wsl"
 version = "0.1.0"
 dependencies = [
+ "fude-core",
  "fude-fs",
 ]
 

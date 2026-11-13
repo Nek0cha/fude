@@ -1,4 +1,4 @@
-//! WSL に置く Linux 用の fude。`fude [path]` で Windows の fude にフォルダを開かせ、`fude serve` で
+//! WSL に置く Linux 用の fude。`fude [path]` で Windows の fude にフォルダかファイルを開かせ、`fude serve` で
 //! Windows の fude からのファイルの要求を処理する。`fude version` は版の印を出す。
 
 use std::io::{self, BufWriter};
@@ -29,7 +29,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         [cmd] if cmd == "serve" => Ok(Cli::Serve),
         [cmd] if cmd == "version" => Ok(Cli::Version),
         [path] => Ok(Cli::Open(PathBuf::from(path))),
-        _ => Err("使い方: fude [フォルダ] | fude serve | fude version".to_string()),
+        _ => Err("使い方: fude [フォルダ | ファイル] | fude serve | fude version".to_string()),
     }
 }
 
@@ -49,6 +49,17 @@ fn host_exe_files(own_exe: Option<&Path>, home: Option<&str>) -> Vec<PathBuf> {
 /// host-exe と distro と絶対パスから、起動するコマンドと引数を作る。
 fn open_command(host_exe: &str, distro: &str, abs: &Path) -> (String, Vec<String>) {
     let args = vec!["--wsl".to_string(), distro.to_string(), abs.to_string_lossy().into_owned()];
+    (host_exe.to_string(), args)
+}
+
+/// ファイルを開かせるコマンドと引数。root は fude_core::location::find_project_root で探したもの。
+fn open_file_command(host_exe: &str, distro: &str, root: &Path, file: &Path) -> (String, Vec<String>) {
+    let args = vec![
+        "--wsl-file".to_string(),
+        distro.to_string(),
+        root.to_string_lossy().into_owned(),
+        file.to_string_lossy().into_owned(),
+    ];
     (host_exe.to_string(), args)
 }
 
@@ -104,6 +115,7 @@ fn new_session(command: &mut Command) {
 fn new_session(_command: &mut Command) {}
 
 /// path を Windows の fude に開かせ、その終了コードを返す（OPEN_WAIT を過ぎたら 0）。
+/// フォルダならプロジェクトとして、ファイルならそのファイルを（プロジェクトのルートを探して添えて）開かせる。
 fn open(path: &Path) -> Result<i32, String> {
     let distro = std::env::var("WSL_DISTRO_NAME").ok().filter(|d| !d.is_empty()).ok_or(NOT_IN_WSL)?;
     let own_exe = std::env::current_exe().ok();
@@ -114,11 +126,13 @@ fn open(path: &Path) -> Result<i32, String> {
         .map(|s| s.trim().to_string())
         .find(|s| !s.is_empty())
         .ok_or(NO_HOST_EXE)?;
-    let abs = std::fs::canonicalize(path).map_err(|e| format!("フォルダを開けない: {}: {e}", path.display()))?;
-    if !abs.is_dir() {
-        return Err(format!("フォルダではない: {}", path.display()));
-    }
-    let (cmd, args) = open_command(&host_exe, &distro, &abs);
+    let abs = std::fs::canonicalize(path).map_err(|e| format!("開けない: {}: {e}", path.display()))?;
+    let (cmd, args) = if abs.is_dir() {
+        open_command(&host_exe, &distro, &abs)
+    } else {
+        let root = fude_core::location::find_project_root(&abs, &|d| d.join(".git").exists());
+        open_file_command(&host_exe, &distro, &root, &abs)
+    };
     // 標準入出力はつながない。待たずに戻ったあとで fude が書いても、閉じた口に書いて落ちないようにする。
     let mut command = Command::new(&cmd);
     command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -158,6 +172,14 @@ mod tests {
         let files = host_exe_files(Some(Path::new("/tmp/t/fude")), Some("/home/x"));
         assert_eq!(files, vec![PathBuf::from("/tmp/t/host-exe"), PathBuf::from("/home/x/.config/fude/host-exe")]);
         assert_eq!(host_exe_files(None, Some("/home/x")), vec![PathBuf::from("/home/x/.config/fude/host-exe")]);
+    }
+
+    #[test]
+    fn open_file_command_args() {
+        let (cmd, args) =
+            open_file_command("/mnt/c/f/fude.exe", "Ubuntu", Path::new("/home/x/p"), Path::new("/home/x/p/作業 a.md"));
+        assert_eq!(cmd, "/mnt/c/f/fude.exe");
+        assert_eq!(args, vec!["--wsl-file", "Ubuntu", "/home/x/p", "/home/x/p/作業 a.md"]);
     }
 
     #[test]

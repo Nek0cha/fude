@@ -5,6 +5,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use fude_core::location::FileLocation;
 use fude_core::workspace::{ProjectRoot, ShellKind};
 use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream, prelude::*};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,12 @@ pub enum Message {
         root: ProjectRoot,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell: Option<ShellKind>,
+    },
+    /// ファイルを開く（ターミナルは起動しない）。root_hint は WSL 側の fude が探したプロジェクトのルート。
+    OpenFile {
+        file: FileLocation,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root_hint: Option<ProjectRoot>,
     },
     /// 前面に出すだけ。
     Activate,
@@ -220,6 +227,18 @@ mod tests {
         assert_eq!(name_with(&[("USERNAME", "neko"), ("FUDE_INSTANCE", "dev")]), "fude-dev-neko");
         assert_eq!(name_with(&[("USERNAME", "a b/c")]), "fude-a_b_c");
         assert_eq!(name_with(&[]), "fude-user");
+    }
+
+    #[test]
+    fn open_file_roundtrips() {
+        let msg = Message::OpenFile {
+            file: fude_core::location::FileLocation::Wsl { distro: "Ubuntu".into(), path: "/home/x/a.rs".into() },
+            root_hint: Some(ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<Message>(&json).unwrap(), msg);
+        let bare = r#"{"type":"open_file","file":{"local":"C:\\w\\a.rs"}}"#;
+        assert!(matches!(serde_json::from_str::<Message>(bare).unwrap(), Message::OpenFile { root_hint: None, .. }));
     }
 
     #[test]

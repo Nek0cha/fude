@@ -20,6 +20,7 @@ fn message_of(launch: &Launch) -> Message {
     match launch {
         Launch::Activate => Message::Activate,
         Launch::Open { root, shell } => Message::Open { root: root.clone(), shell: shell.clone() },
+        Launch::OpenFile { file, root_hint } => Message::OpenFile { file: file.clone(), root_hint: root_hint.clone() },
     }
 }
 

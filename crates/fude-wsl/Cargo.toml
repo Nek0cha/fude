@@ -9,3 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 fude-fs = { path = "../fude-fs" }
+fude-core = { path = "../fude-core" }
