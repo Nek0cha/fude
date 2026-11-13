@@ -2,6 +2,7 @@
 
 mod assets;
 mod cli;
+mod dialog;
 mod home;
 mod hover;
 mod instance;

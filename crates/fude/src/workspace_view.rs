@@ -185,6 +185,8 @@ pub struct WorkspaceView {
     pub(crate) last_session: Option<SessionData>,
     /// ホーム画面で薄く出す（フォルダが見つからない）プロジェクト。
     pub(crate) missing_roots: HashSet<ProjectRoot>,
+    /// 確認ダイアログ。
+    pub(crate) dialog: Option<crate::dialog::OpenDialog>,
     /// ホーム画面の「最近」の右クリックメニュー。
     pub(crate) home_menu: Option<(ProjectRoot, crate::popup::Popup)>,
     /// ホーム画面とプロジェクトの画面の切り替えのフェード（新しい画面の不透明度）。
@@ -243,6 +245,7 @@ impl WorkspaceView {
             last_session,
             missing_roots: HashSet::new(),
             home_menu: None,
+            dialog: None,
             screen_fade: Fade::settled(1.0),
             showing_home: None,
             saved: None,
@@ -587,6 +590,7 @@ impl Render for WorkspaceView {
         let menu = self.render_shell_menu(window, cx, now);
         let project_menu = self.render_project_menu(window, cx, now);
         let home_menu = self.render_home_menu(window, cx, now);
+        let dialog = self.render_dialog(window, cx, now);
 
         div()
             .id("workspace")
@@ -636,6 +640,7 @@ impl Render for WorkspaceView {
             .children(menu)
             .children(project_menu)
             .children(home_menu)
+            .children(dialog)
     }
 }
 
