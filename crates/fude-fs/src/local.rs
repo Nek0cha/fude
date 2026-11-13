@@ -4,11 +4,15 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fude_core::git_head::read_branch;
 use ignore::WalkBuilder;
 
 use crate::{DirEntry, ProjectFs, RelPath};
+
+/// 一時ファイルの名前を、同じプロセスの中の同時の書き込みで重ねないための通し番号。
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub struct LocalFs {
     root: PathBuf,
@@ -59,15 +63,31 @@ impl ProjectFs for LocalFs {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "ルート自身には書けない"));
         }
         let path = rel.to_path(&self.root);
-        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        let Some(parent) = path.parent() else {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "書き込み先が無い"));
         };
-        fs::create_dir_all(dir)?;
+        fs::create_dir_all(parent)?;
+        // シンボリックリンクなら、リンクを残して先の実体を書き換える。
+        let target = match fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_symlink() => fs::canonicalize(&path)?,
+            _ => path.clone(),
+        };
+        let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "書き込み先が無い"));
+        };
         let mut tmp_name = OsString::from(".");
         tmp_name.push(name);
-        tmp_name.push(format!(".fude-tmp-{}", std::process::id()));
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        tmp_name.push(format!(".fude-tmp-{}-{seq}", std::process::id()));
         let tmp = dir.join(tmp_name);
-        let result = fs::write(&tmp, data).and_then(|()| fs::rename(&tmp, &path));
+        let result = fs::write(&tmp, data)
+            .and_then(|()| match fs::metadata(&target) {
+                // 元のファイルの権限（実行権限など）を引き継ぐ。
+                Ok(m) => fs::set_permissions(&tmp, m.permissions()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            })
+            .and_then(|()| fs::rename(&tmp, &target));
         if result.is_err() {
             let _ = fs::remove_file(&tmp);
         }
@@ -143,6 +163,29 @@ mod tests {
         let left: Vec<_> = fs::read_dir(dir.path().join("dir")).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(left, vec![std::ffi::OsString::from("f.bin")]);
         assert_eq!(fs_.read(&rel("none")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_keeps_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.sh");
+        fs::write(&path, "#!/bin/sh").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        LocalFs::new(dir.path().to_path_buf()).write(&rel("run.sh"), b"echo hi").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_through_symlink_keeps_link() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("AGENTS.md"), "old").unwrap();
+        std::os::unix::fs::symlink("AGENTS.md", dir.path().join("CLAUDE.md")).unwrap();
+        LocalFs::new(dir.path().to_path_buf()).write(&rel("CLAUDE.md"), b"new").unwrap();
+        assert!(fs::symlink_metadata(dir.path().join("CLAUDE.md")).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(dir.path().join("AGENTS.md")).unwrap(), b"new");
     }
 
     #[test]
