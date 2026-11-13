@@ -15,6 +15,8 @@ mod workspace_view;
 
 use std::borrow::Cow;
 
+use fude_core::keymap::Platform;
+use fude_core::session::{self, WindowGeom, window_is_visible};
 use fude_core::workspace::Workspace;
 use fude_ipc::Message;
 use futures::StreamExt;
@@ -32,6 +34,25 @@ const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-
 
 /// ウィンドウの背景の方式。Windows と macOS のどちらも Blurred（ユーザーが検証2の画面で選んだ見た目）。
 const WINDOW_BACKGROUND: WindowBackgroundAppearance = WindowBackgroundAppearance::Blurred;
+
+/// 保存した位置がどれかのディスプレイに見えていればそこへ、そうでなければ画面の中央に 1200×780 で開く。
+fn initial_bounds(saved: Option<WindowGeom>, cx: &App) -> WindowBounds {
+    let displays: Vec<(f32, f32, f32, f32)> = cx
+        .displays()
+        .iter()
+        .map(|d| {
+            let b = d.bounds();
+            (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height))
+        })
+        .collect();
+    match saved.filter(|g| window_is_visible(g, &displays)) {
+        Some(g) => {
+            let bounds = Bounds::new(point(px(g.x), px(g.y)), size(px(g.width), px(g.height)));
+            if g.maximized { WindowBounds::Maximized(bounds) } else { WindowBounds::Windowed(bounds) }
+        }
+        None => WindowBounds::Windowed(Bounds::centered(None, size(px(1200.), px(780.)), cx)),
+    }
+}
 
 fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -57,7 +78,14 @@ fn main() {
         tx.unbounded_send(m).ok();
     });
 
-    let mut workspace = Workspace::default();
+    // 前回の状態を戻し、引数のプロジェクトがあれば、その上で開いて選ぶ。
+    let session_path = session::session_path(Platform::current(), &|k| std::env::var(k).ok());
+    let saved = session_path.as_deref().and_then(session::load);
+    let saved_window = saved.as_ref().and_then(|d| d.window.clone());
+    let mut workspace = match &saved {
+        Some(data) => Workspace::restore(data, &|p| p.is_dir()),
+        None => Workspace::default(),
+    };
     if let Launch::Open(root) = launch {
         workspace.open_project(root);
     }
@@ -84,14 +112,14 @@ fn main() {
                 ..t
             }),
             window_background: WINDOW_BACKGROUND,
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1200.), px(780.)), cx))),
+            window_bounds: Some(initial_bounds(saved_window, cx)),
             window_min_size: Some(size(px(640.), px(400.))),
             ..base
         };
         // gpui_kit::open_window は Root で包み、gpui-component のテーマの背景色（既定はライト）で
         // 全面を塗るため、ウィンドウの透過が見えなくなる。部品を使うまでは直接開く。
         let handle = cx
-            .open_window(options, move |window, cx| cx.new(|cx| WorkspaceView::new(workspace, window, cx)))
+            .open_window(options, move |window, cx| cx.new(|cx| WorkspaceView::new(workspace, session_path, window, cx)))
             .expect("ウィンドウを開けない");
         // 2 つ目の起動から届いた要求を、ウィンドウのビューで処理する。
         handle

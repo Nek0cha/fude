@@ -1,10 +1,12 @@
 //! ルートのビュー。全体の配置と、アクションの処理を受け持つ。
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use fude_core::git_head::read_branch;
 use fude_core::keymap::{Command, Platform, default_bindings};
+use fude_core::session::{self, SessionData, WindowGeom};
 use fude_core::workspace::{PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
 use fude_ipc::Message;
 use gpui_kit::*;
@@ -60,6 +62,24 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings.collect::<Vec<_>>());
 }
 
+/// 状態が変わってから保存するまでの待ち時間。続けて変わったら、最後の変化から数え直す。
+const SAVE_DELAY: Duration = Duration::from_secs(1);
+
+/// GPUI の WindowBounds から保存する形へ。Windowed は maximized=false、Maximized と Fullscreen は true（大きさは元に戻したとき）。
+pub(crate) fn geom_from_bounds(bounds: WindowBounds) -> WindowGeom {
+    let (b, maximized) = match bounds {
+        WindowBounds::Windowed(b) => (b, false),
+        WindowBounds::Maximized(b) | WindowBounds::Fullscreen(b) => (b, true),
+    };
+    WindowGeom {
+        x: f32::from(b.origin.x),
+        y: f32::from(b.origin.y),
+        width: f32::from(b.size.width),
+        height: f32::from(b.size.height),
+        maximized,
+    }
+}
+
 pub struct WorkspaceView {
     pub(crate) workspace: Workspace,
     /// ピル用のブランチ名。開いたときと、ウィンドウが前面に来たときに読み直す。
@@ -76,17 +96,43 @@ pub struct WorkspaceView {
     /// インストール済みの WSL のディストリビューション。起動時に 1 回だけ読む。
     pub(crate) distros: Vec<String>,
     focus: FocusHandle,
+    /// セッションの保存先。環境変数から決まらなければ保存しない。
+    session_path: Option<PathBuf>,
+    /// 最後に書いた内容と、書く予定の内容。同じ内容を何度も書かないために持つ。
+    saved: Option<SessionData>,
+    pending: Option<SessionData>,
+    /// 書く予定の処理。差し替えると前の予定は取り消される。
+    save_task: Option<Task<()>>,
+    /// 最後に見たウィンドウの位置と大きさ（アプリの終了時はウィンドウに触れないため）。
+    last_geom: Option<WindowGeom>,
     _activation: Subscription,
+    _bounds: Subscription,
+    _quit: Subscription,
 }
 
 impl WorkspaceView {
     /// 起動時の状態（復元したもの、または引数のプロジェクトを開いたもの）を受け取る。
-    pub fn new(workspace: Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Workspace, session_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.refresh_active_branch();
                 cx.notify();
             }
+        });
+        let bounds = cx.observe_window_bounds(window, |this, window, cx| this.schedule_save(window, cx));
+        let quit = cx.on_app_quit(|this, _| {
+            this.save_now();
+            async {}
+        });
+        let view = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            let geom = geom_from_bounds(window.window_bounds());
+            view.update(cx, |this, _| {
+                this.last_geom = Some(geom);
+                this.save_now();
+            })
+            .ok();
+            true
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -100,7 +146,14 @@ impl WorkspaceView {
             shell_menu: None,
             distros: Vec::new(),
             focus,
+            session_path,
+            saved: None,
+            pending: None,
+            save_task: None,
+            last_geom: None,
             _activation: activation,
+            _bounds: bounds,
+            _quit: quit,
         };
         this.refresh_active_branch();
         this.load_distros(cx);
@@ -148,6 +201,47 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// 今の状態が前回の保存と違えば、SAVE_DELAY のあとに書く。
+    fn schedule_save(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(path) = self.session_path.clone() else { return };
+        let geom = geom_from_bounds(window.window_bounds());
+        self.last_geom = Some(geom.clone());
+        let data = SessionData::capture(&self.workspace, Some(geom));
+        if self.saved.as_ref() == Some(&data) || self.pending.as_ref() == Some(&data) {
+            return;
+        }
+        self.pending = Some(data.clone());
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_DELAY).await;
+            let written = data.clone();
+            let result = cx.background_spawn(async move { session::save(&path, &written) }).await;
+            if let Err(e) = result {
+                eprintln!("セッションを保存できない: {e}");
+                return;
+            }
+            this.update(cx, |this, _| {
+                this.saved = Some(data);
+                this.pending = None;
+            })
+            .ok();
+        }));
+    }
+
+    /// すぐに書く（ウィンドウを閉じるとき、アプリの終了時）。
+    pub(crate) fn save_now(&mut self) {
+        let Some(path) = self.session_path.as_ref() else { return };
+        self.save_task = None;
+        self.pending = None;
+        let data = SessionData::capture(&self.workspace, self.last_geom.clone());
+        if self.saved.as_ref() == Some(&data) {
+            return;
+        }
+        match session::save(path, &data) {
+            Ok(()) => self.saved = Some(data),
+            Err(e) => eprintln!("セッションを保存できない: {e}"),
+        }
+    }
+
     /// 選択中のプロジェクトの既定のシェルでタブを作る。
     pub(crate) fn new_default_tab(&mut self) {
         if let Some(kind) = self.workspace.active_project().map(|p| p.default_shell()) {
@@ -155,7 +249,7 @@ impl WorkspaceView {
         }
     }
 
-    fn refresh_active_branch(&mut self) {
+    pub(crate) fn refresh_active_branch(&mut self) {
         if let Some(p) = self.workspace.active_project() {
             self.branches.insert(p.id, read_branch(&p.root.host_path()));
         }
@@ -269,6 +363,7 @@ impl Render for WorkspaceView {
         let theme = *cx.global::<Theme>();
         let (bg, fg) = (theme.bg_window, theme.fg_default);
         self.sync_terminals(window, cx);
+        self.schedule_save(window, cx);
         let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
         let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
         let main = render_main_area(active_tab, &terminals, cx);
@@ -322,5 +417,21 @@ impl Render for WorkspaceView {
                     .child(div().flex_1().min_w_0().h_full().child(main)),
             )
             .children(menu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::geom_from_bounds;
+    use fude_core::session::WindowGeom;
+    use gpui_kit::{Bounds, WindowBounds, point, px, size};
+
+    #[test]
+    fn geom_from_bounds_maps_states() {
+        let b = Bounds::new(point(px(10.), px(20.)), size(px(1200.), px(780.)));
+        let windowed = WindowGeom { x: 10., y: 20., width: 1200., height: 780., maximized: false };
+        assert_eq!(geom_from_bounds(WindowBounds::Windowed(b)), windowed);
+        assert_eq!(geom_from_bounds(WindowBounds::Maximized(b)), WindowGeom { maximized: true, ..windowed.clone() });
+        assert_eq!(geom_from_bounds(WindowBounds::Fullscreen(b)), WindowGeom { maximized: true, ..windowed });
     }
 }
