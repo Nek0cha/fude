@@ -96,6 +96,7 @@ fn paint_spans(
 }
 
 /// 1 文字（結合文字を含む）を、width セル分の幅の中央に描く。
+#[allow(clippy::too_many_arguments)]
 fn paint_glyph(text: String, run: TextRun, x: Pixels, y: Pixels, width: Pixels, line_h: Pixels, window: &mut Window, cx: &mut App) {
     let len = text.len();
     let shaped = window.text_system().shape_line(text.into(), TERM_FONT_SIZE, &[TextRun { len, ..run }], None);

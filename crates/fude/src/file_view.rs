@@ -6,7 +6,6 @@
 use std::io;
 use std::sync::Arc;
 
-use fude_core::keymap::Platform;
 use fude_core::panel::{ExternalAction, FileMode, external_change};
 use fude_core::text::{OpenError, TextDoc, decode_text, encode_text};
 use fude_fs::git::{GitMark, LineMark, line_marks};
@@ -53,7 +52,8 @@ pub enum FileViewEvent {
     Close,
     Back,
     Forward,
-    Dirty(bool),
+    /// 未保存の状態が変わった。
+    Dirty,
     Saved,
 }
 
@@ -130,10 +130,6 @@ impl FileView {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
-    }
-
-    pub fn mode(&self) -> FileMode {
-        self.mode
     }
 
     /// Git の状態がまだ無いときに開いた（set_mark で表示の仕方を決め直す）。
@@ -327,7 +323,7 @@ impl FileView {
                     let dirty = editor.read(cx).value() != this.saved_text;
                     if dirty != this.dirty {
                         this.dirty = dirty;
-                        cx.emit(FileViewEvent::Dirty(dirty));
+                        cx.emit(FileViewEvent::Dirty);
                     }
                     cx.notify();
                 }
@@ -362,7 +358,7 @@ impl FileView {
                     this.saved_text = text;
                     this.dirty = false;
                     this.banner = None;
-                    cx.emit(FileViewEvent::Dirty(false));
+                    cx.emit(FileViewEvent::Dirty);
                     cx.emit(FileViewEvent::Saved);
                     this.load_diff(cx);
                     cx.notify();
@@ -514,7 +510,7 @@ impl FileView {
                 .child(action("fv-reload", "読み直す").text_color(theme.fg_default).on_click(cx.listener(|this, _, _, cx| {
                     this.dirty = false;
                     this.banner = None;
-                    cx.emit(FileViewEvent::Dirty(false));
+                    cx.emit(FileViewEvent::Dirty);
                     this.load(cx);
                 })))
                 .child(action("fv-keep", "このまま").text_color(theme.fg_dim).on_click(cx.listener(|this, _, _, cx| {

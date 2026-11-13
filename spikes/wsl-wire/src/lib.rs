@@ -101,7 +101,7 @@ fn spawn_line_reader(stdout: ChildStdout) -> mpsc::Receiver<String> {
 /// wsl.exe の出力を文字列にする。wsl.exe は既定で UTF-16LE を出すため、NUL を含むときは UTF-16LE として読む。
 fn decode_wsl_output(bytes: &[u8]) -> String {
     if bytes.contains(&0) {
-        let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(bytes).into_owned()

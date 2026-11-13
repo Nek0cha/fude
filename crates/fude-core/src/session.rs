@@ -201,8 +201,11 @@ mod tests {
         ShellKind::Wsl { distro: "Ubuntu".into() }
     }
 
+    /// ワークスペースの形（選択中の位置と、プロジェクトごとの root、選択中のタブ、タブの並び）。
+    type Shape = (Option<usize>, Vec<(ProjectRoot, Option<usize>, Vec<(Vec<ShellKind>, usize)>)>);
+
     /// 比べやすいように、ワークスペースの形だけを取り出す。
-    fn shape(ws: &Workspace) -> (Option<usize>, Vec<(ProjectRoot, Option<usize>, Vec<(Vec<ShellKind>, usize)>)>) {
+    fn shape(ws: &Workspace) -> Shape {
         let data = SessionData::capture(ws, None);
         let projects = data
             .projects

@@ -47,6 +47,9 @@ pub(crate) fn tab_width_estimate(title: &str) -> f32 {
     (62.0 + chars).min(f32::from(TAB_MAX_W))
 }
 
+/// タブの形（id、題名、ペインの数）。
+type TabShape = (TabId, String, usize);
+
 /// 閉じて、縮みながら消えていくタブ。
 pub(crate) struct ClosingTab {
     pub index: usize,
@@ -61,12 +64,12 @@ pub(crate) struct LayoutAnims {
     pub closing: Vec<ClosingTab>,
     /// タブごとの左のペインの幅の割合。
     pub split: HashMap<TabId, Fade>,
-    prev: Option<(ProjectId, Vec<(TabId, String, usize)>)>,
+    prev: Option<(ProjectId, Vec<TabShape>)>,
 }
 
 impl LayoutAnims {
     pub fn observe(&mut self, project: Option<&Project>, now: Instant, reduced: bool) {
-        let current: Option<(ProjectId, Vec<(TabId, String, usize)>)> =
+        let current: Option<(ProjectId, Vec<TabShape>)> =
             project.map(|p| (p.id, p.tabs.iter().map(|t| (t.id, t.title(), t.panes.len())).collect()));
         let same_project = matches!((&self.prev, &current), (Some((a, _)), Some((b, _))) if a == b);
         if same_project {
@@ -150,7 +153,7 @@ mod tests {
         assert!(width < 1.0 && width > 0.0);
         assert_eq!(tab_close_progress(TAB_TEXT_OUT + TAB_OUT, false), (0.0, 0.0, true));
         // 動きを減らす設定では、幅は 0 のまま、文字だけ 80ms で消す。
-        assert_eq!(tab_close_progress(ms(80), true).2, true);
+        assert!(tab_close_progress(ms(80), true).2);
         assert_eq!(tab_close_progress(ms(0), true).1, 0.0);
     }
 

@@ -154,8 +154,7 @@ impl WorkspaceView {
         let Some(slot) = self.panels.get(&project) else { return };
         let target = {
             let mut h = slot.history.clone();
-            let item = if delta < 0 { h.back().cloned() } else { h.forward().cloned() };
-            item
+            if delta < 0 { h.back().cloned() } else { h.forward().cloned() }
         };
         let Some(item) = target else { return };
         let next = item.rel.clone();
@@ -284,7 +283,7 @@ impl WorkspaceView {
             FileViewEvent::Close => this.close_panel(window, cx),
             FileViewEvent::Back => this.panel_navigate(project, -1, window, cx),
             FileViewEvent::Forward => this.panel_navigate(project, 1, window, cx),
-            FileViewEvent::Dirty(_) | FileViewEvent::Saved => cx.notify(),
+            FileViewEvent::Dirty | FileViewEvent::Saved => cx.notify(),
         });
         if let Some((p, line, col)) = self.pending_goto
             && p == project

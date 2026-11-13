@@ -58,7 +58,7 @@ fn wsl_command(distro: &str, script: &str, args: &[&str]) -> Command {
 /// wsl.exe の出力を文字列にする。NUL を含めば UTF-16LE として読む（WSL_UTF8 が効かない版のため）。
 fn decode_wsl_output(bytes: &[u8]) -> String {
     if bytes.contains(&0) {
-        let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(bytes).into_owned()

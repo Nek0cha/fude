@@ -2,7 +2,6 @@
 
 use std::time::Instant;
 
-use fude_core::workspace::ProjectId;
 use fude_fs::git::{GitMark, GitStatus};
 use gpui_kit::assets::IconName;
 use gpui_kit::*;

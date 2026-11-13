@@ -249,13 +249,12 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        if let Some(moved) = self.drag.take() {
-            if !made_selection(moved, self.click_count)
-                && let Some(s) = &self.session
-            {
-                // 押しただけで動かさなかったクリックは、選択を残さない。
-                s.with_state(|st| st.clear_selection());
-            }
+        if let Some(moved) = self.drag.take()
+            && !made_selection(moved, self.click_count)
+            && let Some(s) = &self.session
+        {
+            // 押しただけで動かさなかったクリックは、選択を残さない。
+            s.with_state(|st| st.clear_selection());
         }
         cx.notify();
     }
