@@ -13,6 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::changes_menu::mark_style;
+use crate::file_icons::{file_icon, icon_for_file, icon_for_folder};
 use crate::theme::{Theme, mono_font, size};
 use crate::title_row::icon;
 use crate::tree_model::{TreeModel, TreeRow};
@@ -241,10 +242,20 @@ impl WorkspaceView {
                     .map(|(i, row)| {
                         let is_selected = selected.as_ref() == Some(&row.rel);
                         let chevron = if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight };
+                        // フォルダは開閉の矢印とフォルダのアイコン、ファイルは拡張子のアイコン（設計書 §5.5）。
                         let lead = if row.is_dir {
-                            icon(chevron, theme.fg_dim).into_any_element()
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(2.))
+                                .flex_shrink_0()
+                                .child(icon(chevron, theme.fg_dim))
+                                .child(file_icon(icon_for_folder(row.expanded)))
+                                .into_any_element()
                         } else {
-                            crate::file_icons::file_icon(crate::file_icons::icon_for_file(&row.name)).into_any_element()
+                            // ファイルの行は、フォルダの矢印の分だけ右に寄せ、名前の頭を揃える。
+                            div().pl(px(16.)).flex_shrink_0().child(file_icon(icon_for_file(&row.name))).into_any_element()
                         };
                         let deleted = row.mark == Some(fude_fs::git::GitMark::Deleted);
                         let mark = row.mark.map(|m| {

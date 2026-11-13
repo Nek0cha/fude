@@ -7,7 +7,6 @@ pub(crate) const EDITOR_SHARE: f32 = 0.45;
 pub(crate) const TERMINAL_MIN: f32 = 480.0;
 
 /// 列の置き方。Overlay はターミナルの上に重ねて出す（ターミナルの幅は変えない）。
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Place {
     Hidden,
@@ -16,7 +15,6 @@ pub(crate) enum Place {
 }
 
 /// 各列の置き方と幅（論理ピクセル）。Hidden の列の幅は 0。
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Columns {
     pub terminal_w: f32,
@@ -33,7 +31,6 @@ fn inline_editor_w(rest: f32) -> f32 {
 
 /// main_w はメイン領域の幅。ターミナルが TERMINAL_MIN を割るときは、エディタ列を縮め、
 /// 次にツリーを重ね、最後にエディタ列も重ねる。
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn columns(main_w: f32, has_terminals: bool, tree_open: bool, editor_open: bool) -> Columns {
     let tree_w = if tree_open { TREE_W } else { 0.0 };
     let tree_place = if tree_open { Place::Inline } else { Place::Hidden };

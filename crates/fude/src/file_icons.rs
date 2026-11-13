@@ -185,7 +185,6 @@ pub(crate) const ICONS: &[&str] = &[
 ];
 
 /// ファイル名（パスではない）からアイコンの名前を決める。対応が無ければ "file"。
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn icon_for_file(name: &str) -> &'static str {
     if let Some((_, icon)) = BY_NAME.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
         return icon;
@@ -201,7 +200,6 @@ pub(crate) fn icon_for_file(name: &str) -> &'static str {
         .map_or("file", |(_, icon)| icon)
 }
 
-#[allow(dead_code)] // Task 11 で使う。
 pub(crate) fn icon_for_folder(open: bool) -> &'static str {
     if open { "folder-open" } else { "folder" }
 }
@@ -218,7 +216,6 @@ pub(crate) fn file_icon(icon: &'static str) -> Img {
 
 /// タブに出す (ファイル名, 親フォルダ名)。親フォルダ名は、同じファイル名が 2 つ以上あるときだけ付ける。
 /// ルート直下のファイルの親は "/" と出す。
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn tab_labels(rels: &[&str]) -> Vec<(String, Option<String>)> {
     let split = |rel: &str| -> (String, String) {
         match rel.rsplit_once('/') {
