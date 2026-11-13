@@ -1,6 +1,10 @@
 //! プロジェクト、ターミナルタブ、分割の状態を管理する。GUI には依存しない。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+pub use crate::location::ProjectRoot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectId(u64);
@@ -10,7 +14,8 @@ pub struct TabId(u64);
 pub struct PaneId(u64);
 
 /// ターミナルで動かすシェルの種類。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ShellKind {
     Native,
     Wsl { distro: String },
@@ -53,13 +58,18 @@ impl Tab {
 
 pub struct Project {
     pub id: ProjectId,
-    pub root: PathBuf,
+    pub root: ProjectRoot,
     pub name: String,
     pub tabs: Vec<Tab>,
     pub active_tab: Option<TabId>,
 }
 
 impl Project {
+    /// 新しいターミナルの既定のシェル。WSL のプロジェクトなら WSL。
+    pub fn default_shell(&self) -> ShellKind {
+        self.root.default_shell()
+    }
+
     pub fn active_tab(&self) -> Option<&Tab> {
         let id = self.active_tab?;
         self.tabs.iter().find(|t| t.id == id)
@@ -105,27 +115,61 @@ impl Workspace {
     }
 
     /// root は呼び出し側で正規化済みとする。同じ root があればそれを選び、その id を返す。
-    /// 新しいプロジェクトには既定のシェルのタブを 1 つ作る。
-    pub fn open_project(&mut self, root: PathBuf, default_shell: ShellKind) -> ProjectId {
-        if let Some(p) = self.projects.iter().find(|p| p.root == root) {
+    /// 新しいプロジェクトには既定のシェル（root.default_shell()）のタブを 1 つ作る。
+    pub fn open_project(&mut self, root: ProjectRoot) -> ProjectId {
+        if let Some(p) = self.projects.iter().find(|p| p.root.same_place(&root)) {
             let id = p.id;
             self.active = Some(id);
             return id;
         }
         let id = ProjectId(self.alloc());
-        let tab = self.make_tab(default_shell);
-        let name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.display().to_string());
+        let tab = self.make_tab(root.default_shell());
+        let name = root.name();
         self.projects.push(Project { id, root, name, active_tab: Some(tab.id), tabs: vec![tab] });
         self.active = Some(id);
         id
     }
 
+    /// 復元用。種類の並び（タブごとのペインと focused）からタブを作り、プロジェクトを末尾に足す。
+    /// 選択は変えない。tabs が空ならタブを作らない。active_tab と focused は範囲に収める。
+    pub(crate) fn push_restored(
+        &mut self,
+        root: ProjectRoot,
+        tabs: &[(Vec<ShellKind>, usize)],
+        active_tab: Option<usize>,
+    ) -> ProjectId {
+        let id = ProjectId(self.alloc());
+        let mut built = Vec::new();
+        for (kinds, focused) in tabs {
+            let panes = kinds.iter().map(|k| Pane { id: PaneId(self.alloc()), kind: k.clone(), title: None }).collect();
+            let focused = if *focused < kinds.len() { *focused } else { 0 };
+            built.push(Tab { id: TabId(self.alloc()), panes, focused });
+        }
+        let active = built.get(active_tab.unwrap_or(0)).or(built.first()).map(|t| t.id);
+        let name = root.name();
+        self.projects.push(Project { id, root, name, tabs: built, active_tab: active });
+        id
+    }
+
+    /// 復元用。位置で選ぶ（範囲外なら先頭、プロジェクトが無ければ未選択）。
+    pub(crate) fn select_restored(&mut self, index: Option<usize>) {
+        let i = index.filter(|&i| i < self.projects.len()).unwrap_or(0);
+        self.active = self.projects.get(i).map(|p| p.id);
+    }
+
     pub fn activate_project(&mut self, id: ProjectId) {
         if self.projects.iter().any(|p| p.id == id) {
             self.active = Some(id);
+        }
+    }
+
+    /// プロジェクトを取り除く。選択中なら右隣、無ければ左隣、無ければ未選択にする。
+    pub fn close_project(&mut self, id: ProjectId) {
+        let Some(i) = self.projects.iter().position(|p| p.id == id) else { return };
+        self.projects.remove(i);
+        if self.active == Some(id) {
+            let next = if i < self.projects.len() { Some(i) } else { i.checked_sub(1) };
+            self.active = next.map(|n| self.projects[n].id);
         }
     }
 
@@ -269,10 +313,10 @@ pub fn native_label_from_shell(shell: Option<&str>) -> String {
 }
 
 /// プロジェクトのアイコンの色を、root から決める（6 色の中から）。
-/// FNV-1a を使い、実行のたびに同じ値になる。
-pub fn project_color_index(root: &Path) -> usize {
+/// host_path の文字列の FNV-1a を使い、実行のたびに同じ値になる。
+pub fn project_color_index(root: &ProjectRoot) -> usize {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in root.to_string_lossy().as_bytes() {
+    for byte in root.host_path().to_string_lossy().as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
@@ -287,9 +331,13 @@ mod tests {
     fn ws_with(roots: &[&str]) -> Workspace {
         let mut ws = Workspace::default();
         for root in roots {
-            ws.open_project(PathBuf::from(root), ShellKind::Native);
+            ws.open_project(local(root));
         }
         ws
+    }
+
+    fn local(root: &str) -> ProjectRoot {
+        ProjectRoot::Local(PathBuf::from(root))
     }
 
     fn active(ws: &Workspace) -> &Project {
@@ -313,12 +361,60 @@ mod tests {
     #[test]
     fn open_same_root_activates_existing() {
         let mut ws = Workspace::default();
-        let a = ws.open_project(PathBuf::from("/w/a"), ShellKind::Native);
-        ws.open_project(PathBuf::from("/w/b"), ShellKind::Native);
-        let again = ws.open_project(PathBuf::from("/w/a"), ShellKind::Native);
+        let a = ws.open_project(local("/w/a"));
+        ws.open_project(local("/w/b"));
+        let again = ws.open_project(local("/w/a"));
         assert_eq!(ws.projects().len(), 2);
         assert_eq!(again, a);
         assert_eq!(active(&ws).id, a);
+    }
+
+    #[test]
+    fn open_wsl_project_uses_wsl_shell() {
+        let mut ws = Workspace::default();
+        ws.open_project(ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() });
+        let p = active(&ws);
+        assert_eq!(p.name, "x");
+        assert_eq!(p.tabs[0].panes[0].kind, ShellKind::Wsl { distro: "Ubuntu".into() });
+        assert_eq!(p.default_shell(), ShellKind::Wsl { distro: "Ubuntu".into() });
+    }
+
+    #[test]
+    fn close_active_project_selects_right_neighbor() {
+        let mut ws = ws_with(&["/w/a", "/w/b", "/w/c"]);
+        let ids: Vec<_> = ws.projects().iter().map(|p| p.id).collect();
+        ws.activate_project(ids[1]);
+        ws.close_project(ids[1]);
+        assert_eq!(ws.projects().len(), 2);
+        assert_eq!(active(&ws).id, ids[2]);
+        ws.close_project(ids[2]);
+        assert_eq!(active(&ws).id, ids[0]);
+    }
+
+    #[test]
+    fn close_last_project_leaves_none() {
+        let mut ws = ws_with(&["/w/a"]);
+        let id = ws.projects()[0].id;
+        ws.close_project(id);
+        assert!(ws.active_project().is_none());
+        assert!(ws.projects().is_empty());
+    }
+
+    #[test]
+    fn close_inactive_project_keeps_selection() {
+        let mut ws = ws_with(&["/w/a", "/w/b"]);
+        let (a, b) = (ws.projects()[0].id, ws.projects()[1].id);
+        ws.close_project(a);
+        assert_eq!(active(&ws).id, b);
+    }
+
+    #[test]
+    fn distro_case_does_not_duplicate_project() {
+        let mut ws = Workspace::default();
+        let a = ws.open_project(ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() });
+        let again = ws.open_project(ProjectRoot::Wsl { distro: "ubuntu".into(), path: "/home/x".into() });
+        assert_eq!(again, a);
+        assert_eq!(ws.projects().len(), 1);
     }
 
     #[test]
@@ -467,10 +563,10 @@ mod tests {
 
     #[test]
     fn project_color_index_is_stable() {
-        let root = Path::new("/w/a");
-        assert_eq!(project_color_index(root), project_color_index(root));
+        let root = local("/w/a");
+        assert_eq!(project_color_index(&root), project_color_index(&root));
         let values: std::collections::HashSet<usize> = ('a'..='z')
-            .map(|c| project_color_index(Path::new(&format!("/w/{c}"))))
+            .map(|c| project_color_index(&local(&format!("/w/{c}"))))
             .collect();
         assert!(values.iter().all(|&v| v < 6));
         assert!(values.len() >= 2);

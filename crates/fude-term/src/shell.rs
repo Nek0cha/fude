@@ -1,8 +1,8 @@
 //! ShellKind から、PTY で起動するコマンドを組み立てる。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use fude_core::workspace::ShellKind;
+use fude_core::workspace::{ProjectRoot, ShellKind};
 
 /// PTY で起動するコマンド。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,9 +17,11 @@ pub struct SpawnSpec {
 /// WSL に引き継ぐ変数（/u は Windows から WSL への向きだけ）。
 const WSLENV_ADD: &str = "COLORTERM/u:TERM_PROGRAM/u";
 
-/// シェルの種類とプロジェクトのルートから、起動するコマンドを組み立てる。
+/// シェルの種類とプロジェクトの場所から、起動するコマンドを組み立てる。作業ディレクトリは root.host_path()。
+/// WSL のシェルの --cd は、ローカルのプロジェクトなら Windows のパス、同じディストリビューションの
+/// プロジェクトなら Linux のパス、別のディストリビューションならホーム（~）。
 /// env は環境変数の読み取り（テストで差し替える）。
-pub fn spawn_spec(kind: &ShellKind, root: &Path, env: &dyn Fn(&str) -> Option<String>) -> SpawnSpec {
+pub fn spawn_spec(kind: &ShellKind, root: &ProjectRoot, env: &dyn Fn(&str) -> Option<String>) -> SpawnSpec {
     let mut vars = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -32,7 +34,12 @@ pub fn spawn_spec(kind: &ShellKind, root: &Path, env: &dyn Fn(&str) -> Option<St
                 None => WSLENV_ADD.to_string(),
             };
             vars.push(("WSLENV".into(), wslenv));
-            let args = vec!["-d".into(), distro.clone(), "--cd".into(), root.display().to_string()];
+            let cd = match root {
+                ProjectRoot::Local(path) => path.display().to_string(),
+                ProjectRoot::Wsl { distro: d, path } if d == distro => path.clone(),
+                ProjectRoot::Wsl { .. } => "~".to_string(),
+            };
+            let args = vec!["-d".into(), distro.clone(), "--cd".into(), cd];
             ("wsl.exe".to_string(), args)
         }
         ShellKind::Native if cfg!(windows) => {
@@ -48,7 +55,7 @@ pub fn spawn_spec(kind: &ShellKind, root: &Path, env: &dyn Fn(&str) -> Option<St
             (program, vec!["-l".to_string()])
         }
     };
-    SpawnSpec { program, args, cwd: root.to_path_buf(), env: vars }
+    SpawnSpec { program, args, cwd: root.host_path(), env: vars }
 }
 
 /// PATH のどこかに name のファイルがあるか。
@@ -60,11 +67,39 @@ fn find_in_path(name: &str, env: &dyn Fn(&str) -> Option<String>) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use fude_core::workspace::ProjectRoot;
     use std::path::Path;
 
     fn spec_with(kind: &ShellKind, root: &str, vars: &[(&str, &str)]) -> SpawnSpec {
+        spec_in(kind, &ProjectRoot::Local(PathBuf::from(root)), vars)
+    }
+
+    fn spec_in(kind: &ShellKind, root: &ProjectRoot, vars: &[(&str, &str)]) -> SpawnSpec {
         let map: HashMap<String, String> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        spawn_spec(kind, Path::new(root), &|k| map.get(k).cloned())
+        spawn_spec(kind, root, &|k| map.get(k).cloned())
+    }
+
+    fn wsl_root() -> ProjectRoot {
+        ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() }
+    }
+
+    #[test]
+    fn wsl_project_wsl_shell_cds_linux_path() {
+        let spec = spec_in(&ShellKind::Wsl { distro: "Ubuntu".into() }, &wsl_root(), &[]);
+        assert_eq!(spec.args, vec!["-d", "Ubuntu", "--cd", "/home/x"]);
+    }
+
+    #[test]
+    fn wsl_project_other_distro_cds_home() {
+        let spec = spec_in(&ShellKind::Wsl { distro: "Debian".into() }, &wsl_root(), &[]);
+        assert_eq!(spec.args, vec!["-d", "Debian", "--cd", "~"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_project_native_shell_cwd_is_unc() {
+        let spec = spec_in(&ShellKind::Native, &wsl_root(), &[]);
+        assert_eq!(spec.cwd, Path::new(r"\\wsl.localhost\Ubuntu\home\x"));
     }
 
     fn env<'a>(spec: &'a SpawnSpec, key: &str) -> Option<&'a str> {

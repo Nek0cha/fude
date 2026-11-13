@@ -2,16 +2,18 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use fude_core::git_head::read_branch;
 use fude_core::keymap::{Command, Platform, default_bindings};
-use fude_core::workspace::{PaneId, ProjectId, ShellKind, Workspace};
+use fude_core::session::{self, SessionData, WindowGeom};
+use fude_core::workspace::{PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
+use fude_ipc::Message;
 use gpui_kit::*;
 
 use crate::hover::{HoverFades, HoverKey};
 use crate::main_area::render_main_area;
-use crate::shell_menu::ShellMenu;
+use crate::popup::Popup;
 use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::theme::{Theme, ui_font};
 
@@ -60,6 +62,39 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings.collect::<Vec<_>>());
 }
 
+/// ブランチ名の読み方。
+pub(crate) enum BranchRead {
+    /// その場で読む（ローカル）。
+    Now(PathBuf),
+    /// 裏で読む（WSL。止まっている WSL を起こすと数秒かかり、UI を止めてしまうため）。
+    Background(PathBuf),
+}
+
+pub(crate) fn branch_read(root: &ProjectRoot) -> BranchRead {
+    match root {
+        ProjectRoot::Local(path) => BranchRead::Now(path.clone()),
+        ProjectRoot::Wsl { .. } => BranchRead::Background(root.host_path()),
+    }
+}
+
+/// 状態が変わってから保存するまでの待ち時間。続けて変わったら、最後の変化から数え直す。
+const SAVE_DELAY: Duration = Duration::from_secs(1);
+
+/// GPUI の WindowBounds から保存する形へ。Windowed は maximized=false、Maximized と Fullscreen は true（大きさは元に戻したとき）。
+pub(crate) fn geom_from_bounds(bounds: WindowBounds) -> WindowGeom {
+    let (b, maximized) = match bounds {
+        WindowBounds::Windowed(b) => (b, false),
+        WindowBounds::Maximized(b) | WindowBounds::Fullscreen(b) => (b, true),
+    };
+    WindowGeom {
+        x: f32::from(b.origin.x),
+        y: f32::from(b.origin.y),
+        width: f32::from(b.size.width),
+        height: f32::from(b.size.height),
+        maximized,
+    }
+}
+
 pub struct WorkspaceView {
     pub(crate) workspace: Workspace,
     /// ピル用のブランチ名。開いたときと、ウィンドウが前面に来たときに読み直す。
@@ -72,36 +107,73 @@ pub struct WorkspaceView {
     /// 最後にフォーカスを当てたペイン。選択が変わったら、新しいペインへフォーカスを移す。
     focused_pane: Option<PaneId>,
     /// ＋の右クリックメニュー。
-    pub(crate) shell_menu: Option<ShellMenu>,
+    pub(crate) shell_menu: Option<Popup>,
+    /// レールの右クリックメニューと、その対象のプロジェクト。
+    pub(crate) project_menu: Option<(ProjectId, Popup)>,
     /// インストール済みの WSL のディストリビューション。起動時に 1 回だけ読む。
     pub(crate) distros: Vec<String>,
     focus: FocusHandle,
+    /// セッションの保存先。環境変数から決まらなければ保存しない。
+    session_path: Option<PathBuf>,
+    /// 最後に書いた内容と、書く予定の内容。同じ内容を何度も書かないために持つ。
+    saved: Option<SessionData>,
+    pending: Option<SessionData>,
+    /// 書く予定の処理。差し替えると前の予定は取り消される。
+    save_task: Option<Task<()>>,
+    /// 最後に見たウィンドウの位置と大きさ（アプリの終了時はウィンドウに触れないため）。
+    last_geom: Option<WindowGeom>,
     _activation: Subscription,
+    _bounds: Subscription,
+    _quit: Subscription,
 }
 
 impl WorkspaceView {
-    pub fn new(initial_root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// 起動時の状態（復元したもの、または引数のプロジェクトを開いたもの）を受け取る。
+    pub fn new(workspace: Workspace, session_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
-                this.refresh_active_branch();
+                this.refresh_active_branch(cx);
                 cx.notify();
             }
+        });
+        let bounds = cx.observe_window_bounds(window, |this, window, cx| this.schedule_save(window, cx));
+        let quit = cx.on_app_quit(|this, _| {
+            this.save_now();
+            async {}
+        });
+        let view = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            let geom = geom_from_bounds(window.window_bounds());
+            view.update(cx, |this, _| {
+                this.last_geom = Some(geom);
+                this.save_now();
+            })
+            .ok();
+            true
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut this = Self {
-            workspace: Workspace::default(),
+            workspace,
             branches: HashMap::new(),
             hover: HoverFades::default(),
             should_move: false,
             terminals: HashMap::new(),
             focused_pane: None,
             shell_menu: None,
+            project_menu: None,
             distros: Vec::new(),
             focus,
+            session_path,
+            saved: None,
+            pending: None,
+            save_task: None,
+            last_geom: None,
             _activation: activation,
+            _bounds: bounds,
+            _quit: quit,
         };
-        this.open_project(initial_root);
+        this.refresh_active_branch(cx);
         this.load_distros(cx);
         this
     }
@@ -125,21 +197,106 @@ impl WorkspaceView {
         .detach();
     }
 
+    /// メニューを閉じたあと、フォーカスを戻す。ペインがあればそこへ（次の描画で）、無ければワークスペースへ。
+    pub(crate) fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let has_pane = self.workspace.active_project().and_then(|p| p.active_tab()).is_some();
+        if has_pane {
+            self.refocus_pane();
+        } else {
+            self.focused_pane = None;
+            window.focus(&self.focus, cx);
+        }
+    }
+
     /// 次の描画で、選択中のペインへフォーカスを当て直す。
     pub(crate) fn refocus_pane(&mut self) {
         self.focused_pane = None;
     }
 
     /// root は正規化済みとする。
-    pub(crate) fn open_project(&mut self, root: PathBuf) {
-        let id = self.workspace.open_project(root, ShellKind::Native);
-        let branch = self.workspace.active_project().and_then(|p| read_branch(&p.root));
-        self.branches.insert(id, branch);
+    pub(crate) fn open_project(&mut self, root: ProjectRoot, cx: &mut Context<Self>) {
+        self.workspace.open_project(root);
+        self.refresh_active_branch(cx);
     }
 
-    fn refresh_active_branch(&mut self) {
-        if let Some(p) = self.workspace.active_project() {
-            self.branches.insert(p.id, read_branch(&p.root));
+    /// 2 つ目の起動から届いた要求。Open ならプロジェクトを開いて（開いていれば切り替えて）、どちらも前面に出す。
+    pub(crate) fn handle_message(&mut self, msg: Message, window: &mut Window, cx: &mut Context<Self>) {
+        if let Message::Open { root } = msg {
+            self.open_project(root, cx);
+        }
+        window.activate_window();
+        cx.activate(true);
+        cx.notify();
+    }
+
+    /// 今の状態が前回の保存と違えば、SAVE_DELAY のあとに書く。
+    fn schedule_save(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(path) = self.session_path.clone() else { return };
+        let geom = geom_from_bounds(window.window_bounds());
+        self.last_geom = Some(geom.clone());
+        let data = SessionData::capture(&self.workspace, Some(geom));
+        if self.saved.as_ref() == Some(&data) || self.pending.as_ref() == Some(&data) {
+            return;
+        }
+        self.pending = Some(data.clone());
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_DELAY).await;
+            let written = data.clone();
+            let result = cx.background_spawn(async move { session::save(&path, &written) }).await;
+            if let Err(e) = result {
+                eprintln!("セッションを保存できない: {e}");
+                return;
+            }
+            this.update(cx, |this, _| {
+                this.saved = Some(data);
+                this.pending = None;
+            })
+            .ok();
+        }));
+    }
+
+    /// すぐに書く（ウィンドウを閉じるとき、アプリの終了時）。
+    pub(crate) fn save_now(&mut self) {
+        let Some(path) = self.session_path.as_ref() else { return };
+        self.save_task = None;
+        self.pending = None;
+        let data = SessionData::capture(&self.workspace, self.last_geom.clone());
+        if self.saved.as_ref() == Some(&data) {
+            return;
+        }
+        match session::save(path, &data) {
+            Ok(()) => self.saved = Some(data),
+            Err(e) => eprintln!("セッションを保存できない: {e}"),
+        }
+    }
+
+    /// 選択中のプロジェクトの既定のシェルでタブを作る。
+    pub(crate) fn new_default_tab(&mut self) {
+        if let Some(kind) = self.workspace.active_project().map(|p| p.default_shell()) {
+            self.workspace.new_tab(kind);
+        }
+    }
+
+    /// 選択中のプロジェクトのブランチ名を読み直す。WSL のプロジェクトは裏で読み、届いたら描き直す。
+    pub(crate) fn refresh_active_branch(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.workspace.active_project() else { return };
+        let id = p.id;
+        match branch_read(&p.root) {
+            BranchRead::Now(path) => {
+                self.branches.insert(id, read_branch(&path));
+            }
+            BranchRead::Background(path) => {
+                let task = cx.background_spawn(async move { read_branch(&path) });
+                cx.spawn(async move |this, cx| {
+                    let branch = task.await;
+                    this.update(cx, |this, cx| {
+                        this.branches.insert(id, branch);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
         }
     }
 
@@ -155,14 +312,14 @@ impl WorkspaceView {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
             let root = match std::fs::canonicalize(&path) {
-                Ok(root) => fude_core::paths::simplify_verbatim(root),
+                Ok(root) => ProjectRoot::from_host_path(fude_core::paths::simplify_verbatim(root)),
                 Err(err) => {
                     eprintln!("フォルダを開けない: {}: {err}", path.display());
                     return;
                 }
             };
             this.update(cx, |this, cx| {
-                this.open_project(root);
+                this.open_project(root, cx);
                 cx.notify();
             })
             .ok();
@@ -190,7 +347,13 @@ impl WorkspaceView {
             self.workspace.projects().iter().flat_map(|p| &p.tabs).flat_map(|t| &t.panes).map(|p| p.id).collect();
         self.terminals.retain(|id, _| alive.contains(id));
 
-        let Some(project) = self.workspace.active_project() else { return };
+        let Some(project) = self.workspace.active_project() else {
+            // 最後のプロジェクトを閉じたときも、ビューが無くなるので、ワークスペース自身に戻しておく。
+            if self.focused_pane.take().is_some() {
+                window.focus(&self.focus, cx);
+            }
+            return;
+        };
         let root = project.root.clone();
         let Some(tab) = project.active_tab() else {
             // 最後のタブを閉じると、フォーカスしていたビューが無くなる。そのままだと、次に作った
@@ -234,7 +397,7 @@ impl WorkspaceView {
 
     fn activate_project_at(&mut self, index: usize, cx: &mut Context<Self>) {
         self.workspace.activate_project_at(index);
-        self.refresh_active_branch();
+        self.refresh_active_branch(cx);
         cx.notify();
     }
 }
@@ -251,19 +414,21 @@ impl Render for WorkspaceView {
         let theme = *cx.global::<Theme>();
         let (bg, fg) = (theme.bg_window, theme.fg_default);
         self.sync_terminals(window, cx);
+        self.schedule_save(window, cx);
         let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
         let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
         let main = render_main_area(active_tab, &terminals, cx);
         let title_row = self.render_title_row(window, cx, now);
         let rail = self.render_rail(cx, now);
         let menu = self.render_shell_menu(window, cx, now);
+        let project_menu = self.render_project_menu(window, cx, now);
 
         div()
             .id("workspace")
             .track_focus(&self.focus)
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
-                this.workspace.new_tab(ShellKind::Native);
+                this.new_default_tab();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SplitTab, _, cx| {
@@ -304,5 +469,32 @@ impl Render for WorkspaceView {
                     .child(div().flex_1().min_w_0().h_full().child(main)),
             )
             .children(menu)
+            .children(project_menu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::geom_from_bounds;
+    use fude_core::session::WindowGeom;
+    use gpui_kit::{Bounds, WindowBounds, point, px, size};
+
+    #[test]
+    fn wsl_branch_is_read_in_background() {
+        use super::{BranchRead, branch_read};
+        use fude_core::workspace::ProjectRoot;
+        let wsl = ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() };
+        assert!(matches!(branch_read(&wsl), BranchRead::Background(_)));
+        let local = ProjectRoot::Local(std::path::PathBuf::from("/w/a"));
+        assert!(matches!(branch_read(&local), BranchRead::Now(_)));
+    }
+
+    #[test]
+    fn geom_from_bounds_maps_states() {
+        let b = Bounds::new(point(px(10.), px(20.)), size(px(1200.), px(780.)));
+        let windowed = WindowGeom { x: 10., y: 20., width: 1200., height: 780., maximized: false };
+        assert_eq!(geom_from_bounds(WindowBounds::Windowed(b)), windowed);
+        assert_eq!(geom_from_bounds(WindowBounds::Maximized(b)), WindowGeom { maximized: true, ..windowed.clone() });
+        assert_eq!(geom_from_bounds(WindowBounds::Fullscreen(b)), WindowGeom { maximized: true, ..windowed });
     }
 }
