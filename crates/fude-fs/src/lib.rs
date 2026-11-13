@@ -9,6 +9,7 @@ pub mod git;
 mod local;
 pub mod procs;
 mod remote;
+pub mod search;
 pub mod serve;
 pub mod watch;
 pub mod wire;
