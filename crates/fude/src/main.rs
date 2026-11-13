@@ -25,12 +25,8 @@ use crate::workspace_view::{WorkspaceView, bind_keys};
 const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Regular.ttf");
 const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Bold.ttf");
 
-/// ウィンドウの背景の方式。Windows は MicaAlt（ユーザーが検証2の画面で選んだ見た目）、macOS は Blurred。
-const WINDOW_BACKGROUND: WindowBackgroundAppearance = if cfg!(windows) {
-    WindowBackgroundAppearance::MicaAltBackdrop
-} else {
-    WindowBackgroundAppearance::Blurred
-};
+/// ウィンドウの背景の方式。Windows と macOS のどちらも Blurred（ユーザーが検証2の画面で選んだ見た目）。
+const WINDOW_BACKGROUND: WindowBackgroundAppearance = WindowBackgroundAppearance::Blurred;
 
 /// 起動時に開くプロジェクト。引数の 1 つ目、無ければ現在のディレクトリ。
 fn initial_root() -> PathBuf {
