@@ -173,13 +173,11 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>) + 'static,
     ) {
-        let dirty: Vec<_> = self
-            .editors
-            .iter()
-            .filter(|(id, _)| project.is_none_or(|p| p == **id))
-            .flat_map(|(_, s)| s.views.values().cloned())
-            .filter(|v| v.read(cx).is_dirty())
-            .collect();
+        let mut dirty = Vec::new();
+        for (_, slot) in self.editors.iter().filter(|(id, _)| project.is_none_or(|p| p == **id)) {
+            let pairs: Vec<(String, bool)> = slot.views.iter().map(|(rel, v)| (rel.clone(), v.read(cx).is_dirty())).collect();
+            dirty.extend(crate::editor_column::unsaved_views(&pairs).into_iter().filter_map(|rel| slot.views.get(&rel).cloned()));
+        }
         if dirty.is_empty() {
             then(self, window, cx);
             return;

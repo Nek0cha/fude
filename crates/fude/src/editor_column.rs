@@ -10,38 +10,25 @@ use fude_fs::ProjectFs;
 use gpui_kit::*;
 
 use crate::dialog::{ButtonRole, Dialog, DialogButton};
+use crate::columns::{Place, TREE_W, columns};
 use crate::file_view::{FileView, FileViewEvent, initial_mode};
+use crate::main_area::ColumnEl;
 use crate::workspace_view::WorkspaceView;
 use crate::wsl_host::project_fs;
 
-/// 右パネルの幅。メイン領域の 45%（最小 420px、最大 900px）。メイン領域が狭い（620px 未満）なら全体。
-pub(crate) fn panel_width(main_w: Pixels) -> Pixels {
-    if main_w < px(620.) {
-        return main_w;
-    }
-    (main_w * 0.45).clamp(px(420.), px(900.))
-}
-
-/// 右パネルの幅。share は 1.0 でメイン領域の全体（ターミナルが 0 枚）、0.0 で panel_width（並べた形）。
-/// その間は線形に補う（エディタの移動の動き。設計書 §6.3）。
-pub(crate) fn panel_target_width(share: f32, main_w: Pixels) -> Pixels {
-    let narrow = panel_width(main_w);
-    narrow + (main_w - narrow) * share.clamp(0.0, 1.0)
-}
-
-/// 右パネルの出入りと、エディタの移動の動き（選択中のプロジェクトのもの）。
-pub(crate) struct PanelAnim {
+/// エディタ列の出入りと、ターミナルの有無によるエディタの移動の動き（選択中のプロジェクトのもの）。
+pub(crate) struct EditorAnim {
     pub presence: crate::anim::Presence,
-    /// 1.0 = メイン領域の全体、0.0 = 並べた幅。
+    /// 1.0 = ターミナルが 0 枚の幅、0.0 = ターミナルと並べた幅。
     pub share: fude_core::motion::Fade,
     pub project: Option<ProjectId>,
     /// 閉じて、消える動きの間だけ描き続けるビュー。
     pub closing: Option<Entity<FileView>>,
 }
 
-impl Default for PanelAnim {
+impl Default for EditorAnim {
     fn default() -> Self {
-        PanelAnim {
+        EditorAnim {
             presence: crate::anim::Presence::hidden(),
             share: fude_core::motion::Fade::settled(0.0),
             project: None,
@@ -92,6 +79,16 @@ impl EditorSlot {
     }
 }
 
+/// 相対パスと未保存かの組から、閉じる前に確かめるもの（未保存のもの）を返す。選んでいないタブも含む。
+pub(crate) fn unsaved_views(views: &[(String, bool)]) -> Vec<String> {
+    views.iter().filter(|(_, dirty)| *dirty).map(|(rel, _)| rel.clone()).collect()
+}
+
+/// 監視で変わったと届いたもの（changed）のうち、開いているビュー（open）のもの。選んでいないタブも含む。
+pub(crate) fn watched_views(changed: &[&str], open: &[&str]) -> Vec<String> {
+    open.iter().filter(|rel| changed.contains(rel)).map(|rel| rel.to_string()).collect()
+}
+
 /// 開いたあとにすること。
 #[derive(Debug, PartialEq)]
 pub(crate) enum AfterOpen {
@@ -110,14 +107,14 @@ pub(crate) fn after_open(opened: Opened, has_view: bool, mode_given: bool, at_gi
 
 impl WorkspaceView {
     /// 描画のたびに呼ぶ。エディタ列の出入りと、ターミナルの有無によるエディタの移動の動きを始める。
-    pub(crate) fn observe_panel(&mut self, now: std::time::Instant) {
+    pub(crate) fn observe_editor_column(&mut self, now: std::time::Instant) {
         use crate::theme::motion::{EDITOR_MOVE, PANEL_IN, PANEL_OUT, ease_out_quint};
         let project = self.workspace.active_project().map(|p| p.id);
         let has_tabs = self.workspace.active_project().is_some_and(|p| !p.tabs.is_empty());
         let open = self.editor_open();
         let reduced = self.reduced_motion;
         let target = if has_tabs { 0.0 } else { 1.0 };
-        let a = &mut self.panel_anim;
+        let a = &mut self.editor_anim;
         if a.project != project {
             // プロジェクトを切り替えたときは動かさない。
             a.project = project;
@@ -140,16 +137,67 @@ impl WorkspaceView {
     }
 
     /// エディタ列とエディタの移動が動いている（ターミナルの大きさが変わる）。
-    pub(crate) fn panel_animating(&self, now: std::time::Instant) -> bool {
-        self.panel_anim.presence.is_animating(now) || self.panel_anim.share.is_animating(now)
+    pub(crate) fn editor_animating(&self, now: std::time::Instant) -> bool {
+        self.editor_anim.presence.is_animating(now) || self.editor_anim.share.is_animating(now)
     }
 
-    /// メイン領域に描くエディタ列のビュー、幅、不透明度。
-    pub(crate) fn panel_for_render(&self, main_w: Pixels, now: std::time::Instant) -> Option<(AnyView, Pixels, f32)> {
-        let view = self.active_editor_view().or_else(|| self.panel_anim.closing.clone())?;
-        let p = &self.panel_anim.presence;
-        let w = panel_target_width(self.panel_anim.share.value(now), main_w) * p.travel(now);
-        Some((AnyView::from(view), w, p.value(now)))
+    /// メイン領域に描くツリーとエディタ列。main_w はメイン領域の幅。並べ方は columns で決め、
+    /// 並べた列の幅には出入りの動きを掛ける（重ねた列は不透明度だけを変える）。
+    pub(crate) fn render_columns(&mut self, main_w: Pixels, now: std::time::Instant, cx: &mut Context<Self>) -> (Option<ColumnEl>, Option<ColumnEl>) {
+        let Some(project) = self.workspace.active_project().map(|p| p.id) else { return (None, None) };
+        let main = f32::from(main_w);
+        let tree_presence = self.tree_presence;
+        let tree_shown = self.tree.open || !tree_presence.is_gone(now);
+        let editor_presence = self.editor_anim.presence;
+        let has_view = self.active_editor_view().is_some() || self.editor_anim.closing.is_some();
+        let editor_shown = self.editor_open() || (has_view && !editor_presence.is_gone(now));
+        let share = self.editor_anim.share.value(now);
+        let with_terms = columns(main, true, tree_shown, editor_shown);
+        let without = columns(main, false, tree_shown, editor_shown);
+        // 置き方は、ターミナルの有無が変わり終えた側で決める。幅は動きの間を補う。
+        let c = if share >= 1.0 { without } else { with_terms };
+        let tree_w = match c.tree {
+            Place::Inline => TREE_W * tree_presence.travel(now),
+            _ => TREE_W,
+        };
+        let editor_target = {
+            let fill = main - if c.tree == Place::Inline { tree_w } else { 0.0 };
+            with_terms.editor_w + (fill - with_terms.editor_w) * share.clamp(0.0, 1.0)
+        };
+        let editor_w = match c.editor {
+            Place::Inline => editor_target * editor_presence.travel(now),
+            _ => editor_target,
+        };
+        let tree = if tree_shown {
+            self.render_tree(cx, now).map(|el| ColumnEl {
+                el: el.w(px(TREE_W)).h_full().into_any_element(),
+                place: c.tree,
+                w: px(tree_w),
+                opacity: tree_presence.value(now),
+            })
+        } else {
+            None
+        };
+        let editor = if editor_shown {
+            let el = self.render_editor_column(project, px(editor_target), cx, now);
+            Some(ColumnEl { el: el.into_any_element(), place: c.editor, w: px(editor_w), opacity: editor_presence.value(now) })
+        } else {
+            None
+        };
+        (tree, editor)
+    }
+
+    /// エディタ列の中身（タブ列と、選択中のタブの FileView）。中身の幅は w に固定し、出入りの動きで折り返し直さない。
+    fn render_editor_column(&mut self, project: ProjectId, w: Pixels, cx: &mut Context<Self>, now: std::time::Instant) -> Div {
+        let tabs = self.render_editor_tabs(project, cx, now);
+        let view = self.active_editor_view().or_else(|| self.editor_anim.closing.clone());
+        div()
+            .w(w)
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(tabs)
+            .child(div().flex_1().min_h_0().children(view))
     }
 
     /// 選択中のプロジェクトのエディタ列にタブがあるか。
@@ -213,7 +261,6 @@ impl WorkspaceView {
     }
 
     /// project のエディタ列の index のタブを選ぶ。ビューがまだ無ければ作る。
-    #[allow(dead_code)] // Task 8 のタブ列が使う。
     pub(crate) fn select_editor_tab(&mut self, project: ProjectId, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tabs) = self.workspace.editor_mut(project) else { return };
         tabs.select(index);
@@ -251,7 +298,7 @@ impl WorkspaceView {
             let view = this.editors.get_mut(&project).and_then(|s| s.forget(&rel));
             if now_empty {
                 // 消える動きの間だけ描き続ける。
-                this.panel_anim.closing = view;
+                this.editor_anim.closing = view;
                 this.restore_focus(window, cx);
             } else {
                 this.show_active_tab(project, window, cx);
@@ -383,8 +430,18 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{AfterOpen, Opened, after_open, panel_target_width, panel_width};
-    use gpui_kit::px;
+    use super::{AfterOpen, Opened, after_open, unsaved_views, watched_views};
+
+    #[test]
+    fn unsaved_includes_inactive_tabs() {
+        let views = [("a.rs".to_string(), false), ("b.rs".to_string(), true), ("c.rs".to_string(), true)];
+        assert_eq!(unsaved_views(&views), ["b.rs", "c.rs"]);
+    }
+
+    #[test]
+    fn watch_reaches_inactive_tabs() {
+        assert_eq!(watched_views(&["b.rs", "x.rs"], &["a.rs", "b.rs"]), ["b.rs"]);
+    }
 
     #[test]
     fn reopening_existing_tab_reuses_view() {
@@ -392,20 +449,5 @@ mod tests {
         // 戻したタブ（ビューがまだ無い）は作る。
         assert_eq!(after_open(Opened::Existing(0), false, false, false), AfterOpen::Create);
         assert_eq!(after_open(Opened::New(1), false, true, false), AfterOpen::Create);
-    }
-
-    #[test]
-    fn panel_target_width_lerps_between_panel_and_full() {
-        assert_eq!(panel_target_width(1.0, px(1200.)), px(1200.));
-        assert_eq!(panel_target_width(0.0, px(1200.)), px(540.));
-        assert_eq!(panel_target_width(0.5, px(1200.)), px(870.));
-    }
-
-    #[test]
-    fn panel_width_rules() {
-        assert_eq!(panel_width(px(2000.)), px(900.));
-        assert_eq!(panel_width(px(1200.)), px(540.));
-        assert_eq!(panel_width(px(800.)), px(420.));
-        assert_eq!(panel_width(px(500.)), px(500.));
     }
 }

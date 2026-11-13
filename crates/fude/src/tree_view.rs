@@ -13,7 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::changes_menu::mark_style;
-use crate::theme::{Theme, mono_font, popup_shadow, size};
+use crate::theme::{Theme, mono_font, size};
 use crate::title_row::icon;
 use crate::tree_model::{TreeModel, TreeRow};
 use crate::workspace_view::WorkspaceView;
@@ -26,7 +26,6 @@ pub fn bind_tree_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", CloseTree, Some("Tree"))]);
 }
 
-pub(crate) const TREE_W: Pixels = px(280.);
 const ROW_H: Pixels = px(24.);
 const INDENT: f32 = 12.;
 
@@ -202,8 +201,7 @@ impl WorkspaceView {
         if !self.tree.open && self.tree_presence.is_gone(now) {
             return None;
         }
-        let presence = self.tree_presence;
-        let project = self.workspace.active_project()?.id;
+            let project = self.workspace.active_project()?.id;
         let theme = *cx.global::<Theme>();
         let status = self.live.get(&project).and_then(|l| l.status.clone());
         let model = self.tree.models.entry(project).or_default();
@@ -313,23 +311,12 @@ impl WorkspaceView {
                 .on_action(cx.listener(|this, _: &CloseTree, window, cx| this.close_tree(window, cx)))
                 // 絞り込み欄は、消すものが無いときに Esc を親へ回す。
                 .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| this.close_tree(window, cx)))
-                // 下のターミナルにクリックを渡さない。
+                // 重ねて出したとき、下のターミナルにクリックを渡さない。
                 .occlude()
-                .absolute()
-                .left(size::RAIL_W - TREE_W * 0.3 * (1.0 - presence.travel(now)))
-                .opacity(presence.value(now))
-                .top(px(0.))
-                .bottom(px(8.))
-                .w(TREE_W)
                 .flex()
                 .flex_col()
                 .gap(px(4.))
                 .p(px(6.))
-                .rounded(size::RADIUS_MD)
-                .bg(theme.bg_panel)
-                .border_1()
-                .border_color(theme.border_subtle)
-                .shadow(popup_shadow())
                 .text_size(px(13.))
                 .text_color(theme.fg_default)
                 .child(div().flex().flex_row().items_center().gap(px(4.)).children(filter.map(|f| div().flex_1().child(f))).child(toggle_changed))

@@ -108,9 +108,12 @@ impl WorkspaceView {
 
     /// 監視の通知。開いているファイル（選んでいないタブも含む）が変わっていれば読み直させ、Git の状態を読み直す。
     fn on_watch(&mut self, project: ProjectId, batch: WatchBatch, cx: &mut Context<Self>) {
-        for view in self.project_views(project) {
-            let rel = view.read(cx).rel.clone();
-            if batch.changed.iter().any(|p| p.as_str() == rel) {
+        let views = self.project_views(project);
+        let open: Vec<String> = views.iter().map(|v| v.read(cx).rel.clone()).collect();
+        let changed: Vec<&str> = batch.changed.iter().map(|p| p.as_str()).collect();
+        let hit = crate::editor_column::watched_views(&changed, &open.iter().map(String::as_str).collect::<Vec<_>>());
+        for (view, rel) in views.into_iter().zip(open) {
+            if hit.contains(&rel) {
                 view.update(cx, |v, cx| v.on_external_change(cx));
             }
         }

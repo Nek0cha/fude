@@ -27,7 +27,6 @@ struct TabLook {
 
 impl WorkspaceView {
     /// project のエディタ列のタブ列。収まらなければ横にスクロールし、選んだタブが見えるように寄せる。
-    #[allow(dead_code)] // Task 9 の並べ方が使う。
     pub(crate) fn render_editor_tabs(&mut self, project: ProjectId, cx: &mut Context<Self>, now: Instant) -> Stateful<Div> {
         let theme = *cx.global::<Theme>();
         let Some(p) = self.workspace.projects().iter().find(|p| p.id == project) else { return div().id("editor-tabs") };

@@ -1,85 +1,97 @@
-//! メイン領域。選択中のタブのペインを左右に並べ、右パネルがあれば右に置く。タブが 0 枚なら、右パネルが全体を使う。
+//! メイン領域。「ターミナル｜ツリー｜エディタ列」を左から並べる（設計書 §4.1.3）。
+//! 狭いときは、ツリーとエディタ列をターミナルの上に重ねて出す（columns の Place::Overlay）。
 
 use std::collections::HashMap;
 
 use fude_core::workspace::{PaneId, Tab};
 use gpui_kit::*;
 
+use crate::columns::Place;
 use crate::terminal_view::TerminalView;
-use crate::theme::Theme;
+use crate::theme::{Theme, popup_shadow};
 
-/// メイン領域の並び方。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Layout {
-    Terminals,
-    TerminalsAndPanel,
-    /// ターミナルが 0 枚で、右パネルの中身がメイン領域を全部使う（設計書 §4.1.1）。
-    PanelOnly,
-    Empty,
+/// ツリーかエディタ列の、描く中身と置き方。w は表示する幅（出入りの動きの途中も含む）。
+pub(crate) struct ColumnEl {
+    pub el: AnyElement,
+    pub place: Place,
+    pub w: Pixels,
+    pub opacity: f32,
 }
 
-pub(crate) fn layout_for(has_tabs: bool, panel_open: bool) -> Layout {
-    match (has_tabs, panel_open) {
-        (true, false) => Layout::Terminals,
-        (true, true) => Layout::TerminalsAndPanel,
-        (false, true) => Layout::PanelOnly,
-        (false, false) => Layout::Empty,
-    }
-}
-
-/// 選択中のタブのペインを横に均等に並べ、間に 1px の線を引く。panel があれば右に置く。main_w はメイン領域の幅。
-/// split_share は左のペインの幅の割合（分割の動きの途中も含む）。panel は (ビュー, 幅, 不透明度)。
-pub fn render_main_area(
+/// 選択中のタブのペインを横に均等に並べ、間に 1px の線を引く。その右にツリーとエディタ列を置く。
+/// split_share は左のペインの幅の割合（分割の動きの途中も含む）。
+pub(crate) fn render_main_area(
     tab: Option<&Tab>,
     terminals: &HashMap<PaneId, Entity<TerminalView>>,
-    panel: Option<(AnyView, Pixels, f32)>,
     split_share: f32,
+    tree: Option<ColumnEl>,
+    editor: Option<ColumnEl>,
     cx: &App,
 ) -> Div {
     let theme = *cx.global::<Theme>();
     let line = || div().w(px(1.)).h_full().flex_shrink_0().bg(theme.border_subtle);
-    let terminals_row = |tab: &Tab| {
-        let mut row = div().flex_1().min_w_0().h_full().flex().flex_row();
-        for (i, pane) in tab.panes.iter().enumerate() {
-            if i > 0 {
-                row = row.child(line());
+    let mut row = div().size_full().relative().flex().flex_row();
+    // ターミナルが 0 枚なら、左端に線を引かない。
+    let mut first = true;
+    match tab {
+        Some(tab) => {
+            let mut terms = div().flex_1().min_w_0().h_full().flex().flex_row();
+            for (i, pane) in tab.panes.iter().enumerate() {
+                if i > 0 {
+                    terms = terms.child(line());
+                }
+                // 左のペインは割合で幅を決め、右のペインは残りを使う。分割の解除の途中は、右に空きが残る。
+                let mut cell = if i == 0 && (tab.panes.len() > 1 || split_share < 1.0) {
+                    div().w(relative(split_share)).flex_shrink_0().h_full().overflow_hidden()
+                } else {
+                    div().flex_1().min_w_0().h_full().overflow_hidden()
+                };
+                if let Some(view) = terminals.get(&pane.id) {
+                    cell = cell.child(view.clone());
+                }
+                terms = terms.child(cell);
             }
-            // 左のペインは割合で幅を決め、右のペインは残りを使う。分割の解除の途中は、右に空きが残る。
-            let mut cell = if i == 0 && (tab.panes.len() > 1 || split_share < 1.0) {
-                div().w(relative(split_share)).flex_shrink_0().h_full().overflow_hidden()
-            } else {
-                div().flex_1().min_w_0().h_full().overflow_hidden()
-            };
-            if let Some(view) = terminals.get(&pane.id) {
-                cell = cell.child(view.clone());
-            }
-            row = row.child(cell);
+            row = row.child(terms);
+            first = false;
         }
-        row
+        // ターミナルが 0 枚なら、列の出入りの途中にできる隙間を右端に寄せる。
+        None => row = row.child(div().flex_1()),
+    }
+    let mut overlays: Vec<Div> = Vec::new();
+    // 重ねるツリーは、エディタ列（並べていても重ねていても）の左隣に置く。
+    let editor_right = editor.as_ref().filter(|e| e.place != Place::Hidden).map_or(px(0.), |e| e.w);
+    let overlay = |c: ColumnEl, right: Pixels| {
+        div()
+            .absolute()
+            .top(px(0.))
+            .bottom(px(0.))
+            .right(right)
+            .w(c.w)
+            .overflow_hidden()
+            .opacity(c.opacity)
+            .bg(theme.bg_panel)
+            .border_l_1()
+            .border_color(theme.border_subtle)
+            .shadow(popup_shadow())
+            .child(c.el)
     };
-    match (layout_for(tab.is_some(), panel.is_some()), tab, panel) {
-        (Layout::Terminals, Some(tab), _) => div().size_full().flex().child(terminals_row(tab)),
-        (Layout::TerminalsAndPanel, Some(tab), Some((panel, w, opacity))) => div()
-            .size_full()
-            .flex()
-            .flex_row()
-            .child(terminals_row(tab))
-            .child(line())
-            .child(div().w(w).flex_shrink_0().h_full().overflow_hidden().opacity(opacity).child(panel)),
-        (Layout::PanelOnly, _, Some((panel, _, opacity))) => div().size_full().opacity(opacity).child(panel),
-        _ => div().size_full(),
+    for (c, is_tree) in [(tree, true), (editor, false)] {
+        let Some(c) = c else { continue };
+        let place = c.place;
+        match place {
+            Place::Hidden => {}
+            Place::Inline => {
+                if !first {
+                    row = row.child(line());
+                }
+                row = row.child(div().w(c.w).flex_shrink_0().h_full().overflow_hidden().opacity(c.opacity).child(c.el));
+            }
+            Place::Overlay => overlays.push(overlay(c, if is_tree { editor_right } else { px(0.) })),
+        }
+        if place == Place::Inline {
+            first = false;
+        }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Layout, layout_for};
-
-    #[test]
-    fn layout_rules() {
-        assert_eq!(layout_for(true, false), Layout::Terminals);
-        assert_eq!(layout_for(true, true), Layout::TerminalsAndPanel);
-        assert_eq!(layout_for(false, true), Layout::PanelOnly);
-        assert_eq!(layout_for(false, false), Layout::Empty);
-    }
+    // エディタ列を後に描き、ツリーより上に出す。
+    row.children(overlays)
 }
