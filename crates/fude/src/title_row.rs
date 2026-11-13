@@ -47,14 +47,27 @@ impl WorkspaceView {
             .flex_shrink_0()
             .h(size::TITLE_ROW_H)
             .child(self.drag_area("title-lead", cx).w(size::TITLE_LEAD_W).h_full().flex_shrink_0())
+            // タブが入りきらないときは、タブの列だけを縮めて右端を隠す。
+            // ＋、分割、ピル、ウィンドウ操作ボタンは常に見えるようにする。
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(4.))
+                    .flex_shrink(1.)
                     .min_w_0()
-                    .children(tabs)
+                    .overflow_hidden()
+                    .children(tabs),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.))
+                    .pl(px(4.))
+                    .flex_shrink_0()
                     .child(add_tab)
                     .child(split),
             )
@@ -119,6 +132,7 @@ impl WorkspaceView {
         self.hoverable(div().id(ElementId::Name(format!("tab-{id:?}").into())), key, cx)
             .h(size::TAB_H)
             .max_w(size::TAB_MAX_W)
+            .flex_shrink_0()
             .px(px(10.))
             .flex()
             .flex_row()
