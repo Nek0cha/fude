@@ -6,7 +6,7 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -65,13 +65,63 @@ fn decode_wsl_output(bytes: &[u8]) -> String {
     }
 }
 
+/// 一覧の取得を待つ時間。VM を起こさないため短い。
+const LIST_TIMEOUT: Duration = Duration::from_secs(15);
+/// 版の確認を待つ時間。止まっている WSL の起動を含む。
+const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
+/// 配置を待つ時間。
+const DEPLOY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// cmd を起動し、stdin を流して、終わるまで待つ。timeout を過ぎたら子プロセスを終わらせて Err(TimedOut)。
+/// スリープ復帰のあとなどに wsl.exe が固まっても、呼び出し側が待ち続けないようにする（検証4の申し送り5）。
+fn output_with_timeout(mut cmd: Command, stdin: &[u8], timeout: Duration) -> io::Result<Output> {
+    let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut input = child.stdin.take().expect("stdin はパイプにしてある");
+    let data = stdin.to_vec();
+    let writer = std::thread::spawn(move || input.write_all(&data));
+    let mut out_pipe = child.stdout.take().expect("stdout はパイプにしてある");
+    let mut err_pipe = child.stderr.take().expect("stderr はパイプにしてある");
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("wsl.exe が {} 秒以内に終わらない", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let written = writer.join().unwrap_or_else(|_| Err(io::Error::other("stdin へ書けない")));
+    let stdout = out_reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
+    if let Err(e) = written
+        && status.success()
+    {
+        return Err(e);
+    }
+    Ok(Output { status, stdout, stderr })
+}
+
 /// distro がインストールされていなければ Err(NotFound)。名前の大文字小文字は区別しない（wsl.exe と同じ）。
 fn ensure_distro(distro: &str) -> io::Result<()> {
-    let out = Command::new("wsl.exe")
-        .args(["-l", "-q"])
-        .env("WSL_UTF8", "1")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args(["-l", "-q"]).env("WSL_UTF8", "1").creation_flags(CREATE_NO_WINDOW);
+    let out = output_with_timeout(cmd, &[], LIST_TIMEOUT)?;
     let text = decode_wsl_output(&out.stdout);
     let installed: Vec<&str> = text
         .lines()
@@ -91,7 +141,7 @@ fn ensure_distro(distro: &str) -> io::Result<()> {
 pub fn installed_version(distro: &str, bin: &str) -> io::Result<Option<String>> {
     ensure_distro(distro)?;
     let script = format!(r#"{RESOLVE}b=$(r "$1"); [ -x "$b" ] || exit {NOT_INSTALLED}; exec "$b" version"#);
-    let out = wsl_command(distro, &script, &[bin]).stdin(Stdio::null()).output()?;
+    let out = output_with_timeout(wsl_command(distro, &script, &[bin]), &[], VERSION_TIMEOUT)?;
     if !out.status.success() {
         return Ok(None);
     }
@@ -106,16 +156,9 @@ pub fn deploy(distro: &str, bin: &str, bytes: &[u8], host_exe: &Path) -> io::Res
     let script = format!(
         r#"set -e; {RESOLVE}b=$(r "$1"); h=$(r "$3"); mkdir -p "$(dirname "$b")" "$(dirname "$h")"; t="$b.tmp.$$"; cat > "$t"; chmod +x "$t"; mv -f "$t" "$b"; wslpath -u "$2" > "$h.tmp.$$"; mv -f "$h.tmp.$$" "$h""#
     );
-    let mut child = wsl_command(distro, &script, &[bin, host_exe, &host_exe_file(bin)])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut stdin = child.stdin.take().expect("stdin はパイプにしてある");
-    let written = stdin.write_all(bytes);
-    drop(stdin);
-    let out = child.wait_with_output()?;
-    if !out.status.success() || written.is_err() {
+    let cmd = wsl_command(distro, &script, &[bin, host_exe, &host_exe_file(bin)]);
+    let out = output_with_timeout(cmd, bytes, DEPLOY_TIMEOUT)?;
+    if !out.status.success() {
         let detail = decode_wsl_output(&out.stderr);
         return Err(io::Error::other(format!("WSL に fude を置けない（{}）: {}", out.status, detail.trim())));
     }
@@ -206,6 +249,25 @@ impl Read for ServerOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hung_child_is_killed_after_timeout() {
+        let mut cmd = Command::new("ping");
+        cmd.args(["-n", "6", "127.0.0.1"]);
+        let start = Instant::now();
+        let err = output_with_timeout(cmd, &[], Duration::from_millis(300)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn child_output_and_stdin_are_collected() {
+        let mut cmd = Command::new("findstr");
+        cmd.arg("x");
+        let out = output_with_timeout(cmd, b"axb\r\nc\r\n", Duration::from_secs(5)).unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "axb");
+    }
 
     #[test]
     fn host_exe_file_rules() {
