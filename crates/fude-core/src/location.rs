@@ -82,6 +82,16 @@ impl ProjectRoot {
         }
     }
 
+    /// 同じフォルダか。WSL のディストリビューション名は大文字小文字を区別しない（wsl.exe と同じ）。
+    pub fn same_place(&self, other: &ProjectRoot) -> bool {
+        match (self, other) {
+            (ProjectRoot::Wsl { distro: a, path: p }, ProjectRoot::Wsl { distro: b, path: q }) => {
+                a.eq_ignore_ascii_case(b) && p == q
+            }
+            _ => self == other,
+        }
+    }
+
     /// Local のときのパス。
     pub fn local_path(&self) -> Option<&Path> {
         match self {
@@ -135,6 +145,13 @@ mod tests {
         for p in [r"C:\w\a", r"\\server\share\x", "/Users/x"] {
             assert_eq!(from(p), ProjectRoot::Local(PathBuf::from(p)));
         }
+    }
+
+    #[test]
+    fn same_place_ignores_distro_case() {
+        assert!(wsl("Ubuntu", "/home/x").same_place(&wsl("UBUNTU", "/home/x")));
+        assert!(!wsl("Ubuntu", "/home/x").same_place(&wsl("Ubuntu", "/home/X")));
+        assert!(!wsl("Ubuntu", "/home/x").same_place(&wsl("Debian", "/home/x")));
     }
 
     #[test]

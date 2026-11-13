@@ -84,7 +84,7 @@ impl Workspace {
                 continue;
             }
             // 同じ場所が 2 度書かれていたら、最初のものだけを使う。
-            if ws.projects().iter().any(|q| q.root == p.root) {
+            if ws.projects().iter().any(|q| q.root.same_place(&p.root)) {
                 continue;
             }
             let mut tabs: Vec<(Vec<ShellKind>, usize)> =

@@ -117,7 +117,7 @@ impl Workspace {
     /// root は呼び出し側で正規化済みとする。同じ root があればそれを選び、その id を返す。
     /// 新しいプロジェクトには既定のシェル（root.default_shell()）のタブを 1 つ作る。
     pub fn open_project(&mut self, root: ProjectRoot) -> ProjectId {
-        if let Some(p) = self.projects.iter().find(|p| p.root == root) {
+        if let Some(p) = self.projects.iter().find(|p| p.root.same_place(&root)) {
             let id = p.id;
             self.active = Some(id);
             return id;
@@ -406,6 +406,15 @@ mod tests {
         let (a, b) = (ws.projects()[0].id, ws.projects()[1].id);
         ws.close_project(a);
         assert_eq!(active(&ws).id, b);
+    }
+
+    #[test]
+    fn distro_case_does_not_duplicate_project() {
+        let mut ws = Workspace::default();
+        let a = ws.open_project(ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() });
+        let again = ws.open_project(ProjectRoot::Wsl { distro: "ubuntu".into(), path: "/home/x".into() });
+        assert_eq!(again, a);
+        assert_eq!(ws.projects().len(), 1);
     }
 
     #[test]
