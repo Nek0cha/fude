@@ -14,6 +14,7 @@ mod terminal_view;
 mod theme;
 mod title_row;
 mod workspace_view;
+mod wsl_host;
 
 use std::borrow::Cow;
 
@@ -88,8 +89,8 @@ fn main() {
         Some(data) => Workspace::restore(data, &|p| p.is_dir()),
         None => Workspace::default(),
     };
-    if let Launch::Open(root) = launch {
-        workspace.open_project(root);
+    if let Launch::Open { root, shell } = launch {
+        workspace.open_project_with(root, shell);
     }
 
     application().with_assets(FudeAssets).run(move |cx: &mut App| {

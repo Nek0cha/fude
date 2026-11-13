@@ -1755,6 +1755,7 @@ name = "fude"
 version = "0.1.0"
 dependencies = [
  "fude-core",
+ "fude-fs",
  "fude-ipc",
  "fude-term",
  "futures",
@@ -1767,6 +1768,17 @@ dependencies = [
 name = "fude-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "fude-fs"
+version = "0.1.0"
+dependencies = [
+ "fude-core",
+ "ignore",
  "serde",
  "serde_json",
  "tempfile",
@@ -1790,6 +1802,13 @@ dependencies = [
  "alacritty_terminal",
  "fude-core",
  "portable-pty",
+]
+
+[[package]]
+name = "fude-wsl"
+version = "0.1.0"
+dependencies = [
+ "fude-fs",
 ]
 
 [[package]]

@@ -43,6 +43,21 @@ impl ProjectRoot {
         ProjectRoot::Wsl { distro: distro.to_string(), path }
     }
 
+    /// WSL の中の絶対パスから作る。`/mnt/<英字 1 文字>` とその下は Local(`<大文字>:\…`)、それ以外は Wsl。
+    /// 末尾の "/" は除く（"/" だけはそのまま）。
+    pub fn from_wsl_path(distro: &str, path: &str) -> ProjectRoot {
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if let ["mnt", drive, tail @ ..] = segments.as_slice()
+            && drive.len() == 1
+            && drive.as_bytes()[0].is_ascii_alphabetic()
+        {
+            let mut local = format!("{}:\\", drive.to_ascii_uppercase());
+            local.push_str(&tail.join("\\"));
+            return ProjectRoot::Local(PathBuf::from(local));
+        }
+        ProjectRoot::Wsl { distro: distro.to_string(), path: format!("/{}", segments.join("/")) }
+    }
+
     /// このプロセスから開けるパス。Wsl は `\\wsl.localhost\<distro>\<path の / を \ にしたもの>`。
     pub fn host_path(&self) -> PathBuf {
         match self {
@@ -145,6 +160,18 @@ mod tests {
         for p in [r"C:\w\a", r"\\server\share\x", "/Users/x"] {
             assert_eq!(from(p), ProjectRoot::Local(PathBuf::from(p)));
         }
+    }
+
+    #[test]
+    fn from_wsl_path_rules() {
+        let from = ProjectRoot::from_wsl_path;
+        assert_eq!(from("Ubuntu", "/home/x/"), wsl("Ubuntu", "/home/x"));
+        assert_eq!(from("Ubuntu", "/"), wsl("Ubuntu", "/"));
+        assert_eq!(from("Ubuntu", "/mnt/c/Users/x"), ProjectRoot::Local(PathBuf::from(r"C:\Users\x")));
+        assert_eq!(from("Ubuntu", "/mnt/d"), ProjectRoot::Local(PathBuf::from(r"D:\")));
+        assert_eq!(from("Ubuntu", "/mnt/d/"), ProjectRoot::Local(PathBuf::from(r"D:\")));
+        assert_eq!(from("Ubuntu", "/mnt/wsl/x"), wsl("Ubuntu", "/mnt/wsl/x"));
+        assert_eq!(from("Ubuntu", "/home/x/my proj"), wsl("Ubuntu", "/home/x/my proj"));
     }
 
     #[test]
