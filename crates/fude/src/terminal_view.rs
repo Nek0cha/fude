@@ -2,14 +2,13 @@
 
 use std::cell::Cell;
 use std::ops::Range;
-use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
 use fude_core::keymap::Platform;
 use fude_core::keys::{KeyOverrides, KeyRoute, RawKey, encode_key, route_key};
-use fude_core::workspace::ShellKind;
+use fude_core::workspace::{ProjectRoot, ShellKind};
 use fude_term::{
     GridSize, SelectKind, Session, SessionEvent, WheelAccum, alt_scroll_bytes, alt_scroll_lines, paste_bytes, spawn_spec,
 };
@@ -58,7 +57,7 @@ pub struct TerminalView {
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl TerminalView {
-    pub fn new(kind: &ShellKind, root: &Path, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(kind: &ShellKind, root: &ProjectRoot, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<SessionEvent>();
         let spec = spawn_spec(kind, root, &|k| std::env::var(k).ok());
         let on_event = Arc::new(move |ev| {

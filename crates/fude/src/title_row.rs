@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use fude_core::workspace::{ShellKind, Tab};
+use fude_core::workspace::Tab;
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -30,7 +30,7 @@ impl WorkspaceView {
         let add_tab = self
             .tool_button("add-tab", HoverKey::AddTab, IconName::Plus, cx, now)
             .on_click(cx.listener(|this, _, _, cx| {
-                this.workspace.new_tab(ShellKind::Native);
+                this.new_default_tab();
                 cx.notify();
             }))
             .on_mouse_down(

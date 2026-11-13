@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 use fude_core::paths::simplify_verbatim;
+use fude_core::workspace::ProjectRoot;
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
@@ -29,7 +30,7 @@ const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-
 const WINDOW_BACKGROUND: WindowBackgroundAppearance = WindowBackgroundAppearance::Blurred;
 
 /// 起動時に開くプロジェクト。引数の 1 つ目、無ければ現在のディレクトリ。
-fn initial_root() -> PathBuf {
+fn initial_root() -> ProjectRoot {
     let cwd = std::env::current_dir().expect("現在のディレクトリを取得できない");
     let root = match std::env::args_os().nth(1).map(PathBuf::from) {
         Some(arg) if arg.is_dir() => arg,
@@ -39,7 +40,7 @@ fn initial_root() -> PathBuf {
         }
         None => cwd,
     };
-    std::fs::canonicalize(&root).map(simplify_verbatim).unwrap_or(root)
+    ProjectRoot::from_host_path(std::fs::canonicalize(&root).map(simplify_verbatim).unwrap_or(root))
 }
 
 fn main() {

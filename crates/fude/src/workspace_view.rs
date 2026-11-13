@@ -1,12 +1,11 @@
 //! ルートのビュー。全体の配置と、アクションの処理を受け持つ。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use fude_core::git_head::read_branch;
 use fude_core::keymap::{Command, Platform, default_bindings};
-use fude_core::workspace::{PaneId, ProjectId, ShellKind, Workspace};
+use fude_core::workspace::{PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
 use gpui_kit::*;
 
 use crate::hover::{HoverFades, HoverKey};
@@ -80,7 +79,7 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
-    pub fn new(initial_root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(initial_root: ProjectRoot, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.refresh_active_branch();
@@ -131,15 +130,22 @@ impl WorkspaceView {
     }
 
     /// root は正規化済みとする。
-    pub(crate) fn open_project(&mut self, root: PathBuf) {
-        let id = self.workspace.open_project(root, ShellKind::Native);
-        let branch = self.workspace.active_project().and_then(|p| read_branch(&p.root));
+    pub(crate) fn open_project(&mut self, root: ProjectRoot) {
+        let id = self.workspace.open_project(root);
+        let branch = self.workspace.active_project().and_then(|p| read_branch(&p.root.host_path()));
         self.branches.insert(id, branch);
+    }
+
+    /// 選択中のプロジェクトの既定のシェルでタブを作る。
+    pub(crate) fn new_default_tab(&mut self) {
+        if let Some(kind) = self.workspace.active_project().map(|p| p.default_shell()) {
+            self.workspace.new_tab(kind);
+        }
     }
 
     fn refresh_active_branch(&mut self) {
         if let Some(p) = self.workspace.active_project() {
-            self.branches.insert(p.id, read_branch(&p.root));
+            self.branches.insert(p.id, read_branch(&p.root.host_path()));
         }
     }
 
@@ -155,7 +161,7 @@ impl WorkspaceView {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
             let root = match std::fs::canonicalize(&path) {
-                Ok(root) => fude_core::paths::simplify_verbatim(root),
+                Ok(root) => ProjectRoot::from_host_path(fude_core::paths::simplify_verbatim(root)),
                 Err(err) => {
                     eprintln!("フォルダを開けない: {}: {err}", path.display());
                     return;
@@ -263,7 +269,7 @@ impl Render for WorkspaceView {
             .track_focus(&self.focus)
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
-                this.workspace.new_tab(ShellKind::Native);
+                this.new_default_tab();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SplitTab, _, cx| {
