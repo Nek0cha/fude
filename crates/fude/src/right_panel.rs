@@ -173,7 +173,7 @@ impl WorkspaceView {
         let Some(view) = slot.view.clone() else { return };
         let Some(rel) = renamed_rel(&view.read(cx).rel, from, to) else { return };
         view.update(cx, |v, cx| v.set_rel(rel.clone(), cx));
-        self.workspace.set_open_file(project, Some(rel));
+        set_single_file(&mut self.workspace, project, Some(rel));
         cx.notify();
     }
 
@@ -208,7 +208,7 @@ impl WorkspaceView {
                 slot.loading = None;
                 slot._sub = None;
             }
-            this.workspace.set_open_file(project, None);
+            set_single_file(&mut this.workspace, project, None);
             this.restore_focus(window, cx);
             cx.notify();
         });
@@ -257,7 +257,7 @@ impl WorkspaceView {
         let Some(root) = self.workspace.projects().iter().find(|p| p.id == project).map(|p| p.root.clone()) else {
             return;
         };
-        self.workspace.set_open_file(project, Some(item.rel.clone()));
+        set_single_file(&mut self.workspace, project, Some(item.rel.clone()));
         let slot = self.panels.entry(project).or_default();
         slot.loading = Some(item.rel.clone());
         let hosts = self.wsl_hosts.clone();
@@ -351,5 +351,15 @@ mod tests {
         assert_eq!(panel_width(px(1200.)), px(540.));
         assert_eq!(panel_width(px(800.)), px(420.));
         assert_eq!(panel_width(px(500.)), px(500.));
+    }
+}
+
+/// 計画5の 1 ファイルの動きを保つ間のつなぎ（Task 7 でエディタ列に置き換える）。
+fn set_single_file(ws: &mut fude_core::workspace::Workspace, project: ProjectId, rel: Option<String>) {
+    if let Some(tabs) = ws.editor_mut(project) {
+        *tabs = fude_core::editor_tabs::EditorTabs::default();
+        if let Some(rel) = rel {
+            tabs.open(fude_core::editor_tabs::EditorItem { rel, mode: fude_core::panel::FileMode::Full });
+        }
     }
 }

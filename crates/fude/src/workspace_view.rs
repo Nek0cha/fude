@@ -368,7 +368,7 @@ impl WorkspaceView {
         self.save_recent(cx);
         // 開いていたファイルを右パネルに開き直す。
         let files: Vec<(ProjectId, String)> =
-            self.workspace.projects().iter().filter_map(|p| p.open_file.clone().map(|f| (p.id, f))).collect();
+            self.workspace.projects().iter().filter_map(|p| p.editor.active().map(|f| (p.id, f.rel.clone()))).collect();
         for (project, rel) in files {
             self.open_in_panel(project, rel, None, window, cx);
         }
