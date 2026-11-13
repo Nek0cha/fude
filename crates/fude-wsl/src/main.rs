@@ -82,6 +82,27 @@ fn main() {
     std::process::exit(code);
 }
 
+/// 子プロセスを新しいセッションで起動する。WSL は、起動した wsl.exe のセッションが終わるときに、その中から
+/// 起動した Windows のプロセスも終わらせる。fude が動いていなかったときに起動した fude.exe が、端末を閉じると
+/// 一緒に消えないようにする。
+#[cfg(unix)]
+fn new_session(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe extern "C" {
+        fn setsid() -> i32;
+    }
+    // SAFETY: fork と exec の間で呼ぶのは async-signal-safe な setsid だけである。
+    unsafe {
+        command.pre_exec(|| {
+            setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn new_session(_command: &mut Command) {}
+
 /// path を Windows の fude に開かせ、その終了コードを返す（OPEN_WAIT を過ぎたら 0）。
 fn open(path: &Path) -> Result<i32, String> {
     let distro = std::env::var("WSL_DISTRO_NAME").ok().filter(|d| !d.is_empty()).ok_or(NOT_IN_WSL)?;
@@ -99,13 +120,10 @@ fn open(path: &Path) -> Result<i32, String> {
     }
     let (cmd, args) = open_command(&host_exe, &distro, &abs);
     // 標準入出力はつながない。待たずに戻ったあとで fude が書いても、閉じた口に書いて落ちないようにする。
-    let mut child = Command::new(&cmd)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Windows の fude を起動できない: {cmd}: {e}"))?;
+    let mut command = Command::new(&cmd);
+    command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    new_session(&mut command);
+    let mut child = command.spawn().map_err(|e| format!("Windows の fude を起動できない: {cmd}: {e}"))?;
     let deadline = Instant::now() + OPEN_WAIT;
     while Instant::now() < deadline {
         match child.try_wait() {
