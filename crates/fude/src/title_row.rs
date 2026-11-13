@@ -9,6 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::hover::HoverKey;
+use crate::layout_anim::{tab_close_progress, tab_open_progress, tab_width_estimate};
 use crate::theme::{Theme, size};
 use crate::workspace_view::WorkspaceView;
 
@@ -20,13 +21,46 @@ pub(crate) fn icon(name: IconName, color: Rgba) -> Svg {
 
 impl WorkspaceView {
     pub(crate) fn render_title_row(&mut self, window: &mut Window, cx: &mut Context<Self>, now: Instant) -> Div {
-        let tabs: Vec<AnyElement> = match self.workspace.active_project() {
+        let mut tabs: Vec<AnyElement> = match self.workspace.active_project() {
             Some(p) => {
                 let active = p.active_tab;
-                p.tabs.iter().map(|t| self.render_tab(t, Some(t.id) == active, cx, now).into_any_element()).collect()
+                p.tabs
+                    .iter()
+                    .map(|t| {
+                        let el = self.render_tab(t, Some(t.id) == active, cx, now);
+                        // 出てきたタブは幅を広げながら、文字をフェードインする（設計書 §6.3）。
+                        match self.anims.opened.get(&t.id) {
+                            Some(start) => {
+                                let f = tab_open_progress(now.saturating_duration_since(*start), self.reduced_motion);
+                                let w = tab_width_estimate(&t.title()) * f;
+                                div().max_w(px(w)).overflow_hidden().flex_shrink_0().opacity(f).child(el).into_any_element()
+                            }
+                            None => el.into_any_element(),
+                        }
+                    })
+                    .collect()
             }
             None => Vec::new(),
         };
+        // 閉じたタブは、文字を消してから幅を縮める。
+        let theme = *cx.global::<Theme>();
+        for c in &self.anims.closing {
+            let (text, width, _) = tab_close_progress(now.saturating_duration_since(c.started), self.reduced_motion);
+            let ghost = div()
+                .h(size::TAB_H)
+                .w(px(tab_width_estimate(&c.title) * width))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .text_size(px(13.))
+                .text_color(Rgba { a: theme.fg_dim.a * text, ..theme.fg_dim })
+                .child(c.title.clone())
+                .into_any_element();
+            tabs.insert(c.index.min(tabs.len()), ghost);
+        }
         let add_tab = self
             .tool_button("add-tab", HoverKey::AddTab, IconName::Plus, cx, now)
             .on_click(cx.listener(|this, _, _, cx| {
@@ -44,6 +78,9 @@ impl WorkspaceView {
                 cx.notify();
             }));
 
+        // プロジェクトが無い（ホーム画面）ときは、タブ、＋、分割、ピルを出さない。タブが 0 枚なら分割も出さない。
+        let has_project = self.workspace.active_project().is_some();
+        let has_tabs = self.workspace.active_project().is_some_and(|p| !p.tabs.is_empty());
         div()
             .flex()
             .flex_row()
@@ -64,18 +101,22 @@ impl WorkspaceView {
                     .overflow_hidden()
                     .children(tabs),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.))
-                    .pl(px(4.))
-                    .flex_shrink_0()
-                    .child(add_tab)
-                    .child(split),
-            )
+            .when(has_project, |row| {
+                row.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .pl(px(4.))
+                        .flex_shrink_0()
+                        .child(add_tab)
+                        .when(has_tabs, |row| row.child(split)),
+                )
+            })
             .child(self.drag_area("title-gap", cx).flex_1().h_full().min_w(px(24.)))
+            .children(self.render_changes_button(cx, now))
+            .child(div().w(px(6.)).flex_shrink_0())
             .child(self.render_pill(cx))
             .child(div().w(px(8.)).h_full().flex_shrink_0())
             .when(cfg!(windows), |row| row.child(self.render_caption_buttons(window, cx, now)))
@@ -127,10 +168,9 @@ impl WorkspaceView {
             .rounded(px(4.))
             .bg(close_bg)
             .child(svg().path(IconName::X.path()).size(px(12.)).text_color(close_color))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
-                this.workspace.close_tab(id);
-                cx.notify();
+                this.request_close(fude_core::close::CloseTarget::Tab(id), window, cx);
             }));
 
         self.hoverable(div().id(ElementId::Name(format!("tab-{id:?}").into())), key, cx)
@@ -177,12 +217,14 @@ impl WorkspaceView {
             .child(icon(name, fg))
     }
 
-    /// プロジェクト名とブランチ名。この計画では表示だけで、押しても何も起きない。
-    fn render_pill(&self, cx: &mut Context<Self>) -> Div {
+    /// プロジェクト名とブランチ名。クリックでツリーを開閉する（設計書 §4.3）。
+    fn render_pill(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = *cx.global::<Theme>();
-        let Some(project) = self.workspace.active_project() else { return div() };
+        let Some(project) = self.workspace.active_project() else { return div().id("pill") };
         let branch = self.branches.get(&project.id).cloned().flatten();
         div()
+            .id("pill")
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_tree(window, cx)))
             .h(px(24.))
             .px(px(10.))
             .flex()

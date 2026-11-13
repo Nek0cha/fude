@@ -12,8 +12,10 @@ use fude_core::workspace::{ProjectRoot, ShellKind};
 use fude_term::{
     GridSize, SelectKind, Session, SessionEvent, WheelAccum, alt_scroll_bytes, alt_scroll_lines, paste_bytes, spawn_spec,
 };
+use fude_term::links::{LinkTarget, find_links};
 use futures::StreamExt;
 use gpui_kit::assets::IconName;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::hover::{HoverFades, HoverKey};
@@ -29,6 +31,8 @@ const TO_BOTTOM_INSET: Pixels = px(12.);
 
 /// ビューからワークスペースへ知らせること。
 pub enum TerminalEvent {
+    /// 出力の中のパスや URL をクリックした。
+    OpenLink(LinkTarget),
     Title(Option<String>),
     Exited { success: bool },
     /// クリックでこのペインにフォーカスした。
@@ -51,15 +55,22 @@ pub struct TerminalView {
     /// マウスで選択中なら Some（押してから動かしたか）。
     drag: Option<bool>,
     click_count: usize,
+    /// マウスが乗っているリンク（行、始まりの列、終わりの列（含まない）、行き先）。
+    hover_link: Option<(u16, u16, u16, LinkTarget)>,
+    /// 動きの間は PTY にサイズを送らない（描画の closure から読むため Cell）。
+    resize_frozen: Rc<Cell<bool>>,
+    /// 作った時刻（中身のフェードイン）。
+    created_at: Instant,
     _events: Task<()>,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl TerminalView {
-    pub fn new(kind: &ShellKind, root: &ProjectRoot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// terminal_id は FUDE_TERMINAL_ID として渡す（`p<ペインの番号>`）。
+    pub fn new(kind: &ShellKind, root: &ProjectRoot, terminal_id: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<SessionEvent>();
-        let spec = spawn_spec(kind, root, &|k| std::env::var(k).ok());
+        let spec = spawn_spec(kind, root, terminal_id, &|k| std::env::var(k).ok());
         let on_event = Arc::new(move |ev| {
             let _ = tx.unbounded_send(ev);
         });
@@ -91,12 +102,25 @@ impl TerminalView {
             hover: HoverFades::default(),
             drag: None,
             click_count: 0,
+            hover_link: None,
+            resize_frozen: Rc::new(Cell::new(false)),
+            created_at: Instant::now(),
             _events: events,
         }
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    /// 動きの間は true にする。false に戻したら、次の描画で最終的なサイズを 1 回だけ送る。
+    pub fn set_resize_frozen(&mut self, frozen: bool, cx: &mut Context<Self>) {
+        if self.resize_frozen.get() != frozen {
+            self.resize_frozen.set(frozen);
+            if !frozen {
+                cx.notify();
+            }
+        }
     }
 
     fn handle_events(&mut self, events: Vec<SessionEvent>, cx: &mut Context<Self>) {
@@ -167,7 +191,27 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// マウスが乗った行だけリンクを探す（常に下線を出すと画面が散らかるため）。
+    fn update_hover_link(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let found = (|| {
+            let session = self.session.as_ref()?;
+            let (row, col, _) = self.cell_at(pos)?;
+            let palette = cx.global::<Theme>().term_palette;
+            let chars = session.with_state(|st| st.snapshot(&palette, false).row_chars(row));
+            let (start, end, target) = link_at(&chars, col)?;
+            Some((row, start, end, target))
+        })();
+        if found != self.hover_link {
+            self.hover_link = found;
+            cx.notify();
+        }
+    }
+
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if ev.pressed_button.is_none() {
+            self.update_hover_link(ev.position, cx);
+            return;
+        }
         if self.drag.is_none() || ev.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -192,13 +236,25 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, cx: &mut Context<Self>) {
-        if let Some(moved) = self.drag.take() {
-            if !made_selection(moved, self.click_count)
-                && let Some(s) = &self.session
-            {
-                // 押しただけで動かさなかったクリックは、選択を残さない。
+        // 押して動かさずに離したら、乗っているリンクを開く（ドラッグなら今までどおり選択）。
+        if self.drag == Some(false)
+            && self.click_count == 1
+            && let Some((_, _, _, target)) = self.hover_link.clone()
+        {
+            self.drag = None;
+            if let Some(s) = &self.session {
                 s.with_state(|st| st.clear_selection());
             }
+            cx.emit(TerminalEvent::OpenLink(target));
+            cx.notify();
+            return;
+        }
+        if let Some(moved) = self.drag.take()
+            && !made_selection(moved, self.click_count)
+            && let Some(s) = &self.session
+        {
+            // 押しただけで動かさなかったクリックは、選択を残さない。
+            s.with_state(|st| st.clear_selection());
         }
         cx.notify();
     }
@@ -287,6 +343,24 @@ impl TerminalView {
         let at = point(origin.x + m.cell_w * f32::from(cursor.col), origin.y + m.line_h * f32::from(cursor.row));
         Some(Bounds::new(at, size(m.cell_w, m.line_h)))
     }
+}
+
+/// 描画で測った大きさ measured を PTY に送るか。動きの間（frozen）と、今と同じなら送らない（設計書 §6.3）。
+pub(crate) fn resize_target(frozen: bool, measured: GridSize, current: GridSize) -> Option<GridSize> {
+    (!frozen && measured != current).then_some(measured)
+}
+
+/// 行の文字と列の対応（Snapshot::row_chars）から、col の上にあるリンクと、その列の範囲を返す。
+pub(crate) fn link_at(chars: &[(char, u16)], col: u16) -> Option<(u16, u16, LinkTarget)> {
+    let text: String = chars.iter().map(|(c, _)| *c).collect();
+    find_links(&text).into_iter().find_map(|link| {
+        let start = chars.get(link.start)?.1;
+        let end = match chars.get(link.end) {
+            Some((_, c)) => *c,
+            None => chars.get(link.end.checked_sub(1)?)?.1 + 1,
+        };
+        (start <= col && col < end).then_some((start, end, link.target))
+    })
 }
 
 /// 右クリックで行うこと。
@@ -396,7 +470,15 @@ impl Render for TerminalView {
         let session = self.session.clone();
         let marked = self.marked.clone();
         let metrics = self.metrics;
+        let underline = self.hover_link.as_ref().map(|(row, start, end, _)| (*row, *start, *end));
+        let link_color = theme.fg_default;
         let bounds_cell = self.bounds.clone();
+        let frozen = self.resize_frozen.clone();
+        let age = now.saturating_duration_since(self.created_at);
+        let opacity = crate::theme::motion::ease_out((age.as_secs_f32() / crate::theme::motion::TERM_IN.as_secs_f32()).min(1.0));
+        if opacity < 1.0 {
+            window.request_animation_frame();
+        }
 
         let grid = canvas(
             move |bounds, _, _| {
@@ -404,7 +486,10 @@ impl Render for TerminalView {
                 if let Some(s) = &session {
                     let w = f32::from(bounds.size.width);
                     let h = f32::from(bounds.size.height);
-                    s.resize(GridSize::from_pixels(w, h, f32::from(metrics.cell_w), f32::from(metrics.line_h)));
+                    let measured = GridSize::from_pixels(w, h, f32::from(metrics.cell_w), f32::from(metrics.line_h));
+                    if let Some(size) = resize_target(frozen.get(), measured, s.with_state(|st| st.size())) {
+                        s.resize(size);
+                    }
                 }
                 session
             },
@@ -412,6 +497,12 @@ impl Render for TerminalView {
                 if let Some(s) = session {
                     let snap = s.with_state(|st| st.snapshot(&theme.term_palette, focused));
                     paint_terminal(&snap, marked.as_deref(), bounds.origin, metrics, &theme, window, cx);
+                    if let Some((row, start, end)) = underline {
+                        let x = bounds.origin.x + metrics.cell_w * f32::from(start);
+                        let y = bounds.origin.y + metrics.line_h * f32::from(row + 1) - px(2.);
+                        let w = metrics.cell_w * f32::from(end - start);
+                        window.paint_quad(fill(Bounds::new(point(x, y), size(w, px(1.))), link_color));
+                    }
                 }
                 window.handle_input(&focus, ElementInputHandler::new(bounds, entity), cx);
             },
@@ -426,6 +517,8 @@ impl Render for TerminalView {
             .id("terminal")
             .track_focus(&self.focus)
             .key_context("Terminal")
+            // ターミナルへのドロップ（パスの入力）は別の段階で入れる。ウィンドウの「開く」には回さない。
+            .on_drop(|_: &ExternalPaths, _, cx| cx.stop_propagation())
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| this.on_key(ev, cx)))
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy(cx)))
             .on_action(cx.listener(|this, _: &PasteText, _, cx| this.paste(cx)))
@@ -437,8 +530,10 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| this.on_mouse_move(ev, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_mouse_up(cx)))
             .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| this.on_scroll(ev, cx)))
+            .when(self.hover_link.is_some(), |d| d.cursor_pointer())
             .relative()
             .size_full()
+            .opacity(opacity)
             .px(TERM_PAD_X)
             .py(TERM_PAD_Y)
             .font(mono_font())
@@ -481,6 +576,29 @@ mod tests {
         assert!(made_selection(true, 1));
         assert!(made_selection(false, 2));
         assert!(made_selection(false, 3));
+    }
+
+    #[test]
+    fn frozen_terminal_does_not_resize() {
+        use super::resize_target;
+        let a = GridSize { cols: 80, rows: 24 };
+        let b = GridSize { cols: 100, rows: 24 };
+        assert_eq!(resize_target(true, b, a), None);
+        assert_eq!(resize_target(false, a, a), None);
+        assert_eq!(resize_target(false, b, a), Some(b));
+    }
+
+    #[test]
+    fn link_at_maps_columns() {
+        use super::link_at;
+        use fude_term::links::LinkTarget;
+        // "あ src/a.rs" — 全角の「あ」は 2 列を使う。
+        let chars = vec![('あ', 0), (' ', 2), ('s', 3), ('r', 4), ('c', 5), ('/', 6), ('a', 7), ('.', 8), ('r', 9), ('s', 10)];
+        let (start, end, target) = link_at(&chars, 5).unwrap();
+        assert_eq!((start, end), (3, 11));
+        assert_eq!(target, LinkTarget::Path { path: "src/a.rs".into(), line: None, col: None });
+        assert!(link_at(&chars, 1).is_none());
+        assert!(link_at(&chars, 11).is_none());
     }
 
     #[test]

@@ -1,13 +1,16 @@
 //! ルートのビュー。全体の配置と、アクションの処理を受け持つ。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fude_core::keymap::{Command, Platform, default_bindings};
+use fude_core::keymap::{Command, Platform, context_bindings, default_bindings};
+use fude_core::recent::RecentList;
 use fude_core::session::{self, SessionData, WindowGeom};
-use fude_core::workspace::{PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
+use fude_core::settings::{LastProjectClosed, Settings};
+use fude_core::workspace::{OpenMode, PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
+use fude_core::motion::Fade;
 use fude_ipc::Message;
 use gpui_kit::*;
 
@@ -15,6 +18,7 @@ use crate::hover::{HoverFades, HoverKey};
 use crate::main_area::render_main_area;
 use crate::popup::Popup;
 use crate::terminal_view::{TerminalEvent, TerminalView};
+use crate::theme::motion::{SCREEN_FADE, ease_out};
 use crate::theme::{Theme, ui_font};
 use crate::wsl_host::{WslHosts, project_fs};
 
@@ -36,12 +40,35 @@ gpui_kit::actions!(
         ActivateProject9,
         CopySelection,
         PasteText,
+        CloseItem,
     ]
 );
 
+/// Command と文脈を GPUI のキーバインドにする。
+fn binding(key: &'static str, command: Command, context: Option<&'static str>) -> KeyBinding {
+    use crate::file_view::{PanelBack, PanelForward, SaveFile};
+    use crate::tree_view::ToggleTree;
+    match command {
+        Command::Close => KeyBinding::new(key, CloseItem, context),
+        Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
+        Command::Save => KeyBinding::new(key, SaveFile, context),
+        Command::PanelBack => KeyBinding::new(key, PanelBack, context),
+        Command::PanelForward => KeyBinding::new(key, PanelForward, context),
+        other => default_binding(key, other),
+    }
+}
+
 /// fude_core の割り当て表を GPUI のキーバインドに変換して登録する。
 pub fn bind_keys(cx: &mut App) {
-    let bindings = default_bindings(Platform::current()).into_iter().map(|(key, command)| match command {
+    let platform = Platform::current();
+    let mut bindings: Vec<KeyBinding> =
+        default_bindings(platform).into_iter().map(|(key, command)| binding(key, command, None)).collect();
+    bindings.extend(context_bindings(platform).into_iter().map(|(key, command, context)| binding(key, command, Some(context))));
+    cx.bind_keys(bindings);
+}
+
+fn default_binding(key: &'static str, command: Command) -> KeyBinding {
+    match command {
         Command::NewTab => KeyBinding::new(key, NewTab, None),
         Command::SplitTab => KeyBinding::new(key, SplitTab, None),
         Command::NextTab => KeyBinding::new(key, NextTab, None),
@@ -59,8 +86,11 @@ pub fn bind_keys(cx: &mut App) {
             8 => KeyBinding::new(key, ActivateProject8, None),
             _ => KeyBinding::new(key, ActivateProject9, None),
         },
-    });
-    cx.bind_keys(bindings.collect::<Vec<_>>());
+        // 文脈の付くものは binding で扱う。
+        Command::Close | Command::ToggleTree | Command::Save | Command::PanelBack | Command::PanelForward => {
+            unreachable!("binding で扱う")
+        }
+    }
 }
 
 /// ブランチ名の読み方。
@@ -77,6 +107,53 @@ pub(crate) fn branch_read(root: &ProjectRoot) -> BranchRead {
         ProjectRoot::Local(_) => BranchRead::Now,
         ProjectRoot::Wsl { .. } => BranchRead::Background,
     }
+}
+
+/// プロジェクトを閉じたあとに行うこと。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AfterClose {
+    /// まだプロジェクトがある。
+    Stay,
+    /// ホーム画面を出す（プロジェクトが 0 個なら自然に出る）。
+    ShowHome,
+    /// アプリを終える。
+    Quit,
+}
+
+/// remaining は閉じたあとのプロジェクトの数。
+pub(crate) fn last_project_closed_action(settings: &Settings, remaining: usize) -> AfterClose {
+    match (remaining, settings.on_last_project_closed) {
+        (1.., _) => AfterClose::Stay,
+        (0, LastProjectClosed::Home) => AfterClose::ShowHome,
+        (0, LastProjectClosed::Quit) => AfterClose::Quit,
+    }
+}
+
+/// 起動のときに開くもの（main の Launch から）。
+pub enum InitialOpen {
+    Nothing,
+    Project { root: ProjectRoot, shell: Option<ShellKind> },
+    File { file: fude_core::location::FileLocation, root_hint: Option<ProjectRoot> },
+}
+
+/// 起動のときに読んだもの。
+pub struct Startup {
+    pub session_path: Option<PathBuf>,
+    /// 前回の続き（ホーム画面の「前回の続き」で戻す）。
+    pub last_session: Option<SessionData>,
+    pub recent_path: Option<PathBuf>,
+    pub recent: RecentList,
+    pub open: InitialOpen,
+}
+
+/// 今の UNIX 秒。
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// ペインの FUDE_TERMINAL_ID。
+pub(crate) fn terminal_id(pane: PaneId) -> String {
+    format!("p{}", pane.raw())
 }
 
 /// 状態が変わってから保存するまでの待ち時間。続けて変わったら、最後の変化から数え直す。
@@ -115,8 +192,8 @@ pub struct WorkspaceView {
     /// インストール済みの WSL のディストリビューション。起動時に 1 回だけ読む。
     pub(crate) distros: Vec<String>,
     /// WSL のプロジェクトのファイルへのアクセス（ディストリビューションごとの fude serve）。
-    wsl_hosts: Arc<WslHosts>,
-    focus: FocusHandle,
+    pub(crate) wsl_hosts: Arc<WslHosts>,
+    pub(crate) focus: FocusHandle,
     /// セッションの保存先。環境変数から決まらなければ保存しない。
     session_path: Option<PathBuf>,
     /// 最後に書いた内容と、書く予定の内容。同じ内容を何度も書かないために持つ。
@@ -126,17 +203,60 @@ pub struct WorkspaceView {
     save_task: Option<Task<()>>,
     /// 最後に見たウィンドウの位置と大きさ（アプリの終了時はウィンドウに触れないため）。
     last_geom: Option<WindowGeom>,
+    /// 設定（段階 9 までは既定値）。
+    pub(crate) settings: Settings,
+    /// 最近開いたプロジェクトと、その保存先。
+    pub(crate) recent: RecentList,
+    recent_path: Option<PathBuf>,
+    /// 「前回の続き」で戻す状態。最後にプロジェクトが 1 個以上あった時点のもの。
+    pub(crate) last_session: Option<SessionData>,
+    /// ホーム画面で薄く出す（フォルダが見つからない）プロジェクト。
+    pub(crate) missing_roots: HashSet<ProjectRoot>,
+    /// 右パネルに開いたあとで、カーソルを置く位置（プロジェクト、1 始まりの行と列）。
+    pub(crate) pending_goto: Option<(ProjectId, u32, Option<u32>)>,
+    /// ファイルツリー（左パネル）。
+    pub(crate) tree: crate::tree_view::TreeState,
+    /// プロジェクトごとの ProjectFs、監視、Git の状態。
+    pub(crate) live: HashMap<ProjectId, crate::project_state::ProjectLive>,
+    /// 変更したファイルの一覧（「● N」を押すと出る）。
+    pub(crate) changes_menu: Option<(ProjectId, crate::popup::Popup)>,
+    /// プロジェクトごとの右パネル。
+    pub(crate) panels: HashMap<ProjectId, crate::right_panel::PanelSlot>,
+    /// 右パネルの出入りとエディタの移動の動き。
+    pub(crate) panel_anim: crate::right_panel::PanelAnim,
+    /// 左パネル（ツリー）の出入り。
+    pub(crate) tree_presence: crate::anim::Presence,
+    /// タブと分割の動き。
+    pub(crate) anims: crate::layout_anim::LayoutAnims,
+    /// OS の「動きを減らす」設定。起動時とウィンドウが前面に来たときに読む。
+    pub(crate) reduced_motion: bool,
+    /// 確かめ終えて、ウィンドウを閉じてよい（× の 2 回目）。
+    pub(crate) allow_close: bool,
+    /// 確認ダイアログ。
+    pub(crate) dialog: Option<crate::dialog::OpenDialog>,
+    /// ホーム画面の「最近」の右クリックメニュー。
+    pub(crate) home_menu: Option<(ProjectRoot, crate::popup::Popup)>,
+    /// ホーム画面とプロジェクトの画面の切り替えのフェード（新しい画面の不透明度）。
+    screen_fade: Fade,
+    /// 前の描画でホーム画面を出していたか。
+    showing_home: Option<bool>,
     _activation: Subscription,
     _bounds: Subscription,
     _quit: Subscription,
 }
 
 impl WorkspaceView {
-    /// 起動時の状態（復元したもの、または引数のプロジェクトを開いたもの）を受け取る。
-    pub fn new(workspace: Workspace, session_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// 起動時にセッションは戻さない（設計書 §5.10 の B 案）。startup.open があれば開く。
+    pub fn new(startup: Startup, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let Startup { session_path, last_session, recent_path, recent, open } = startup;
+        let workspace = Workspace::default();
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
+                this.reduced_motion = crate::reduced_motion::reduced_motion();
                 this.refresh_active_branch(cx);
+                if let Some(id) = this.workspace.active_project().map(|p| p.id) {
+                    this.refresh_status(id, std::time::Duration::ZERO, cx);
+                }
                 cx.notify();
             }
         });
@@ -148,12 +268,17 @@ impl WorkspaceView {
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             let geom = geom_from_bounds(window.window_bounds());
-            view.update(cx, |this, _| {
+            // 未保存の変更と動いているターミナルを確かめてから閉じる（設計書 §5.12）。確かめ終えたら allow_close。
+            view.update(cx, |this, cx| {
                 this.last_geom = Some(geom);
-                this.save_now();
+                if this.allow_close {
+                    this.save_now();
+                    return true;
+                }
+                this.request_quit(window, cx);
+                false
             })
-            .ok();
-            true
+            .unwrap_or(true)
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -170,6 +295,25 @@ impl WorkspaceView {
             wsl_hosts: Arc::new(WslHosts::new()),
             focus,
             session_path,
+            settings: Settings::default(),
+            recent,
+            recent_path,
+            last_session,
+            missing_roots: HashSet::new(),
+            home_menu: None,
+            dialog: None,
+            allow_close: false,
+            reduced_motion: crate::reduced_motion::reduced_motion(),
+            anims: Default::default(),
+            panel_anim: Default::default(),
+            tree_presence: crate::anim::Presence::hidden(),
+            panels: HashMap::new(),
+            live: HashMap::new(),
+            tree: crate::tree_view::TreeState::new(cx),
+            changes_menu: None,
+            pending_goto: None,
+            screen_fade: Fade::settled(1.0),
+            showing_home: None,
             saved: None,
             pending: None,
             save_task: None,
@@ -178,9 +322,67 @@ impl WorkspaceView {
             _bounds: bounds,
             _quit: quit,
         };
+        match open {
+            InitialOpen::Project { root, shell } => this.open_project(root, shell, cx),
+            InitialOpen::File { file, root_hint } => this.open_file(file, root_hint, None, window, cx),
+            InitialOpen::Nothing => {}
+        }
         this.refresh_active_branch(cx);
         this.load_distros(cx);
         this
+    }
+
+    /// 最近開いたものに記録して、裏で保存する。
+    pub(crate) fn touch_recent(&mut self, root: &ProjectRoot, cx: &mut Context<Self>) {
+        self.recent.touch(root.clone(), now_secs());
+        self.save_recent(cx);
+    }
+
+    pub(crate) fn save_recent(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.recent_path.clone() else { return };
+        let text = self.recent.to_json();
+        cx.background_spawn(async move {
+            if let Err(e) = session::write_atomic(&path, &text) {
+                eprintln!("最近開いたものを保存できない: {e}");
+            }
+        })
+        .detach();
+    }
+
+    /// 「前回の続き」。プロジェクトが 0 個のときだけ、保存した状態を戻す（ターミナルも保存どおりに起動する）。
+    pub(crate) fn resume_last_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.workspace.projects().is_empty() {
+            return;
+        }
+        let Some(data) = self.last_session.clone() else { return };
+        self.workspace = Workspace::restore(&data, &|p| p.is_dir());
+        // 戻したプロジェクトも最近開いたものに記録する。選択中のものを最後にして、一覧の先頭にする。
+        let active = self.workspace.active_project().map(|p| p.id);
+        let mut roots: Vec<(bool, ProjectRoot)> =
+            self.workspace.projects().iter().map(|p| (Some(p.id) == active, p.root.clone())).collect();
+        roots.sort_by_key(|(is_active, _)| *is_active);
+        let now = now_secs();
+        for (_, root) in roots {
+            self.recent.touch(root, now);
+        }
+        self.save_recent(cx);
+        // 開いていたファイルを右パネルに開き直す。
+        let files: Vec<(ProjectId, String)> =
+            self.workspace.projects().iter().filter_map(|p| p.open_file.clone().map(|f| (p.id, f))).collect();
+        for (project, rel) in files {
+            self.open_in_panel(project, rel, None, window, cx);
+        }
+        self.refocus_pane();
+        self.refresh_active_branch(cx);
+        cx.notify();
+    }
+
+    /// プロジェクトを閉じたあとに呼ぶ。0 個になり、設定がアプリの終了なら、保存して終える。
+    pub(crate) fn after_project_closed(&mut self, cx: &mut Context<Self>) {
+        if last_project_closed_action(&self.settings, self.workspace.projects().len()) == AfterClose::Quit {
+            self.save_now();
+            cx.quit();
+        }
     }
 
     fn load_distros(&self, cx: &mut Context<Self>) {
@@ -202,11 +404,16 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// メニューを閉じたあと、フォーカスを戻す。ペインがあればそこへ（次の描画で）、無ければワークスペースへ。
+    /// メニューを閉じたあと、フォーカスを戻す。ペインがあればそこへ（次の描画で）、無ければ右パネル、
+    /// それも無ければワークスペースへ。
     pub(crate) fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let has_pane = self.workspace.active_project().and_then(|p| p.active_tab()).is_some();
         if has_pane {
             self.refocus_pane();
+        } else if let Some(view) = self.active_panel_view() {
+            self.focused_pane = None;
+            let focus = view.read(cx).focus_handle();
+            window.focus(&focus, cx);
         } else {
             self.focused_pane = None;
             window.focus(&self.focus, cx);
@@ -220,14 +427,17 @@ impl WorkspaceView {
 
     /// root は正規化済みとする。shell は新しく開くときの既定のシェルの上書き。
     pub(crate) fn open_project(&mut self, root: ProjectRoot, shell: Option<ShellKind>, cx: &mut Context<Self>) {
-        self.workspace.open_project_with(root, shell);
+        self.touch_recent(&root, cx);
+        self.workspace.open_project_with(root, shell, OpenMode::WithTerminal);
         self.refresh_active_branch(cx);
     }
 
     /// 2 つ目の起動から届いた要求。Open ならプロジェクトを開いて（開いていれば切り替えて）、どちらも前面に出す。
     pub(crate) fn handle_message(&mut self, msg: Message, window: &mut Window, cx: &mut Context<Self>) {
-        if let Message::Open { root, shell } = msg {
-            self.open_project(root, shell, cx);
+        match msg {
+            Message::Open { root, shell } => self.open_project(root, shell, cx),
+            Message::OpenFile { file, root_hint } => self.open_file(file, root_hint, None, window, cx),
+            Message::Activate => {}
         }
         window.activate_window();
         cx.activate(true);
@@ -239,7 +449,10 @@ impl WorkspaceView {
         let Some(path) = self.session_path.clone() else { return };
         let geom = geom_from_bounds(window.window_bounds());
         self.last_geom = Some(geom.clone());
-        let data = SessionData::capture(&self.workspace, Some(geom));
+        let data = SessionData::capture_keeping(&self.workspace, Some(geom), self.last_session.as_ref());
+        if data.has_projects() {
+            self.last_session = Some(data.clone());
+        }
         if self.saved.as_ref() == Some(&data) || self.pending.as_ref() == Some(&data) {
             return;
         }
@@ -265,7 +478,7 @@ impl WorkspaceView {
         let Some(path) = self.session_path.as_ref() else { return };
         self.save_task = None;
         self.pending = None;
-        let data = SessionData::capture(&self.workspace, self.last_geom.clone());
+        let data = SessionData::capture_keeping(&self.workspace, self.last_geom.clone(), self.last_session.as_ref());
         if self.saved.as_ref() == Some(&data) {
             return;
         }
@@ -285,7 +498,14 @@ impl WorkspaceView {
     /// 選択中のプロジェクトのブランチ名を読み直す。WSL のプロジェクトは裏で読み、届いたら描き直す。
     /// 読めなければ None にし、理由を出す（次にそのプロジェクトを選んだときにやり直す）。
     pub(crate) fn refresh_active_branch(&mut self, cx: &mut Context<Self>) {
-        let Some(p) = self.workspace.active_project() else { return };
+        if let Some(id) = self.workspace.active_project().map(|p| p.id) {
+            self.refresh_branch(id, cx);
+        }
+    }
+
+    /// project のブランチ名を読み直す。WSL のプロジェクトは裏で読み、届いたら描き直す。
+    pub(crate) fn refresh_branch(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        let Some(p) = self.workspace.projects().iter().find(|p| p.id == project) else { return };
         let id = p.id;
         let root = p.root.clone();
         let read = move |hosts: &WslHosts| {
@@ -361,9 +581,11 @@ impl WorkspaceView {
             self.workspace.projects().iter().flat_map(|p| &p.tabs).flat_map(|t| &t.panes).map(|p| p.id).collect();
         self.terminals.retain(|id, _| alive.contains(id));
 
+        // フォーカスしていたビューが無くなった（タブやペインを閉じた）か。
+        let lost = window.focused(cx).is_none();
         let Some(project) = self.workspace.active_project() else {
             // 最後のプロジェクトを閉じたときも、ビューが無くなるので、ワークスペース自身に戻しておく。
-            if self.focused_pane.take().is_some() {
+            if self.focused_pane.take().is_some() || lost {
                 window.focus(&self.focus, cx);
             }
             return;
@@ -371,9 +593,15 @@ impl WorkspaceView {
         let root = project.root.clone();
         let Some(tab) = project.active_tab() else {
             // 最後のタブを閉じると、フォーカスしていたビューが無くなる。そのままだと、次に作った
-            // タブのターミナルへフォーカスが移らないため、ワークスペース自身に戻しておく。
-            if self.focused_pane.take().is_some() {
-                window.focus(&self.focus, cx);
+            // タブのターミナルへフォーカスが移らないため、右パネル（無ければワークスペース自身）に戻しておく。
+            if self.focused_pane.take().is_some() || lost {
+                match self.active_panel_view() {
+                    Some(view) => {
+                        let focus = view.read(cx).focus_handle();
+                        window.focus(&focus, cx);
+                    }
+                    None => window.focus(&self.focus, cx),
+                }
             }
             return;
         };
@@ -383,9 +611,13 @@ impl WorkspaceView {
             if self.terminals.contains_key(&id) {
                 continue;
             }
-            let view = cx.new(|cx| TerminalView::new(&kind, &root, window, cx));
-            let sub = cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
+            let terminal_id = terminal_id(id);
+            let view = cx.new(|cx| TerminalView::new(&kind, &root, &terminal_id, window, cx));
+            let link_kind = kind.clone();
+            let link_root = root.clone();
+            let sub = cx.subscribe_in(&view, window, move |this, _, event: &TerminalEvent, window, cx| {
                 match event {
+                    TerminalEvent::OpenLink(target) => this.open_link(target.clone(), &link_kind, &link_root, window, cx),
                     TerminalEvent::Title(title) => this.workspace.set_pane_title(id, title.clone()),
                     TerminalEvent::Exited { success: true } => {
                         this.workspace.close_pane(id);
@@ -409,6 +641,56 @@ impl WorkspaceView {
         }
     }
 
+    /// ターミナルの出力のリンクを開く。URL はブラウザで、パスは右パネルで（見つからなければ何もしない）。
+    fn open_link(
+        &mut self,
+        target: fude_term::links::LinkTarget,
+        kind: &ShellKind,
+        root: &ProjectRoot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use fude_core::location::FileLocation;
+        use fude_term::links::{LinkTarget, resolve_link};
+        match target {
+            LinkTarget::Url(url) => cx.open_url(&url),
+            LinkTarget::Path { path, line, col } => {
+                let Some(file) = resolve_link(&path, kind, root) else { return };
+                // ローカルはその場で確かめる。WSL は確かめずに開く（無ければ右パネルが「見つからない」と出す）。
+                if let FileLocation::Local(p) = &file
+                    && !p.is_file()
+                {
+                    return;
+                }
+                self.open_file(file, None, line.map(|l| (l, col)), window, cx);
+            }
+        }
+    }
+
+    /// ターミナルの大きさが変わる動き（分割、右パネル、エディタの移動）の途中か。
+    pub(crate) fn layout_animating(&self, now: Instant) -> bool {
+        self.anims.split_animating(now) || self.panel_animating(now)
+    }
+
+    /// 動きの間は、選択中のタブのターミナルが PTY にサイズを送らないようにする。
+    fn freeze_terminals(&mut self, frozen: bool, cx: &mut Context<Self>) {
+        let Some(tab) = self.workspace.active_project().and_then(|p| p.active_tab()) else { return };
+        let views: Vec<Entity<TerminalView>> =
+            tab.panes.iter().filter_map(|p| self.terminals.get(&p.id).map(|(v, _)| v.clone())).collect();
+        for view in views {
+            view.update(cx, |v, cx| v.set_resize_frozen(frozen, cx));
+        }
+    }
+
+    /// 表示したことのあるターミナル。
+    pub(crate) fn terminal_views(&self) -> impl Iterator<Item = (PaneId, &Entity<TerminalView>)> {
+        self.terminals.iter().map(|(id, (view, _))| (*id, view))
+    }
+
+    pub(crate) fn terminal_view(&self, pane: PaneId) -> Option<&Entity<TerminalView>> {
+        self.terminals.get(&pane).map(|(view, _)| view)
+    }
+
     fn activate_project_at(&mut self, index: usize, cx: &mut Context<Self>) {
         self.workspace.activate_project_at(index);
         self.refresh_active_branch(cx);
@@ -428,19 +710,57 @@ impl Render for WorkspaceView {
         let theme = *cx.global::<Theme>();
         let (bg, fg) = (theme.bg_window, theme.fg_default);
         self.sync_terminals(window, cx);
+        self.sync_live(cx);
+        self.anims.observe(self.workspace.active_project(), now, self.reduced_motion);
+        self.observe_panel(now);
+        self.observe_tree(now);
+        if self.anims.tabs_animating(now) || self.panel_animating(now) || self.tree_presence.is_animating(now) {
+            window.request_animation_frame();
+        }
+        self.freeze_terminals(self.layout_animating(now), cx);
         self.schedule_save(window, cx);
-        let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
-        let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
-        let main = render_main_area(active_tab, &terminals, cx);
+        let home = self.workspace.projects().is_empty();
+        if self.showing_home != Some(home) {
+            // 最初の描画ではフェードしない。
+            if self.showing_home.is_some() {
+                self.screen_fade = Fade::settled(0.0);
+                self.screen_fade.animate_to(1.0, SCREEN_FADE, ease_out, now);
+            }
+            if home {
+                self.check_missing_roots(cx);
+            }
+            self.showing_home = Some(home);
+        }
+        if self.screen_fade.is_animating(now) {
+            window.request_animation_frame();
+        }
+        let main = if home {
+            self.render_home(cx, now)
+        } else {
+            let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
+            let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
+            let main_w = window.viewport_size().width - crate::theme::size::RAIL_W;
+            let panel = self.panel_for_render(main_w, now);
+            let share = active_tab.map_or(1.0, |t| self.anims.split_share(t.id, now));
+            render_main_area(active_tab, &terminals, panel, share, cx)
+        };
+        let main = main.opacity(self.screen_fade.value(now));
+        let tree = if home { None } else { self.render_tree(cx, now) };
         let title_row = self.render_title_row(window, cx, now);
         let rail = self.render_rail(cx, now);
         let menu = self.render_shell_menu(window, cx, now);
         let project_menu = self.render_project_menu(window, cx, now);
+        let home_menu = self.render_home_menu(window, cx, now);
+        let changes_menu = self.render_changes_menu(window, cx, now);
+        let tree_menu = self.render_tree_menu(window, cx, now);
+        let dialog = self.render_dialog(window, cx, now);
 
         div()
             .id("workspace")
             .track_focus(&self.focus)
             .key_context("Workspace")
+            .on_action(cx.listener(|this, _: &crate::tree_view::ToggleTree, window, cx| this.toggle_tree(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseItem, window, cx| this.close_key(window, cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.new_default_tab();
                 cx.notify();
@@ -466,6 +786,8 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(|this, _: &ActivateProject7, _, cx| this.activate_project_at(6, cx)))
             .on_action(cx.listener(|this, _: &ActivateProject8, _, cx| this.activate_project_at(7, cx)))
             .on_action(cx.listener(|this, _: &ActivateProject9, _, cx| this.activate_project_at(8, cx)))
+            // ターミナルとエディタの上以外に落とされたファイルとフォルダを開く（設計書 §5.1）。
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.open_dropped(paths, window, cx)))
             .size_full()
             .flex()
             .flex_col()
@@ -479,11 +801,17 @@ impl Render for WorkspaceView {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .child(rail)
-                    .child(div().flex_1().min_w_0().h_full().child(main)),
+                    .child(div().flex_1().min_w_0().h_full().child(main))
+                    .children(tree),
             )
             .children(menu)
             .children(project_menu)
+            .children(home_menu)
+            .children(changes_menu)
+            .children(tree_menu)
+            .children(dialog)
     }
 }
 
@@ -492,6 +820,18 @@ mod tests {
     use super::geom_from_bounds;
     use fude_core::session::WindowGeom;
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
+
+    #[test]
+    fn last_project_closed_rules() {
+        use super::{AfterClose, last_project_closed_action};
+        use fude_core::settings::{LastProjectClosed, Settings};
+        let home = Settings::default();
+        let quit = Settings { on_last_project_closed: LastProjectClosed::Quit, ..Settings::default() };
+        assert_eq!(last_project_closed_action(&home, 1), AfterClose::Stay);
+        assert_eq!(last_project_closed_action(&quit, 2), AfterClose::Stay);
+        assert_eq!(last_project_closed_action(&home, 0), AfterClose::ShowHome);
+        assert_eq!(last_project_closed_action(&quit, 0), AfterClose::Quit);
+    }
 
     #[test]
     fn wsl_branch_is_read_in_background() {

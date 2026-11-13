@@ -7,3 +7,6 @@ edition = "2024"
 alacritty_terminal = { version = "0.26.0", default-features = false }
 portable-pty = "0.9.0"
 fude-core = { path = "../fude-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }

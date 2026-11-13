@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use fude_core::location::FileLocation;
 use fude_core::paths::simplify_verbatim;
 use fude_core::workspace::{ProjectRoot, ShellKind};
 
@@ -12,15 +13,32 @@ pub enum Launch {
     Activate,
     /// プロジェクトを開く。shell は新しく開くときの既定のシェルの上書き。
     Open { root: ProjectRoot, shell: Option<ShellKind> },
+    /// ファイルを開く（ターミナルは起動しない）。root_hint は WSL 側の fude が探したプロジェクトのルート。
+    OpenFile { file: FileLocation, root_hint: Option<ProjectRoot> },
 }
 
-const USAGE: &str = "使い方: fude [フォルダ]";
+const USAGE: &str = "使い方: fude [フォルダ | ファイル]";
 
 /// args は実行ファイル名を除いたもの。引数なし → Activate。1 つ → cwd から解決して canonicalize し、
-/// simplify_verbatim と ProjectRoot::from_host_path に通す。ディレクトリでなければ Err(理由)。
+/// simplify_verbatim に通す。フォルダなら Open（ProjectRoot::from_host_path）、ファイルなら OpenFile
+/// （FileLocation::from_host_path）。無ければ Err(理由)。
+/// `--wsl-file <distro> <root> <file>` → OpenFile（root と file は Linux の絶対パス。WSL 側の fude だけが使う）。
 /// `--wsl <distro> <Linux の絶対パス>` → from_wsl_path で作り、シェルは WSL にする。この形は WSL 側の fude だけが
 /// 使い、Linux 側で解決済みなので canonicalize しない。それ以外の数の引数は Err(使い方)。
 pub fn parse_launch(args: &[OsString], cwd: &Path) -> Result<Launch, String> {
+    if args.first().is_some_and(|a| a == "--wsl-file") {
+        let [_, distro, root, file] = args else { return Err(USAGE.to_string()) };
+        let (Some(distro), Some(root), Some(file)) = (distro.to_str(), root.to_str(), file.to_str()) else {
+            return Err("WSL のパスを読めない".to_string());
+        };
+        if distro.is_empty() || !root.starts_with('/') || !file.starts_with('/') {
+            return Err(USAGE.to_string());
+        }
+        return Ok(Launch::OpenFile {
+            file: FileLocation::from_wsl_path(distro, file),
+            root_hint: Some(ProjectRoot::from_wsl_path(distro, root)),
+        });
+    }
     if args.first().is_some_and(|a| a == "--wsl") {
         let [_, distro, path] = args else { return Err(USAGE.to_string()) };
         let (Some(distro), Some(path)) = (distro.to_str(), path.to_str()) else {
@@ -37,16 +55,19 @@ pub fn parse_launch(args: &[OsString], cwd: &Path) -> Result<Launch, String> {
         [path] => cwd.join(path),
         _ => return Err(USAGE.to_string()),
     };
-    let canonical = std::fs::canonicalize(&path).map_err(|e| format!("フォルダを開けない: {}: {e}", path.display()))?;
-    if !canonical.is_dir() {
-        return Err(format!("フォルダではない: {}", path.display()));
+    let canonical = std::fs::canonicalize(&path).map_err(|e| format!("開けない: {}: {e}", path.display()))?;
+    let canonical = simplify_verbatim(canonical);
+    if canonical.is_dir() {
+        Ok(Launch::Open { root: ProjectRoot::from_host_path(canonical), shell: None })
+    } else {
+        Ok(Launch::OpenFile { file: FileLocation::from_host_path(canonical), root_hint: None })
     }
-    Ok(Launch::Open { root: ProjectRoot::from_host_path(simplify_verbatim(canonical)), shell: None })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fude_core::location::FileLocation;
     use fude_core::workspace::{ProjectRoot, ShellKind};
     use std::ffi::OsString;
     use std::path::Path;
@@ -82,11 +103,34 @@ mod tests {
     }
 
     #[test]
-    fn file_or_missing_is_error() {
+    fn file_arg_becomes_open_file() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "x").unwrap();
-        assert!(parse_launch(&args(&["f.txt"]), dir.path()).is_err());
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        let launch = parse_launch(&args(&["a.rs"]), dir.path()).unwrap();
+        let Launch::OpenFile { file: FileLocation::Local(p), root_hint: None } = &launch else { panic!("{launch:?}") };
+        assert!(p.ends_with("a.rs"));
+        assert!(!p.to_string_lossy().starts_with(r"\\?\"));
+    }
+
+    #[test]
+    fn missing_is_error() {
+        let dir = tempfile::tempdir().unwrap();
         assert!(parse_launch(&args(&["missing"]), dir.path()).is_err());
+    }
+
+    #[test]
+    fn wsl_file_args() {
+        let l = parse_launch(&args(&["--wsl-file", "Ubuntu", "/home/x/p", "/home/x/p/a b.rs"]), Path::new(".")).unwrap();
+        assert_eq!(
+            l,
+            Launch::OpenFile {
+                file: FileLocation::Wsl { distro: "Ubuntu".into(), path: "/home/x/p/a b.rs".into() },
+                root_hint: Some(ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x/p".into() }),
+            }
+        );
+        assert!(parse_launch(&args(&["--wsl-file", "Ubuntu", "rel", "/a"]), Path::new(".")).is_err());
+        assert!(parse_launch(&args(&["--wsl-file", "Ubuntu", "/a", "rel"]), Path::new(".")).is_err());
+        assert!(parse_launch(&args(&["--wsl-file", "Ubuntu", "/a"]), Path::new(".")).is_err());
     }
 
     fn ubuntu() -> ShellKind {

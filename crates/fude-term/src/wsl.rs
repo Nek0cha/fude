@@ -4,7 +4,7 @@
 /// BOM と空行を除き、前後の空白を削る。
 pub fn parse_distro_list(stdout: &[u8]) -> Vec<String> {
     let text = if stdout.contains(&0) {
-        let units: Vec<u16> = stdout.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        let units: Vec<u16> = stdout.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes(*b)).collect();
         String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(stdout).into_owned()

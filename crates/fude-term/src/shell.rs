@@ -15,17 +15,19 @@ pub struct SpawnSpec {
 }
 
 /// WSL に引き継ぐ変数（/u は Windows から WSL への向きだけ）。
-const WSLENV_ADD: &str = "COLORTERM/u:TERM_PROGRAM/u";
+const WSLENV_ADD: &str = "COLORTERM/u:TERM_PROGRAM/u:FUDE_TERMINAL_ID/u";
 
 /// シェルの種類とプロジェクトの場所から、起動するコマンドを組み立てる。作業ディレクトリは root.host_path()。
 /// WSL のシェルの --cd は、ローカルのプロジェクトなら Windows のパス、同じディストリビューションの
 /// プロジェクトなら Linux のパス、別のディストリビューションならホーム（~）。
+/// terminal_id は FUDE_TERMINAL_ID として渡す（hook と、WSL の稼働の確認がターミナルを見分けるため。設計書 §5.8）。
 /// env は環境変数の読み取り（テストで差し替える）。
-pub fn spawn_spec(kind: &ShellKind, root: &ProjectRoot, env: &dyn Fn(&str) -> Option<String>) -> SpawnSpec {
+pub fn spawn_spec(kind: &ShellKind, root: &ProjectRoot, terminal_id: &str, env: &dyn Fn(&str) -> Option<String>) -> SpawnSpec {
     let mut vars = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".to_string(), "truecolor".to_string()),
         ("TERM_PROGRAM".to_string(), "fude".to_string()),
+        ("FUDE_TERMINAL_ID".to_string(), terminal_id.to_string()),
     ];
     let (program, args) = match kind {
         ShellKind::Wsl { distro } => {
@@ -76,7 +78,7 @@ mod tests {
 
     fn spec_in(kind: &ShellKind, root: &ProjectRoot, vars: &[(&str, &str)]) -> SpawnSpec {
         let map: HashMap<String, String> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        spawn_spec(kind, root, &|k| map.get(k).cloned())
+        spawn_spec(kind, root, "p1", &|k| map.get(k).cloned())
     }
 
     fn wsl_root() -> ProjectRoot {
@@ -123,13 +125,21 @@ mod tests {
         let spec = spec_with(&ShellKind::Wsl { distro: "Ubuntu".into() }, r"C:\w\a", &[]);
         assert_eq!(spec.program, "wsl.exe");
         assert_eq!(spec.args, vec!["-d", "Ubuntu", "--cd", r"C:\w\a"]);
-        assert_eq!(env(&spec, "WSLENV"), Some("COLORTERM/u:TERM_PROGRAM/u"));
+        assert_eq!(env(&spec, "WSLENV"), Some("COLORTERM/u:TERM_PROGRAM/u:FUDE_TERMINAL_ID/u"));
     }
 
     #[test]
     fn wslenv_is_appended() {
         let spec = spec_with(&ShellKind::Wsl { distro: "Ubuntu".into() }, r"C:\w\a", &[("WSLENV", "FOO/p")]);
-        assert_eq!(env(&spec, "WSLENV"), Some("FOO/p:COLORTERM/u:TERM_PROGRAM/u"));
+        assert_eq!(env(&spec, "WSLENV"), Some("FOO/p:COLORTERM/u:TERM_PROGRAM/u:FUDE_TERMINAL_ID/u"));
+    }
+
+    #[test]
+    fn terminal_id_is_exported() {
+        let spec = spec_with(&ShellKind::Native, "/w/a", &[]);
+        assert_eq!(env(&spec, "FUDE_TERMINAL_ID"), Some("p1"));
+        let spec = spec_with(&ShellKind::Wsl { distro: "Ubuntu".into() }, "/w/a", &[]);
+        assert_eq!(env(&spec, "FUDE_TERMINAL_ID"), Some("p1"));
     }
 
     #[test]

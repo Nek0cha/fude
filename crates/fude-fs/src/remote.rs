@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use crate::wire::{Request, Response, read_frame, write_frame};
-use crate::{DirEntry, ProjectFs, RelPath};
+use crate::{DirEntry, FileMeta, ProjectFs, RelPath};
 
 pub trait Connector: Send + Sync {
     /// サーバーを起こし、(書き込み口, 読み取り口) を返す。書き込み口を捨てたらサーバーも終わるようにする。
@@ -114,13 +114,47 @@ impl RemoteFs {
     }
 
     fn call(&self, req: Request, payload: &[u8]) -> io::Result<(Response, Vec<u8>)> {
-        match self.client.call(&req, payload)? {
-            (Response::Error { message, not_found }, _) => {
-                let kind = if not_found { io::ErrorKind::NotFound } else { io::ErrorKind::Other };
-                Err(io::Error::new(kind, message))
-            }
-            frame => Ok(frame),
+        call_checked(&self.client, req, payload)
+    }
+
+    fn done(&self, req: Request) -> io::Result<()> {
+        match self.call(req, &[])? {
+            (Response::Done, _) => Ok(()),
+            (resp, _) => Err(unexpected(resp)),
         }
+    }
+}
+
+/// Response::Error を io::Error にして返す。
+fn call_checked(client: &RemoteClient, req: Request, payload: &[u8]) -> io::Result<(Response, Vec<u8>)> {
+    match client.call(&req, payload)? {
+        (Response::Error { message, not_found, already_exists }, _) => {
+            let kind = if not_found {
+                io::ErrorKind::NotFound
+            } else if already_exists {
+                io::ErrorKind::AlreadyExists
+            } else {
+                io::ErrorKind::Other
+            };
+            Err(io::Error::new(kind, message))
+        }
+        frame => Ok(frame),
+    }
+}
+
+/// サーバー側でファイル（絶対パス）からプロジェクトのルートを探す。
+pub fn find_root(client: &RemoteClient, file: &str) -> io::Result<String> {
+    match call_checked(client, Request::FindRoot { file: file.to_string() }, &[])? {
+        (Response::Root { path }, _) => Ok(path),
+        (resp, _) => Err(unexpected(resp)),
+    }
+}
+
+/// サーバー側で、terminal_id のシェルの上で何かが動いているかを調べる。
+pub fn busy(client: &RemoteClient, terminal_id: &str) -> io::Result<bool> {
+    match call_checked(client, Request::Busy { terminal_id: terminal_id.to_string() }, &[])? {
+        (Response::Busy { busy }, _) => Ok(busy),
+        (resp, _) => Err(unexpected(resp)),
     }
 }
 
@@ -154,6 +188,52 @@ impl ProjectFs for RemoteFs {
     fn branch(&self) -> io::Result<Option<String>> {
         match self.call(Request::Branch { root: self.root.clone() }, &[])? {
             (Response::Branch { name }, _) => Ok(name),
+            (resp, _) => Err(unexpected(resp)),
+        }
+    }
+
+    fn walk_files(&self) -> io::Result<Vec<RelPath>> {
+        match self.call(Request::WalkFiles { root: self.root.clone() }, &[])? {
+            (Response::Paths, json) => serde_json::from_slice(&json)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("一覧を読めない: {e}"))),
+            (resp, _) => Err(unexpected(resp)),
+        }
+    }
+
+    fn create_file(&self, rel: &RelPath) -> io::Result<()> {
+        self.done(Request::CreateFile { root: self.root.clone(), path: rel.clone() })
+    }
+
+    fn create_dir(&self, rel: &RelPath) -> io::Result<()> {
+        self.done(Request::CreateDir { root: self.root.clone(), path: rel.clone() })
+    }
+
+    fn rename(&self, from: &RelPath, to: &RelPath) -> io::Result<()> {
+        self.done(Request::Rename { root: self.root.clone(), from: from.clone(), to: to.clone() })
+    }
+
+    fn remove(&self, rel: &RelPath) -> io::Result<()> {
+        self.done(Request::Remove { root: self.root.clone(), path: rel.clone() })
+    }
+
+    fn git_status(&self) -> io::Result<Option<crate::git::GitStatus>> {
+        match self.call(Request::GitStatus { root: self.root.clone() }, &[])? {
+            (Response::Status, json) => serde_json::from_slice(&json)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Git の状態を読めない: {e}"))),
+            (resp, _) => Err(unexpected(resp)),
+        }
+    }
+
+    fn git_diff(&self, rel: &RelPath) -> io::Result<String> {
+        match self.call(Request::GitDiff { root: self.root.clone(), path: rel.clone() }, &[])? {
+            (Response::Patch, data) => Ok(String::from_utf8_lossy(&data).into_owned()),
+            (resp, _) => Err(unexpected(resp)),
+        }
+    }
+
+    fn metadata(&self, rel: &RelPath) -> io::Result<FileMeta> {
+        match self.call(Request::Metadata { root: self.root.clone(), path: rel.clone() }, &[])? {
+            (Response::Meta { meta }, _) => Ok(meta),
             (resp, _) => Err(unexpected(resp)),
         }
     }
@@ -304,5 +384,42 @@ mod tests {
         let start = Instant::now();
         assert!(c.call(&Request::Version, &[]).is_err());
         assert!(start.elapsed() >= Duration::from_millis(350));
+    }
+
+    #[test]
+    fn remote_git_status_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = RemoteFs::new(client(ServeConnector, Duration::from_secs(5)), dir.path().to_string_lossy().into());
+        assert_eq!(fs.git_status().unwrap(), None);
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(dir.path()).output().is_ok_and(|o| o.status.success())
+        };
+        if !git(&["init", "-q"]) {
+            return;
+        }
+        std::fs::write(dir.path().join("a.txt"), "1\n").unwrap();
+        let status = fs.git_status().unwrap().unwrap();
+        assert_eq!(status.mark(&rel("a.txt")), Some(crate::git::GitMark::Untracked));
+        assert_eq!(fs.git_diff(&rel("a.txt")).unwrap(), "");
+    }
+
+    #[test]
+    fn remote_fs_new_ops_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("repo").join(".git")).unwrap();
+        let c = client(ServeConnector, Duration::from_secs(5));
+        let fs = RemoteFs::new(c.clone(), dir.path().to_string_lossy().into());
+        fs.create_dir(&rel("repo/src")).unwrap();
+        fs.create_file(&rel("repo/src/a.rs")).unwrap();
+        assert_eq!(fs.create_file(&rel("repo/src/a.rs")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        fs.rename(&rel("repo/src/a.rs"), &rel("repo/src/b.rs")).unwrap();
+        assert_eq!(fs.walk_files().unwrap(), vec![rel("repo/src/b.rs")]);
+        assert!(!fs.metadata(&rel("repo/src/b.rs")).unwrap().is_dir);
+        let file = dir.path().join("repo").join("src").join("b.rs");
+        let root = find_root(&c, &file.to_string_lossy()).unwrap();
+        assert_eq!(std::path::PathBuf::from(root), dir.path().join("repo"));
+        assert!(find_root(&c, "relative/x").is_err());
+        fs.remove(&rel("repo/src")).unwrap();
+        assert!(fs.walk_files().unwrap().is_empty());
     }
 }

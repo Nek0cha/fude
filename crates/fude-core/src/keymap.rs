@@ -24,7 +24,21 @@ pub enum Command {
     Copy,
     /// クリップボードの文字列をターミナルに貼り付ける。ターミナルの中だけで効く。
     Paste,
+    /// 閉じる（右パネル、ペイン、タブ、プロジェクトの順。設計書 §5.12）。
+    Close,
+    /// ファイルツリーの開閉。
+    ToggleTree,
+    /// 右パネルのファイルを保存する。
+    Save,
+    /// 右パネルの履歴を戻る／進む。
+    PanelBack,
+    PanelForward,
 }
+
+/// ターミナル以外にフォーカスがあるときだけ効かせる文脈。
+pub const NOT_TERMINAL: &str = "Workspace && !Terminal";
+/// 右パネルのファイルの中だけで効かせる文脈。
+pub const FILE_VIEW: &str = "FileView";
 
 const PROJECT_KEYS_MAC: [&str; 9] = ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9"];
 const PROJECT_KEYS_WIN: [&str; 9] =
@@ -43,6 +57,8 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("cmd-{", Command::PrevTab),
                 ("cmd-c", Command::Copy),
                 ("cmd-v", Command::Paste),
+                ("cmd-w", Command::Close),
+                ("cmd-b", Command::ToggleTree),
             ],
             PROJECT_KEYS_MAC,
         ),
@@ -55,12 +71,33 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 // Ctrl+V は Claude Code の画像の貼り付けのため、端末へそのまま送る。
                 ("ctrl-shift-c", Command::Copy),
                 ("ctrl-shift-v", Command::Paste),
+                // Ctrl+W と Ctrl+B はシェルのキー操作と重なるため、どこでも効くのは Shift 付きだけ（§10）。
+                ("ctrl-shift-w", Command::Close),
+                ("ctrl-shift-b", Command::ToggleTree),
             ],
             PROJECT_KEYS_WIN,
         ),
     };
     let projects = projects.into_iter().zip(1u8..).map(|(k, n)| (k, Command::ActivateProject(n)));
     fixed.into_iter().chain(projects).collect()
+}
+
+/// 文脈を限って効かせるキー。履歴は設計書の ⌘[ / ⌘] ではなく、エディタの字下げと重ならないキーにした（計画5）。
+pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'static str)> {
+    match platform {
+        Platform::MacOs => vec![
+            ("cmd-s", Command::Save, FILE_VIEW),
+            ("ctrl--", Command::PanelBack, FILE_VIEW),
+            ("ctrl-shift--", Command::PanelForward, FILE_VIEW),
+        ],
+        Platform::Windows => vec![
+            ("ctrl-w", Command::Close, NOT_TERMINAL),
+            ("ctrl-b", Command::ToggleTree, NOT_TERMINAL),
+            ("ctrl-s", Command::Save, FILE_VIEW),
+            ("alt-left", Command::PanelBack, FILE_VIEW),
+            ("alt-right", Command::PanelForward, FILE_VIEW),
+        ],
+    }
 }
 
 #[cfg(test)]
@@ -122,6 +159,30 @@ mod tests {
         assert!(win.contains(&("ctrl-shift-c", Command::Copy)));
         assert!(win.contains(&("ctrl-shift-v", Command::Paste)));
         assert!(!win.iter().any(|(k, _)| *k == "ctrl-v"));
+    }
+
+    #[test]
+    fn close_keys_per_platform() {
+        assert!(default_bindings(Platform::MacOs).contains(&("cmd-w", Command::Close)));
+        let win = default_bindings(Platform::Windows);
+        assert!(win.contains(&("ctrl-shift-w", Command::Close)));
+        // ターミナルの Ctrl+W（1 語を消す）を奪わないよう、Ctrl+W はターミナル以外でだけ効かせる。
+        assert!(!win.iter().any(|(k, _)| *k == "ctrl-w"));
+        assert!(context_bindings(Platform::Windows).contains(&("ctrl-w", Command::Close, NOT_TERMINAL)));
+    }
+
+    #[test]
+    fn tree_and_file_view_keys() {
+        assert!(default_bindings(Platform::MacOs).contains(&("cmd-b", Command::ToggleTree)));
+        assert!(default_bindings(Platform::Windows).contains(&("ctrl-shift-b", Command::ToggleTree)));
+        assert!(context_bindings(Platform::Windows).contains(&("ctrl-b", Command::ToggleTree, NOT_TERMINAL)));
+        let mac = context_bindings(Platform::MacOs);
+        assert!(mac.contains(&("cmd-s", Command::Save, FILE_VIEW)));
+        assert!(mac.contains(&("ctrl--", Command::PanelBack, FILE_VIEW)));
+        let win = context_bindings(Platform::Windows);
+        assert!(win.contains(&("ctrl-s", Command::Save, FILE_VIEW)));
+        assert!(win.contains(&("alt-left", Command::PanelBack, FILE_VIEW)));
+        assert!(win.contains(&("alt-right", Command::PanelForward, FILE_VIEW)));
     }
 
     #[test]

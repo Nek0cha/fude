@@ -1,8 +1,13 @@
+pub mod close;
 pub mod git_head;
 pub mod keymap;
 pub mod keys;
 pub mod location;
 pub mod motion;
+pub mod panel;
 pub mod paths;
+pub mod recent;
 pub mod session;
+pub mod settings;
+pub mod text;
 pub mod workspace;

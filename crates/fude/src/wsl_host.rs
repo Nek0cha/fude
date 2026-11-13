@@ -19,12 +19,16 @@ pub(crate) fn needs_deploy(installed: Option<&str>, bundled: &str) -> bool {
     installed != Some(bundled)
 }
 
+/// 1 つのディストリビューションの RemoteClient の枠（確かめ終えるまで None）。
+#[cfg(windows)]
+type ClientSlot = Arc<std::sync::Mutex<Option<Arc<fude_fs::RemoteClient>>>>;
+
 /// ディストリビューションごとに 1 つの RemoteClient を持つ。最初に使うときに版を確かめ、違えば置き直す。
 /// 確かめに失敗したら覚えず、次に使うときにやり直す。
 pub(crate) struct WslHosts {
     #[cfg(windows)]
     /// ディストリビューション（小文字）ごとの枠。版の確認と配置は枠の中だけを止め、ほかのディストリビューションを待たせない。
-    clients: std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<Option<Arc<fude_fs::RemoteClient>>>>>>,
+    clients: std::sync::Mutex<std::collections::HashMap<String, ClientSlot>>,
     /// WSL 側の置き場所（FUDE_WSL_BIN_DIR で変えられる）。
     #[cfg(windows)]
     bin: String,
@@ -46,6 +50,11 @@ mod imp {
     impl WslHosts {
         pub fn new() -> WslHosts {
             WslHosts { clients: Default::default(), bin: default_bin(&|k| std::env::var(k).ok()) }
+        }
+
+        /// WSL 側の fude の置き場所。
+        pub fn bin(&self) -> &str {
+            &self.bin
         }
 
         /// 裏のスレッドから呼ぶ（WSL の起動を待つことがある）。LINUX_BIN が None なら Err（同梱されていない）。

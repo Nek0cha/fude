@@ -1,4 +1,4 @@
-//! WSL に置く Linux 用の fude。`fude [path]` で Windows の fude にフォルダを開かせ、`fude serve` で
+//! WSL に置く Linux 用の fude。`fude [path]` で Windows の fude にフォルダかファイルを開かせ、`fude serve` で
 //! Windows の fude からのファイルの要求を処理する。`fude version` は版の印を出す。
 
 use std::io::{self, BufWriter};
@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 enum Cli {
     Open(PathBuf),
     Serve,
+    /// root の変更を監視し、WatchBatch を JSON 1 行ずつ標準出力に書く。標準入力が閉じたら終わる。
+    Watch(PathBuf),
     Version,
 }
 
@@ -28,8 +30,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         [] => Ok(Cli::Open(PathBuf::from("."))),
         [cmd] if cmd == "serve" => Ok(Cli::Serve),
         [cmd] if cmd == "version" => Ok(Cli::Version),
+        [cmd, root] if cmd == "watch" => Ok(Cli::Watch(PathBuf::from(root))),
         [path] => Ok(Cli::Open(PathBuf::from(path))),
-        _ => Err("使い方: fude [フォルダ] | fude serve | fude version".to_string()),
+        _ => Err("使い方: fude [フォルダ | ファイル] | fude serve | fude watch <フォルダ> | fude version".to_string()),
     }
 }
 
@@ -52,6 +55,17 @@ fn open_command(host_exe: &str, distro: &str, abs: &Path) -> (String, Vec<String
     (host_exe.to_string(), args)
 }
 
+/// ファイルを開かせるコマンドと引数。root は fude_core::location::find_project_root で探したもの。
+fn open_file_command(host_exe: &str, distro: &str, root: &Path, file: &Path) -> (String, Vec<String>) {
+    let args = vec![
+        "--wsl-file".to_string(),
+        distro.to_string(),
+        root.to_string_lossy().into_owned(),
+        file.to_string_lossy().into_owned(),
+    ];
+    (host_exe.to_string(), args)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match parse_cli(&args) {
@@ -70,6 +84,7 @@ fn main() {
                 }
             }
         }
+        Ok(Cli::Watch(root)) => watch(root),
         Ok(Cli::Open(path)) => open(&path).unwrap_or_else(|message| {
             eprintln!("fude: {message}");
             2
@@ -80,6 +95,28 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// root を監視して、変更を 1 行ずつ書く。標準入力が閉じる（Windows 側が wsl.exe を終わらせる）か、
+/// 書けなくなったら終わる。
+fn watch(root: PathBuf) -> i32 {
+    let on_batch = Box::new(|batch: fude_fs::watch::WatchBatch| {
+        use std::io::Write;
+        let Ok(line) = serde_json::to_string(&batch) else { return };
+        let mut out = io::stdout().lock();
+        if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+            std::process::exit(0);
+        }
+    });
+    let _watcher = match fude_fs::watch::LocalWatcher::start(root, on_batch) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("fude watch: {e}");
+            return 1;
+        }
+    };
+    let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+    0
 }
 
 /// 子プロセスを新しいセッションで起動する。WSL は、起動した wsl.exe のセッションが終わるときに、その中から
@@ -104,6 +141,7 @@ fn new_session(command: &mut Command) {
 fn new_session(_command: &mut Command) {}
 
 /// path を Windows の fude に開かせ、その終了コードを返す（OPEN_WAIT を過ぎたら 0）。
+/// フォルダならプロジェクトとして、ファイルならそのファイルを（プロジェクトのルートを探して添えて）開かせる。
 fn open(path: &Path) -> Result<i32, String> {
     let distro = std::env::var("WSL_DISTRO_NAME").ok().filter(|d| !d.is_empty()).ok_or(NOT_IN_WSL)?;
     let own_exe = std::env::current_exe().ok();
@@ -114,11 +152,13 @@ fn open(path: &Path) -> Result<i32, String> {
         .map(|s| s.trim().to_string())
         .find(|s| !s.is_empty())
         .ok_or(NO_HOST_EXE)?;
-    let abs = std::fs::canonicalize(path).map_err(|e| format!("フォルダを開けない: {}: {e}", path.display()))?;
-    if !abs.is_dir() {
-        return Err(format!("フォルダではない: {}", path.display()));
-    }
-    let (cmd, args) = open_command(&host_exe, &distro, &abs);
+    let abs = std::fs::canonicalize(path).map_err(|e| format!("開けない: {}: {e}", path.display()))?;
+    let (cmd, args) = if abs.is_dir() {
+        open_command(&host_exe, &distro, &abs)
+    } else {
+        let root = fude_core::location::find_project_root(&abs, &|d| d.join(".git").exists());
+        open_file_command(&host_exe, &distro, &root, &abs)
+    };
     // 標準入出力はつながない。待たずに戻ったあとで fude が書いても、閉じた口に書いて落ちないようにする。
     let mut command = Command::new(&cmd);
     command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -149,6 +189,7 @@ mod tests {
         assert_eq!(parse(&[]), Ok(Cli::Open(PathBuf::from("."))));
         assert_eq!(parse(&["serve"]), Ok(Cli::Serve));
         assert_eq!(parse(&["version"]), Ok(Cli::Version));
+        assert_eq!(parse(&["watch", "/home/x/p"]), Ok(Cli::Watch(PathBuf::from("/home/x/p"))));
         assert_eq!(parse(&["~/x"]), Ok(Cli::Open(PathBuf::from("~/x"))));
         assert!(parse(&["a", "b"]).is_err());
     }
@@ -158,6 +199,14 @@ mod tests {
         let files = host_exe_files(Some(Path::new("/tmp/t/fude")), Some("/home/x"));
         assert_eq!(files, vec![PathBuf::from("/tmp/t/host-exe"), PathBuf::from("/home/x/.config/fude/host-exe")]);
         assert_eq!(host_exe_files(None, Some("/home/x")), vec![PathBuf::from("/home/x/.config/fude/host-exe")]);
+    }
+
+    #[test]
+    fn open_file_command_args() {
+        let (cmd, args) =
+            open_file_command("/mnt/c/f/fude.exe", "Ubuntu", Path::new("/home/x/p"), Path::new("/home/x/p/作業 a.md"));
+        assert_eq!(cmd, "/mnt/c/f/fude.exe");
+        assert_eq!(args, vec!["--wsl-file", "Ubuntu", "/home/x/p", "/home/x/p/作業 a.md"]);
     }
 
     #[test]

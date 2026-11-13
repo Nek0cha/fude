@@ -26,6 +26,9 @@ pub struct Theme {
     pub term_palette: Palette,
     /// ターミナルの選択範囲。accent の 30%。
     pub selection: Rgba,
+    /// 差分とツリーの状態の記号だけに使う「中身の色」（設計書 §6.1.1）。
+    pub diff_add: Rgba,
+    pub diff_del: Rgba,
 }
 
 impl Theme {
@@ -59,6 +62,8 @@ impl Theme {
                 cursor: 0xb9a8ff,
             },
             selection: rgba(0xb9a8ff4d),
+            diff_add: rgb(0x5fe0b0),
+            diff_del: rgb(0xff8a8a),
         }
     }
 }
@@ -100,6 +105,25 @@ pub mod motion {
     pub const POPUP_IN: Duration = Duration::from_millis(120);
     pub const POPUP_OUT: Duration = Duration::from_millis(80);
 
+    /// ホーム画面とプロジェクトの画面の切り替え。
+    pub const SCREEN_FADE: Duration = Duration::from_millis(160);
+    /// タブの追加（幅と文字）。
+    pub const TAB_IN: Duration = Duration::from_millis(160);
+    /// タブを閉じるときの、文字が消えるまでと、幅が縮むまで。
+    pub const TAB_TEXT_OUT: Duration = Duration::from_millis(80);
+    pub const TAB_OUT: Duration = Duration::from_millis(140);
+    /// 分割の境目の移動。
+    pub const SPLIT: Duration = Duration::from_millis(180);
+    /// ターミナルの中身のフェードイン。
+    pub const TERM_IN: Duration = Duration::from_millis(140);
+    /// ターミナルが 0 枚の画面と並べた画面の間の、エディタの移動。
+    pub const EDITOR_MOVE: Duration = Duration::from_millis(180);
+    /// 右パネルと左パネルの出入り。
+    pub const PANEL_IN: Duration = Duration::from_millis(180);
+    pub const PANEL_OUT: Duration = Duration::from_millis(140);
+    /// OS の「動きを減らす」がオンのときの、不透明度だけの変化。
+    pub const REDUCED: Duration = Duration::from_millis(80);
+
     pub fn ease_out_quint(t: f32) -> f32 {
         1.0 - (1.0 - t).powi(5)
     }
@@ -123,6 +147,37 @@ pub fn ui_font() -> Font {
 
 pub fn mono_font() -> Font {
     font(MONO_FAMILY)
+}
+
+/// GPUI Kit の部品（エディタ、差分）のテーマを fude に合わせる。背景は透明にし、ウィンドウの透過を残す。
+pub fn apply_component_theme(cx: &mut gpui_kit::App) {
+    use gpui_kit::component::{Theme as KitTheme, ThemeMode};
+    let fude = *cx.global::<Theme>();
+    KitTheme::change(ThemeMode::Dark, None, cx);
+    let t = KitTheme::global_mut(cx);
+    let clear = gpui_kit::hsla(0., 0., 0., 0.);
+    t.mono_font_family = MONO_FAMILY.into();
+    t.mono_font_size = size::TERM_FONT_SIZE;
+    t.colors.background = clear;
+    t.colors.foreground = fude.fg_default.into();
+    t.colors.muted_foreground = fude.fg_dim.into();
+    t.colors.border = fude.border_subtle.into();
+    t.colors.input = fude.border_subtle.into();
+    t.colors.popover = fude.bg_panel.into();
+    t.colors.popover_foreground = fude.fg_default.into();
+    t.colors.selection = fude.selection.into();
+    t.colors.caret = fude.accent.into();
+    t.colors.ring = fude.accent.into();
+    t.colors.accent = fude.bg_hover.into();
+    t.colors.list_hover = fude.bg_hover.into();
+    let mut highlight = (*t.highlight_theme).clone();
+    highlight.style.editor_background = Some(clear);
+    highlight.style.editor_gutter_background = Some(clear);
+    highlight.style.editor_active_line = Some(gpui_kit::hsla(0., 0., 1., 0.035));
+    highlight.style.editor_foreground = Some(fude.fg_default.into());
+    highlight.style.editor_line_number = Some(gpui_kit::Hsla::from(fude.fg_dim).opacity(0.6));
+    highlight.style.editor_active_line_number = Some(fude.fg_dim.into());
+    t.highlight_theme = std::sync::Arc::new(highlight);
 }
 
 #[cfg(test)]

@@ -1,26 +1,41 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod anim;
 mod assets;
+mod changes_menu;
+mod close_flow;
 mod cli;
+mod dialog;
+mod file_view;
+mod home;
 mod hover;
 mod instance;
+mod language;
+mod layout_anim;
 mod main_area;
+mod open_file;
 mod popup;
+mod project_state;
 mod project_menu;
 mod rail;
+mod reduced_motion;
+mod right_panel;
 mod shell_menu;
 mod terminal_paint;
 mod terminal_view;
 mod theme;
 mod title_row;
+mod tree_menu;
+mod tree_model;
+mod tree_view;
 mod workspace_view;
 mod wsl_host;
 
 use std::borrow::Cow;
 
 use fude_core::keymap::Platform;
+use fude_core::recent::{self, RecentList};
 use fude_core::session::{self, WindowGeom, window_is_visible};
-use fude_core::workspace::Workspace;
 use fude_ipc::Message;
 use futures::StreamExt;
 use gpui_kit::component::TitleBar;
@@ -30,7 +45,7 @@ use crate::assets::FudeAssets;
 use crate::cli::{Launch, parse_launch};
 use crate::instance::{HandOff, hand_off, report_error};
 use crate::theme::Theme;
-use crate::workspace_view::{WorkspaceView, bind_keys};
+use crate::workspace_view::{InitialOpen, Startup, WorkspaceView, bind_keys};
 
 const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Regular.ttf");
 const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Bold.ttf");
@@ -81,17 +96,23 @@ fn main() {
         tx.unbounded_send(m).ok();
     });
 
-    // 前回の状態を戻し、引数のプロジェクトがあれば、その上で開いて選ぶ。
-    let session_path = session::session_path(Platform::current(), &|k| std::env::var(k).ok());
+    // 前回の状態は自動では戻さない。ウィンドウの位置と大きさだけを使い、残りはホーム画面の「前回の続き」で戻す。
+    let env = |k: &str| std::env::var(k).ok();
+    let session_path = session::session_path(Platform::current(), &env);
     let saved = session_path.as_deref().and_then(session::load);
     let saved_window = saved.as_ref().and_then(|d| d.window.clone());
-    let mut workspace = match &saved {
-        Some(data) => Workspace::restore(data, &|p| p.is_dir()),
-        None => Workspace::default(),
+    let recent_path = recent::recent_path(Platform::current(), &env);
+    let recent = recent_path
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|text| RecentList::parse(&text))
+        .unwrap_or_default();
+    let open = match launch {
+        Launch::Open { root, shell } => InitialOpen::Project { root, shell },
+        Launch::OpenFile { file, root_hint } => InitialOpen::File { file, root_hint },
+        Launch::Activate => InitialOpen::Nothing,
     };
-    if let Launch::Open { root, shell } = launch {
-        workspace.open_project_with(root, shell);
-    }
+    let startup = Startup { session_path, last_session: saved.filter(|d| d.has_projects()), recent_path, recent, open };
 
     application().with_assets(FudeAssets).run(move |cx: &mut App| {
         init(cx);
@@ -99,7 +120,10 @@ fn main() {
             .add_fonts(vec![Cow::Borrowed(MONO_REGULAR), Cow::Borrowed(MONO_BOLD)])
             .expect("同梱の等幅フォントを読み込めない");
         cx.set_global(Theme::dark());
+        theme::apply_component_theme(cx);
         bind_keys(cx);
+        file_view::bind_file_view_keys(cx);
+        tree_view::bind_tree_keys(cx);
         // ウィンドウは 1 枚なので、閉じたらアプリも終える（macOS でアプリだけ残らないように）。
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -122,7 +146,7 @@ fn main() {
         // gpui_kit::open_window は Root で包み、gpui-component のテーマの背景色（既定はライト）で
         // 全面を塗るため、ウィンドウの透過が見えなくなる。部品を使うまでは直接開く。
         let handle = cx
-            .open_window(options, move |window, cx| cx.new(|cx| WorkspaceView::new(workspace, session_path, window, cx)))
+            .open_window(options, move |window, cx| cx.new(|cx| WorkspaceView::new(startup, window, cx)))
             .expect("ウィンドウを開けない");
         // 2 つ目の起動から届いた要求を、ウィンドウのビューで処理する。
         handle

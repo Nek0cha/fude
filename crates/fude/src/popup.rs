@@ -60,6 +60,8 @@ impl Popup {
     pub fn frame(&self, id: &'static str, theme: &Theme, now: Instant) -> Stateful<Div> {
         div()
             .id(id)
+            // 下の部品（ターミナルなど）にクリックを渡さない。
+            .occlude()
             .track_focus(&self.focus)
             .opacity(self.fade.value(now))
             .min_w(MENU_MIN_W)

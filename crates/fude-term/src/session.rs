@@ -43,6 +43,15 @@ pub struct Session {
     writer: Sender<Vec<u8>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// シェルのプロセス ID。
+    pid: Option<u32>,
+    /// wsl.exe のシェル（中のプロセスはこのマシンから見えない）。
+    remote: bool,
+}
+
+/// wsl.exe で動かすシェルか。
+pub(crate) fn is_remote_shell(spec: &SpawnSpec) -> bool {
+    spec.program.eq_ignore_ascii_case("wsl.exe")
 }
 
 fn pty_size(size: GridSize) -> PtySize {
@@ -62,6 +71,7 @@ impl Session {
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| fail("起動", &e))?;
         drop(pair.slave);
         let killer = child.clone_killer();
+        let pid = child.process_id();
         let mut reader = pair.master.try_clone_reader().map_err(|e| fail("読み取り", &e))?;
         let mut pty_writer = pair.master.take_writer().map_err(|e| fail("書き込み", &e))?;
 
@@ -114,7 +124,14 @@ impl Session {
             on_event(SessionEvent::Exited { code });
         })?;
 
-        Ok(Session { state, writer, master: Mutex::new(pair.master), killer: Mutex::new(killer) })
+        Ok(Session {
+            state,
+            writer,
+            master: Mutex::new(pair.master),
+            killer: Mutex::new(killer),
+            pid,
+            remote: is_remote_shell(spec),
+        })
     }
 
     /// 入力を送る。表示を一番下へ戻し、選択を消す。
@@ -138,13 +155,101 @@ impl Session {
         }
     }
 
+    /// シェルの上で何かが動いているか。WSL のシェルと、調べられないときは None
+    /// （WSL は呼び出し側が fude serve に FUDE_TERMINAL_ID で聞く）。
+    /// Windows: シェルに子プロセスがあれば真。macOS: 端末の前面のプロセスグループがシェルでなければ真。
+    pub fn has_foreground_job(&self) -> Option<bool> {
+        if self.remote {
+            return None;
+        }
+        let pid = self.pid?;
+        #[cfg(windows)]
+        {
+            has_child_process(pid)
+        }
+        #[cfg(unix)]
+        {
+            let leader = self.master.lock().expect("PTY のロック").process_group_leader()?;
+            Some(leader as u32 != pid)
+        }
+    }
+
     pub fn with_state<R>(&self, f: impl FnOnce(&mut TermState) -> R) -> R {
         f(&mut self.state.lock())
+    }
+}
+
+/// pid を親に持つプロセスがあるか。
+#[cfg(windows)]
+fn has_child_process(pid: u32) -> Option<bool> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    };
+    // SAFETY: スナップショットのハンドルは最後に閉じる。entry は dwSize を入れてから渡す。
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = false;
+        let mut ok = Process32FirstW(snap, &mut entry) != 0;
+        while ok {
+            if entry.th32ParentProcessID == pid && entry.th32ProcessID != pid {
+                found = true;
+                break;
+            }
+            ok = Process32NextW(snap, &mut entry) != 0;
+        }
+        CloseHandle(snap);
+        Some(found)
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.killer.lock().expect("子プロセスのロック").kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::spawn_spec;
+    use fude_core::workspace::{ProjectRoot, ShellKind};
+    use std::time::Instant;
+
+    /// timeout までに cond が真になるか。
+    fn eventually(timeout: Duration, cond: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
+    #[test]
+    fn wsl_shell_job_is_unknown() {
+        let spec = SpawnSpec { program: "wsl.exe".into(), args: vec![], cwd: std::env::temp_dir(), env: vec![] };
+        assert!(is_remote_shell(&spec));
+        let spec = SpawnSpec { program: "pwsh.exe".into(), args: vec![], cwd: std::env::temp_dir(), env: vec![] };
+        assert!(!is_remote_shell(&spec));
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn foreground_job_is_detected() {
+        let dir = std::env::temp_dir();
+        let spec = spawn_spec(&ShellKind::Native, &ProjectRoot::Local(dir), "t1", &|k| std::env::var(k).ok());
+        let session = Session::spawn(&spec, GridSize { cols: 80, rows: 24 }, Arc::new(|_| {})).unwrap();
+        assert!(eventually(Duration::from_secs(10), || session.has_foreground_job() == Some(false)), "待っているだけなら偽");
+        let cmd = if cfg!(windows) { "ping -n 30 127.0.0.1\r" } else { "sleep 30\n" };
+        session.write(cmd.as_bytes().to_vec());
+        assert!(eventually(Duration::from_secs(5), || session.has_foreground_job() == Some(true)), "コマンドが動いていれば真");
     }
 }

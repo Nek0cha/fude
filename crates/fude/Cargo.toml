@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gpui-kit = "0.9.1"
+gpui-kit = { version = "0.9.1", features = ["tree-sitter", "tree-sitter-rust", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-javascript", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-markdown", "tree-sitter-markdown-inline", "tree-sitter-python", "tree-sitter-go", "tree-sitter-bash", "tree-sitter-css", "tree-sitter-html", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-sql", "tree-sitter-lua", "tree-sitter-make"] }
 fude-core = { path = "../fude-core" }
 fude-term = { path = "../fude-term" }
 futures = "0.3"
@@ -12,7 +12,7 @@ fude-ipc = { path = "../fude-ipc" }
 fude-fs = { path = "../fude-fs" }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile = "3"
