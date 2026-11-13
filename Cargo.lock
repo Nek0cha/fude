@@ -1717,6 +1717,9 @@ dependencies = [
 [[package]]
 name = "fude-core"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "futf"
