@@ -44,8 +44,9 @@ impl WorkspaceView {
                 cx.notify();
             }));
 
-        // プロジェクトが無い（ホーム画面）ときは、タブ、＋、分割、ピルを出さない。
+        // プロジェクトが無い（ホーム画面）ときは、タブ、＋、分割、ピルを出さない。タブが 0 枚なら分割も出さない。
         let has_project = self.workspace.active_project().is_some();
+        let has_tabs = self.workspace.active_project().is_some_and(|p| !p.tabs.is_empty());
         div()
             .flex()
             .flex_row()
@@ -76,7 +77,7 @@ impl WorkspaceView {
                         .pl(px(4.))
                         .flex_shrink_0()
                         .child(add_tab)
-                        .child(split),
+                        .when(has_tabs, |row| row.child(split)),
                 )
             })
             .child(self.drag_area("title-gap", cx).flex_1().h_full().min_w(px(24.)))

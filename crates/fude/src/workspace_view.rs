@@ -185,6 +185,8 @@ pub struct WorkspaceView {
     pub(crate) last_session: Option<SessionData>,
     /// ホーム画面で薄く出す（フォルダが見つからない）プロジェクト。
     pub(crate) missing_roots: HashSet<ProjectRoot>,
+    /// プロジェクトごとの右パネル。
+    pub(crate) panels: HashMap<ProjectId, crate::right_panel::PanelSlot>,
     /// 確認ダイアログ。
     pub(crate) dialog: Option<crate::dialog::OpenDialog>,
     /// ホーム画面の「最近」の右クリックメニュー。
@@ -246,6 +248,7 @@ impl WorkspaceView {
             missing_roots: HashSet::new(),
             home_menu: None,
             dialog: None,
+            panels: HashMap::new(),
             screen_fade: Fade::settled(1.0),
             showing_home: None,
             saved: None,
@@ -282,7 +285,7 @@ impl WorkspaceView {
     }
 
     /// 「前回の続き」。プロジェクトが 0 個のときだけ、保存した状態を戻す（ターミナルも保存どおりに起動する）。
-    pub(crate) fn resume_last_session(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn resume_last_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.workspace.projects().is_empty() {
             return;
         }
@@ -298,6 +301,12 @@ impl WorkspaceView {
             self.recent.touch(root, now);
         }
         self.save_recent(cx);
+        // 開いていたファイルを右パネルに開き直す。
+        let files: Vec<(ProjectId, String)> =
+            self.workspace.projects().iter().filter_map(|p| p.open_file.clone().map(|f| (p.id, f))).collect();
+        for (project, rel) in files {
+            self.open_in_panel(project, rel, None, window, cx);
+        }
         self.refocus_pane();
         self.refresh_active_branch(cx);
         cx.notify();
@@ -330,11 +339,16 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// メニューを閉じたあと、フォーカスを戻す。ペインがあればそこへ（次の描画で）、無ければワークスペースへ。
+    /// メニューを閉じたあと、フォーカスを戻す。ペインがあればそこへ（次の描画で）、無ければ右パネル、
+    /// それも無ければワークスペースへ。
     pub(crate) fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let has_pane = self.workspace.active_project().and_then(|p| p.active_tab()).is_some();
         if has_pane {
             self.refocus_pane();
+        } else if let Some(view) = self.active_panel_view() {
+            self.focused_pane = None;
+            let focus = view.read(cx).focus_handle();
+            window.focus(&focus, cx);
         } else {
             self.focused_pane = None;
             window.focus(&self.focus, cx);
@@ -582,7 +596,9 @@ impl Render for WorkspaceView {
         } else {
             let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
             let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
-            render_main_area(active_tab, &terminals, cx)
+            let panel = self.active_panel_view().map(AnyView::from);
+            let main_w = window.viewport_size().width - crate::theme::size::RAIL_W;
+            render_main_area(active_tab, &terminals, panel, main_w, cx)
         };
         let main = main.opacity(self.screen_fade.value(now));
         let title_row = self.render_title_row(window, cx, now);

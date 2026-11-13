@@ -12,6 +12,7 @@ mod main_area;
 mod popup;
 mod project_menu;
 mod rail;
+mod right_panel;
 mod shell_menu;
 mod terminal_paint;
 mod terminal_view;

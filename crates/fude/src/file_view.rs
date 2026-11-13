@@ -22,7 +22,7 @@ use crate::language::language_for;
 use crate::theme::{Theme, mono_font, size};
 use crate::title_row::icon;
 
-gpui_kit::actions!(file_view, [SaveFile, PanelBack, PanelForward]);
+gpui_kit::actions!(file_view, [SaveFile, PanelBack, PanelForward, ClosePanel]);
 
 /// 保存と、右パネルの履歴のキー。右パネルの中（FileView の文脈）だけで効く。
 /// 履歴は設計書の ⌘[ / ⌘] ではなく、エディタの字下げと重ならないキーにした（計画5 の Global Constraints）。
@@ -30,11 +30,13 @@ pub fn bind_file_view_keys(cx: &mut App) {
     let bindings = match Platform::current() {
         Platform::MacOs => [
             KeyBinding::new("cmd-s", SaveFile, Some("FileView")),
+            KeyBinding::new("escape", ClosePanel, Some("FileView")),
             KeyBinding::new("ctrl--", PanelBack, Some("FileView")),
             KeyBinding::new("ctrl-shift--", PanelForward, Some("FileView")),
         ],
         Platform::Windows => [
             KeyBinding::new("ctrl-s", SaveFile, Some("FileView")),
+            KeyBinding::new("escape", ClosePanel, Some("FileView")),
             KeyBinding::new("alt-left", PanelBack, Some("FileView")),
             KeyBinding::new("alt-right", PanelForward, Some("FileView")),
         ],
@@ -552,6 +554,9 @@ impl Render for FileView {
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save(cx)))
             .on_action(cx.listener(|_, _: &PanelBack, _, cx| cx.emit(FileViewEvent::Back)))
             .on_action(cx.listener(|_, _: &PanelForward, _, cx| cx.emit(FileViewEvent::Forward)))
+            // エディタは、閉じる検索欄や選択が無いときに Esc を親へ回す。そのときだけ右パネルを閉じる。
+            .on_action(cx.listener(|_, _: &gpui_kit::base::input::Escape, _, cx| cx.emit(FileViewEvent::Close)))
+            .on_action(cx.listener(|_, _: &ClosePanel, _, cx| cx.emit(FileViewEvent::Close)))
             .size_full()
             .flex()
             .flex_col()
