@@ -1,6 +1,8 @@
 //! プロジェクト、ターミナルタブ、分割の状態を管理する。GUI には依存しない。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+pub use crate::location::ProjectRoot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectId(u64);
@@ -53,13 +55,18 @@ impl Tab {
 
 pub struct Project {
     pub id: ProjectId,
-    pub root: PathBuf,
+    pub root: ProjectRoot,
     pub name: String,
     pub tabs: Vec<Tab>,
     pub active_tab: Option<TabId>,
 }
 
 impl Project {
+    /// 新しいターミナルの既定のシェル。WSL のプロジェクトなら WSL。
+    pub fn default_shell(&self) -> ShellKind {
+        self.root.default_shell()
+    }
+
     pub fn active_tab(&self) -> Option<&Tab> {
         let id = self.active_tab?;
         self.tabs.iter().find(|t| t.id == id)
@@ -105,19 +112,16 @@ impl Workspace {
     }
 
     /// root は呼び出し側で正規化済みとする。同じ root があればそれを選び、その id を返す。
-    /// 新しいプロジェクトには既定のシェルのタブを 1 つ作る。
-    pub fn open_project(&mut self, root: PathBuf, default_shell: ShellKind) -> ProjectId {
+    /// 新しいプロジェクトには既定のシェル（root.default_shell()）のタブを 1 つ作る。
+    pub fn open_project(&mut self, root: ProjectRoot) -> ProjectId {
         if let Some(p) = self.projects.iter().find(|p| p.root == root) {
             let id = p.id;
             self.active = Some(id);
             return id;
         }
         let id = ProjectId(self.alloc());
-        let tab = self.make_tab(default_shell);
-        let name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.display().to_string());
+        let tab = self.make_tab(root.default_shell());
+        let name = root.name();
         self.projects.push(Project { id, root, name, active_tab: Some(tab.id), tabs: vec![tab] });
         self.active = Some(id);
         id
@@ -269,10 +273,10 @@ pub fn native_label_from_shell(shell: Option<&str>) -> String {
 }
 
 /// プロジェクトのアイコンの色を、root から決める（6 色の中から）。
-/// FNV-1a を使い、実行のたびに同じ値になる。
-pub fn project_color_index(root: &Path) -> usize {
+/// host_path の文字列の FNV-1a を使い、実行のたびに同じ値になる。
+pub fn project_color_index(root: &ProjectRoot) -> usize {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in root.to_string_lossy().as_bytes() {
+    for byte in root.host_path().to_string_lossy().as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
@@ -287,9 +291,13 @@ mod tests {
     fn ws_with(roots: &[&str]) -> Workspace {
         let mut ws = Workspace::default();
         for root in roots {
-            ws.open_project(PathBuf::from(root), ShellKind::Native);
+            ws.open_project(local(root));
         }
         ws
+    }
+
+    fn local(root: &str) -> ProjectRoot {
+        ProjectRoot::Local(PathBuf::from(root))
     }
 
     fn active(ws: &Workspace) -> &Project {
@@ -313,12 +321,22 @@ mod tests {
     #[test]
     fn open_same_root_activates_existing() {
         let mut ws = Workspace::default();
-        let a = ws.open_project(PathBuf::from("/w/a"), ShellKind::Native);
-        ws.open_project(PathBuf::from("/w/b"), ShellKind::Native);
-        let again = ws.open_project(PathBuf::from("/w/a"), ShellKind::Native);
+        let a = ws.open_project(local("/w/a"));
+        ws.open_project(local("/w/b"));
+        let again = ws.open_project(local("/w/a"));
         assert_eq!(ws.projects().len(), 2);
         assert_eq!(again, a);
         assert_eq!(active(&ws).id, a);
+    }
+
+    #[test]
+    fn open_wsl_project_uses_wsl_shell() {
+        let mut ws = Workspace::default();
+        ws.open_project(ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() });
+        let p = active(&ws);
+        assert_eq!(p.name, "x");
+        assert_eq!(p.tabs[0].panes[0].kind, ShellKind::Wsl { distro: "Ubuntu".into() });
+        assert_eq!(p.default_shell(), ShellKind::Wsl { distro: "Ubuntu".into() });
     }
 
     #[test]
@@ -467,10 +485,10 @@ mod tests {
 
     #[test]
     fn project_color_index_is_stable() {
-        let root = Path::new("/w/a");
-        assert_eq!(project_color_index(root), project_color_index(root));
+        let root = local("/w/a");
+        assert_eq!(project_color_index(&root), project_color_index(&root));
         let values: std::collections::HashSet<usize> = ('a'..='z')
-            .map(|c| project_color_index(Path::new(&format!("/w/{c}"))))
+            .map(|c| project_color_index(&local(&format!("/w/{c}"))))
             .collect();
         assert!(values.iter().all(|&v| v < 6));
         assert!(values.len() >= 2);
