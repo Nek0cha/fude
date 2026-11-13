@@ -6,7 +6,7 @@ use std::io::{self, BufRead, Read, Write};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::{DirEntry, RelPath};
+use crate::RelPath;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -23,7 +23,8 @@ pub enum Request {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
     Version { id: String },
-    Entries { entries: Vec<DirEntry> },
+    /// 一覧（Vec<DirEntry> の JSON）は payload。大きいディレクトリでヘッダーの上限を超えないため。
+    Entries,
     /// 中身は payload。
     Data,
     Done,

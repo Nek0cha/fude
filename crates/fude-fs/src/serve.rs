@@ -30,7 +30,10 @@ fn handle(req: Request, payload: &[u8], build_id: &str) -> (Response, Vec<u8>) {
     let result = match req {
         Request::Version => Ok((Response::Version { id: build_id.to_string() }, Vec::new())),
         Request::ListDir { root, path } => {
-            local(&root).and_then(|fs| fs.list_dir(&path)).map(|entries| (Response::Entries { entries }, Vec::new()))
+            local(&root).and_then(|fs| fs.list_dir(&path)).and_then(|entries| {
+            let json = serde_json::to_vec(&entries).map_err(io::Error::other)?;
+            Ok((Response::Entries, json))
+        })
         }
         Request::Read { root, path } => local(&root).and_then(|fs| fs.read(&path)).map(|data| (Response::Data, data)),
         Request::Write { root, path } => {
@@ -102,7 +105,8 @@ mod tests {
         assert_eq!(out[0].0, Response::Version { id: "0.1.0+1".into() });
         assert_eq!(out[1].0, Response::Done);
         assert_eq!(out[2], (Response::Data, data));
-        let Response::Entries { entries } = &out[3].0 else { panic!("{:?}", out[3]) };
+        assert_eq!(out[3].0, Response::Entries);
+        let entries: Vec<crate::DirEntry> = serde_json::from_slice(&out[3].1).unwrap();
         assert_eq!(entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), vec!["a.bin"]);
         assert_eq!(out[4].0, Response::Branch { name: Some("main".into()) });
     }

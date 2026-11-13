@@ -131,7 +131,8 @@ fn unexpected(resp: Response) -> io::Error {
 impl ProjectFs for RemoteFs {
     fn list_dir(&self, rel: &RelPath) -> io::Result<Vec<DirEntry>> {
         match self.call(Request::ListDir { root: self.root.clone(), path: rel.clone() }, &[])? {
-            (Response::Entries { entries }, _) => Ok(entries),
+            (Response::Entries, json) => serde_json::from_slice(&json)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("一覧を読めない: {e}"))),
             (resp, _) => Err(unexpected(resp)),
         }
     }
@@ -203,6 +204,19 @@ mod tests {
         assert_eq!(fs.read(&rel("a/b.bin")).unwrap(), data);
         assert_eq!(fs.list_dir(&RelPath::root()).unwrap(), vec![DirEntry { name: "a".into(), is_dir: true }]);
         assert_eq!(fs.branch().unwrap(), Some("dev".into()));
+    }
+
+    /// 一覧がヘッダーの上限（64 KiB）を超える大きさでも届く。
+    #[test]
+    fn large_dir_listing_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5000 {
+            std::fs::write(dir.path().join(format!("component-{i:05}.tsx")), "").unwrap();
+        }
+        let fs = RemoteFs::new(client(ServeConnector, Duration::from_secs(10)), dir.path().to_string_lossy().into());
+        let entries = fs.list_dir(&RelPath::root()).unwrap();
+        assert_eq!(entries.len(), 5000);
+        assert_eq!(entries[4999].name, "component-04999.tsx");
     }
 
     #[test]
