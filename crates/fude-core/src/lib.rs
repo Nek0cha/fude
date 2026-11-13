@@ -1,3 +1,4 @@
+pub mod close;
 pub mod git_head;
 pub mod keymap;
 pub mod keys;

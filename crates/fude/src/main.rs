@@ -20,7 +20,7 @@ use std::borrow::Cow;
 
 use fude_core::keymap::Platform;
 use fude_core::session::{self, WindowGeom, window_is_visible};
-use fude_core::workspace::Workspace;
+use fude_core::workspace::{OpenMode, Workspace};
 use fude_ipc::Message;
 use futures::StreamExt;
 use gpui_kit::component::TitleBar;
@@ -90,7 +90,7 @@ fn main() {
         None => Workspace::default(),
     };
     if let Launch::Open { root, shell } = launch {
-        workspace.open_project_with(root, shell);
+        workspace.open_project_with(root, shell, OpenMode::WithTerminal);
     }
 
     application().with_assets(FudeAssets).run(move |cx: &mut App| {

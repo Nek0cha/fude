@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use fude_core::keymap::{Command, Platform, default_bindings};
 use fude_core::session::{self, SessionData, WindowGeom};
-use fude_core::workspace::{PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
+use fude_core::workspace::{OpenMode, PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
 use fude_ipc::Message;
 use gpui_kit::*;
 
@@ -220,7 +220,7 @@ impl WorkspaceView {
 
     /// root は正規化済みとする。shell は新しく開くときの既定のシェルの上書き。
     pub(crate) fn open_project(&mut self, root: ProjectRoot, shell: Option<ShellKind>, cx: &mut Context<Self>) {
-        self.workspace.open_project_with(root, shell);
+        self.workspace.open_project_with(root, shell, OpenMode::WithTerminal);
         self.refresh_active_branch(cx);
     }
 

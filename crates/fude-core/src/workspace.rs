@@ -5,6 +5,16 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 pub use crate::location::ProjectRoot;
+use crate::location::FileLocation;
+
+/// 新しく開くプロジェクトでターミナルを起動するか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenMode {
+    /// フォルダを開いたとき。既定のシェルのターミナルを 1 枚起動する。
+    WithTerminal,
+    /// ファイルを開いたとき。ターミナルは起動しない（設計書 §5.1）。
+    EditorOnly,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectId(u64);
@@ -64,6 +74,8 @@ pub struct Project {
     pub active_tab: Option<TabId>,
     /// 既定のシェルの上書き（WSL から開いた /mnt の下のフォルダなど）。
     pub shell: Option<ShellKind>,
+    /// 右パネル（ターミナルが 0 枚ならメイン領域）に出しているファイルの相対パス。ビューが更新する。
+    pub open_file: Option<String>,
 }
 
 impl Project {
@@ -119,21 +131,25 @@ impl Workspace {
     /// root は呼び出し側で正規化済みとする。同じ root があればそれを選び、その id を返す。
     /// 新しいプロジェクトには既定のシェル（root.default_shell()）のタブを 1 つ作る。
     pub fn open_project(&mut self, root: ProjectRoot) -> ProjectId {
-        self.open_project_with(root, None)
+        self.open_project_with(root, None, OpenMode::WithTerminal)
     }
 
     /// open_project と同じ。新しく作るときは shell を既定のシェルの上書きとして持ち、最初のタブもそのシェルにする。
-    /// すでに開いていれば切り替えるだけ（shell は変えない）。
-    pub fn open_project_with(&mut self, root: ProjectRoot, shell: Option<ShellKind>) -> ProjectId {
+    /// mode が EditorOnly ならタブを作らない。すでに開いていれば切り替えるだけ（shell もタブも変えない）。
+    pub fn open_project_with(&mut self, root: ProjectRoot, shell: Option<ShellKind>, mode: OpenMode) -> ProjectId {
         if let Some(p) = self.projects.iter().find(|p| p.root.same_place(&root)) {
             let id = p.id;
             self.active = Some(id);
             return id;
         }
         let id = ProjectId(self.alloc());
-        let tab = self.make_tab(shell.clone().unwrap_or_else(|| root.default_shell()));
+        let tabs = match mode {
+            OpenMode::WithTerminal => vec![self.make_tab(shell.clone().unwrap_or_else(|| root.default_shell()))],
+            OpenMode::EditorOnly => Vec::new(),
+        };
         let name = root.name();
-        self.projects.push(Project { id, root, name, active_tab: Some(tab.id), tabs: vec![tab], shell });
+        let active_tab = tabs.first().map(|t| t.id);
+        self.projects.push(Project { id, root, name, active_tab, tabs, shell, open_file: None });
         self.active = Some(id);
         id
     }
@@ -146,6 +162,7 @@ impl Workspace {
         tabs: &[(Vec<ShellKind>, usize)],
         active_tab: Option<usize>,
         shell: Option<ShellKind>,
+        open_file: Option<String>,
     ) -> ProjectId {
         let id = ProjectId(self.alloc());
         let mut built = Vec::new();
@@ -156,7 +173,7 @@ impl Workspace {
         }
         let active = built.get(active_tab.unwrap_or(0)).or(built.first()).map(|t| t.id);
         let name = root.name();
-        self.projects.push(Project { id, root, name, tabs: built, active_tab: active, shell });
+        self.projects.push(Project { id, root, name, tabs: built, active_tab: active, shell, open_file });
         id
     }
 
@@ -164,6 +181,20 @@ impl Workspace {
     pub(crate) fn select_restored(&mut self, index: Option<usize>) {
         let i = index.filter(|&i| i < self.projects.len()).unwrap_or(0);
         self.active = self.projects.get(i).map(|p| p.id);
+    }
+
+    pub fn set_open_file(&mut self, id: ProjectId, rel: Option<String>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
+            p.open_file = rel;
+        }
+    }
+
+    /// file を含むプロジェクトのうち、ルートが最も深いもの（相対パスが最も短いもの）と、その相対パス。
+    pub fn project_for_file(&self, file: &FileLocation) -> Option<(ProjectId, String)> {
+        self.projects
+            .iter()
+            .filter_map(|p| file.rel_within(&p.root).map(|rel| (p.id, rel)))
+            .min_by_key(|(_, rel)| rel.split('/').filter(|s| !s.is_empty()).count())
     }
 
     pub fn activate_project(&mut self, id: ProjectId) {
@@ -335,6 +366,7 @@ pub fn project_color_index(root: &ProjectRoot) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::location::FileLocation;
     use std::path::PathBuf;
 
     fn ws_with(roots: &[&str]) -> Workspace {
@@ -355,6 +387,36 @@ mod tests {
 
     fn tab_ids(ws: &Workspace) -> Vec<TabId> {
         active(ws).tabs.iter().map(|t| t.id).collect()
+    }
+
+    #[test]
+    fn editor_only_project_has_no_tabs() {
+        let mut ws = Workspace::default();
+        let id = ws.open_project_with(local("/w/a"), None, OpenMode::EditorOnly);
+        assert!(active(&ws).tabs.is_empty());
+        assert_eq!(active(&ws).active_tab, None);
+        assert_eq!(ws.open_project_with(local("/w/a"), None, OpenMode::WithTerminal), id);
+        assert!(active(&ws).tabs.is_empty());
+    }
+
+    #[test]
+    fn project_for_file_picks_deepest_root() {
+        let ws = ws_with(&["/w", "/w/a"]);
+        let f = FileLocation::Local(PathBuf::from("/w/a/src/x.rs"));
+        let (id, rel) = ws.project_for_file(&f).unwrap();
+        assert_eq!(ws.projects().iter().find(|p| p.id == id).unwrap().root, local("/w/a"));
+        assert_eq!(rel, "src/x.rs");
+        assert!(ws.project_for_file(&FileLocation::Local(PathBuf::from("/x/y.rs"))).is_none());
+    }
+
+    #[test]
+    fn set_open_file_updates_project() {
+        let mut ws = ws_with(&["/w/a"]);
+        let id = active(&ws).id;
+        ws.set_open_file(id, Some("src/a.rs".into()));
+        assert_eq!(active(&ws).open_file.as_deref(), Some("src/a.rs"));
+        ws.set_open_file(id, None);
+        assert_eq!(active(&ws).open_file, None);
     }
 
     #[test]
@@ -585,7 +647,7 @@ mod tests {
     fn open_with_shell_overrides_default() {
         let mut ws = Workspace::default();
         let ubuntu = ShellKind::Wsl { distro: "Ubuntu".into() };
-        ws.open_project_with(local(r"C:\w"), Some(ubuntu.clone()));
+        ws.open_project_with(local(r"C:\w"), Some(ubuntu.clone()), OpenMode::WithTerminal);
         let p = active(&ws);
         assert_eq!(p.tabs[0].panes[0].kind, ubuntu);
         assert_eq!(p.default_shell(), ubuntu);
@@ -595,8 +657,8 @@ mod tests {
     fn reopen_keeps_original_shell() {
         let mut ws = Workspace::default();
         let ubuntu = ShellKind::Wsl { distro: "Ubuntu".into() };
-        let a = ws.open_project_with(local(r"C:\w"), Some(ubuntu.clone()));
-        let again = ws.open_project_with(local(r"C:\w"), None);
+        let a = ws.open_project_with(local(r"C:\w"), Some(ubuntu.clone()), OpenMode::WithTerminal);
+        let again = ws.open_project_with(local(r"C:\w"), None, OpenMode::WithTerminal);
         assert_eq!(again, a);
         assert_eq!(ws.projects().len(), 1);
         assert_eq!(active(&ws).default_shell(), ubuntu);

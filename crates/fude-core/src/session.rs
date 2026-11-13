@@ -27,6 +27,9 @@ pub struct ProjectState {
     /// 既定のシェルの上書き。計画4の形式には無いため、無ければ None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<ShellKind>,
+    /// 開いていたファイルの相対パス。計画5より前の形式には無い。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_file: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -59,10 +62,28 @@ impl SessionData {
                     .collect(),
                 active_tab: p.active_tab.and_then(|id| p.tabs.iter().position(|t| t.id == id)),
                 shell: p.shell.clone(),
+                open_file: p.open_file.clone(),
             })
             .collect();
         let active = ws.active_project().and_then(|a| ws.projects().iter().position(|p| p.id == a.id));
         SessionData { version: SESSION_VERSION, window, active, projects }
+    }
+
+    /// capture と同じ。ただしプロジェクトが 0 個なら、projects と active を previous から引き継ぐ
+    /// （「前回の続き」で戻すのは、最後にプロジェクトが 1 個以上あった時点の状態のため。設計書 §5.10）。
+    pub fn capture_keeping(ws: &Workspace, window: Option<WindowGeom>, previous: Option<&SessionData>) -> SessionData {
+        let mut data = SessionData::capture(ws, window);
+        if !data.has_projects()
+            && let Some(prev) = previous
+        {
+            data.projects = prev.projects.clone();
+            data.active = prev.active;
+        }
+        data
+    }
+
+    pub fn has_projects(&self) -> bool {
+        !self.projects.is_empty()
     }
 
     /// JSON が壊れている、または version が SESSION_VERSION でなければ None。
@@ -78,8 +99,8 @@ impl SessionData {
 
 impl Workspace {
     /// exists は Local のプロジェクトにだけ使う（WSL を起こさないため、Wsl は確かめずに戻す）。
-    /// 存在しないプロジェクトと、ペインが空のタブは捨てる。タブが空になったプロジェクトには既定のシェルの
-    /// タブを 1 つ作る。active、active_tab、focused は範囲に収める（範囲外なら先頭）。
+    /// 存在しないプロジェクトと、ペインが空のタブは捨てる。タブが 0 枚のプロジェクトは 0 枚のまま戻す。
+    /// active、active_tab、focused は範囲に収める（範囲外なら先頭）。
     pub fn restore(data: &SessionData, exists: &dyn Fn(&Path) -> bool) -> Workspace {
         let mut ws = Workspace::default();
         let mut active = None;
@@ -91,12 +112,9 @@ impl Workspace {
             if ws.projects().iter().any(|q| q.root.same_place(&p.root)) {
                 continue;
             }
-            let mut tabs: Vec<(Vec<ShellKind>, usize)> =
+            let tabs: Vec<(Vec<ShellKind>, usize)> =
                 p.tabs.iter().filter(|t| !t.panes.is_empty()).map(|t| (t.panes.clone(), t.focused)).collect();
-            if tabs.is_empty() {
-                tabs.push((vec![p.shell.clone().unwrap_or_else(|| p.root.default_shell())], 0));
-            }
-            ws.push_restored(p.root.clone(), &tabs, p.active_tab, p.shell.clone());
+            ws.push_restored(p.root.clone(), &tabs, p.active_tab, p.shell.clone(), p.open_file.clone());
             if data.active == Some(i) {
                 active = Some(ws.projects().len() - 1);
             }
@@ -167,7 +185,7 @@ pub fn window_is_visible(win: &WindowGeom, displays: &[(f32, f32, f32, f32)]) ->
 mod tests {
     use super::*;
     use crate::keymap::Platform;
-    use crate::workspace::{ProjectRoot, ShellKind, Workspace};
+    use crate::workspace::{OpenMode, ProjectRoot, ShellKind, Workspace};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
@@ -236,8 +254,9 @@ mod tests {
                     tabs: vec![TabState { panes: vec![ShellKind::Native, ubuntu()], focused: 1 }],
                     active_tab: Some(0),
                     shell: None,
+                    open_file: None,
                 },
-                ProjectState { root: wsl("Ubuntu", "/home/x"), tabs: vec![], active_tab: None, shell: None },
+                ProjectState { root: wsl("Ubuntu", "/home/x"), tabs: vec![], active_tab: None, shell: None, open_file: None },
             ],
         };
         assert_eq!(SessionData::parse(text), Some(expected));
@@ -276,6 +295,7 @@ mod tests {
                 tabs: vec![TabState { panes: vec![ShellKind::Native], focused: 5 }],
                 active_tab: Some(7),
                 shell: None,
+                open_file: None,
             }],
         };
         let ws = Workspace::restore(&data, &|_| true);
@@ -285,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_tabs_get_default_shell_tab() {
+    fn restore_keeps_zero_tabs_and_open_file() {
         let data = SessionData {
             version: 1,
             window: None,
@@ -295,19 +315,48 @@ mod tests {
                 tabs: vec![TabState { panes: vec![], focused: 0 }],
                 active_tab: None,
                 shell: None,
+                open_file: Some("src/a.rs".into()),
             }],
         };
         let ws = Workspace::restore(&data, &|_| true);
         let p = ws.active_project().expect("先頭が選ばれる");
-        assert_eq!(p.tabs.len(), 1);
-        assert_eq!(p.tabs[0].panes[0].kind, ubuntu());
-        assert_eq!(p.active_tab, Some(p.tabs[0].id));
+        assert!(p.tabs.is_empty());
+        assert_eq!(p.active_tab, None);
+        assert_eq!(p.open_file.as_deref(), Some("src/a.rs"));
+        assert_eq!(SessionData::capture(&ws, None).projects[0].open_file.as_deref(), Some("src/a.rs"));
+    }
+
+    #[test]
+    fn capture_keeping_keeps_previous_projects_when_empty() {
+        let mut ws = Workspace::default();
+        ws.open_project(local("/w/a"));
+        let before = SessionData::capture(&ws, None);
+        assert!(before.has_projects());
+        let id = ws.active_project().unwrap().id;
+        ws.close_project(id);
+        let geom = WindowGeom { x: 1., y: 2., width: 3., height: 4., maximized: false };
+        let after = SessionData::capture_keeping(&ws, Some(geom.clone()), Some(&before));
+        assert_eq!(after.projects, before.projects);
+        assert_eq!(after.active, before.active);
+        assert_eq!(after.window, Some(geom));
+        let none = SessionData::capture_keeping(&ws, None, None);
+        assert!(!none.has_projects());
+    }
+
+    #[test]
+    fn capture_keeping_uses_current_when_not_empty() {
+        let mut ws = Workspace::default();
+        ws.open_project(local("/w/a"));
+        let old = SessionData::capture(&ws, None);
+        ws.open_project(local("/w/b"));
+        let now = SessionData::capture_keeping(&ws, None, Some(&old));
+        assert_eq!(now.projects.len(), 2);
     }
 
     #[test]
     fn shell_override_roundtrips() {
         let mut ws = Workspace::default();
-        ws.open_project_with(local(r"C:\w"), Some(ubuntu()));
+        ws.open_project_with(local(r"C:\w"), Some(ubuntu()), OpenMode::WithTerminal);
         let data = SessionData::capture(&ws, None);
         assert_eq!(data.projects[0].shell, Some(ubuntu()));
         let parsed = SessionData::parse(&data.to_json()).expect("読み直せる");
@@ -321,6 +370,7 @@ mod tests {
             "projects":[{"root":{"local":"C:\\w"},"active_tab":0,"tabs":[{"panes":["native"],"focused":0}]}]}"#;
         let data = SessionData::parse(text).expect("計画4の形式も読める");
         assert_eq!(data.projects[0].shell, None);
+        assert_eq!(data.projects[0].open_file, None);
     }
 
     fn path_with(os: Platform, vars: &[(&str, &str)]) -> Option<PathBuf> {
