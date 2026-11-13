@@ -150,6 +150,11 @@ impl WorkspaceView {
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = Instant::now();
+        // カーソルがウィンドウの外へ出ると、GPUI は再描画するが、部品の on_hover(false) は呼ばない
+        // （Windows のウィンドウ操作ボタンの上から出たときなど）。ここでまとめて外す。
+        if !window.is_window_hovered() {
+            self.hover.release_all(now);
+        }
         if self.hover.any_animating(now) {
             window.request_animation_frame();
         }

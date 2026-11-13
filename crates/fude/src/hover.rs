@@ -33,6 +33,13 @@ impl HoverFades {
         self.fades.entry(key).or_insert_with(|| Fade::settled(0.0)).animate_to(target, duration, ease_out, now);
     }
 
+    /// すべての部品のホバーを外す。カーソルがウィンドウの外へ出たときに使う。
+    pub fn release_all(&mut self, now: Instant) {
+        for fade in self.fades.values_mut() {
+            fade.animate_to(0.0, HOVER_OUT, ease_out, now);
+        }
+    }
+
     /// 0（ホバーしていない）〜 1（ホバー中）。登録の無い部品は 0。
     pub fn value(&self, key: HoverKey, now: Instant) -> f32 {
         self.fades.get(&key).map_or(0.0, |f| f.value(now))
@@ -50,6 +57,18 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    /// カーソルがウィンドウの外へ出たとき、部品ごとの「外れた」通知は届かないため、まとめて消す。
+    #[test]
+    fn release_all_fades_out_every_key() {
+        let t0 = Instant::now();
+        let mut fades = HoverFades::default();
+        fades.set(HoverKey::CaptionClose, true, t0);
+        fades.set(HoverKey::AddTab, true, t0);
+        fades.release_all(t0 + ms(80));
+        assert_eq!(fades.value(HoverKey::CaptionClose, t0 + ms(200)), 0.0);
+        assert_eq!(fades.value(HoverKey::AddTab, t0 + ms(200)), 0.0);
     }
 
     #[test]
