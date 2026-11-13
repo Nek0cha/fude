@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fude_core::keymap::{Command, Platform, default_bindings};
+use fude_core::recent::RecentList;
 use fude_core::session::{self, SessionData, WindowGeom};
+use fude_core::settings::{LastProjectClosed, Settings};
 use fude_core::workspace::{OpenMode, PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
 use fude_ipc::Message;
 use gpui_kit::*;
@@ -79,6 +81,47 @@ pub(crate) fn branch_read(root: &ProjectRoot) -> BranchRead {
     }
 }
 
+/// プロジェクトを閉じたあとに行うこと。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AfterClose {
+    /// まだプロジェクトがある。
+    Stay,
+    /// ホーム画面を出す（プロジェクトが 0 個なら自然に出る）。
+    ShowHome,
+    /// アプリを終える。
+    Quit,
+}
+
+/// remaining は閉じたあとのプロジェクトの数。
+pub(crate) fn last_project_closed_action(settings: &Settings, remaining: usize) -> AfterClose {
+    match (remaining, settings.on_last_project_closed) {
+        (1.., _) => AfterClose::Stay,
+        (0, LastProjectClosed::Home) => AfterClose::ShowHome,
+        (0, LastProjectClosed::Quit) => AfterClose::Quit,
+    }
+}
+
+/// 起動のときに開くもの（main の Launch から）。
+pub enum InitialOpen {
+    Nothing,
+    Project { root: ProjectRoot, shell: Option<ShellKind> },
+}
+
+/// 起動のときに読んだもの。
+pub struct Startup {
+    pub session_path: Option<PathBuf>,
+    /// 前回の続き（ホーム画面の「前回の続き」で戻す）。
+    pub last_session: Option<SessionData>,
+    pub recent_path: Option<PathBuf>,
+    pub recent: RecentList,
+    pub open: InitialOpen,
+}
+
+/// 今の UNIX 秒。
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 /// ペインの FUDE_TERMINAL_ID。
 pub(crate) fn terminal_id(pane: PaneId) -> String {
     format!("p{}", pane.raw())
@@ -131,14 +174,23 @@ pub struct WorkspaceView {
     save_task: Option<Task<()>>,
     /// 最後に見たウィンドウの位置と大きさ（アプリの終了時はウィンドウに触れないため）。
     last_geom: Option<WindowGeom>,
+    /// 設定（段階 9 までは既定値）。
+    pub(crate) settings: Settings,
+    /// 最近開いたプロジェクトと、その保存先。
+    pub(crate) recent: RecentList,
+    recent_path: Option<PathBuf>,
+    /// 「前回の続き」で戻す状態。最後にプロジェクトが 1 個以上あった時点のもの。
+    pub(crate) last_session: Option<SessionData>,
     _activation: Subscription,
     _bounds: Subscription,
     _quit: Subscription,
 }
 
 impl WorkspaceView {
-    /// 起動時の状態（復元したもの、または引数のプロジェクトを開いたもの）を受け取る。
-    pub fn new(workspace: Workspace, session_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// 起動時にセッションは戻さない（設計書 §5.10 の B 案）。startup.open があれば開く。
+    pub fn new(startup: Startup, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let Startup { session_path, last_session, recent_path, recent, open } = startup;
+        let workspace = Workspace::default();
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.refresh_active_branch(cx);
@@ -175,6 +227,10 @@ impl WorkspaceView {
             wsl_hosts: Arc::new(WslHosts::new()),
             focus,
             session_path,
+            settings: Settings::default(),
+            recent,
+            recent_path,
+            last_session,
             saved: None,
             pending: None,
             save_task: None,
@@ -183,9 +239,49 @@ impl WorkspaceView {
             _bounds: bounds,
             _quit: quit,
         };
+        if let InitialOpen::Project { root, shell } = open {
+            this.open_project(root, shell, cx);
+        }
         this.refresh_active_branch(cx);
         this.load_distros(cx);
         this
+    }
+
+    /// 最近開いたものに記録して、裏で保存する。
+    pub(crate) fn touch_recent(&mut self, root: &ProjectRoot, cx: &mut Context<Self>) {
+        self.recent.touch(root.clone(), now_secs());
+        self.save_recent(cx);
+    }
+
+    pub(crate) fn save_recent(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.recent_path.clone() else { return };
+        let text = self.recent.to_json();
+        cx.background_spawn(async move {
+            if let Err(e) = session::write_atomic(&path, &text) {
+                eprintln!("最近開いたものを保存できない: {e}");
+            }
+        })
+        .detach();
+    }
+
+    /// 「前回の続き」。プロジェクトが 0 個のときだけ、保存した状態を戻す（ターミナルも保存どおりに起動する）。
+    pub(crate) fn resume_last_session(&mut self, cx: &mut Context<Self>) {
+        if !self.workspace.projects().is_empty() {
+            return;
+        }
+        let Some(data) = self.last_session.clone() else { return };
+        self.workspace = Workspace::restore(&data, &|p| p.is_dir());
+        self.refocus_pane();
+        self.refresh_active_branch(cx);
+        cx.notify();
+    }
+
+    /// プロジェクトを閉じたあとに呼ぶ。0 個になり、設定がアプリの終了なら、保存して終える。
+    pub(crate) fn after_project_closed(&mut self, cx: &mut Context<Self>) {
+        if last_project_closed_action(&self.settings, self.workspace.projects().len()) == AfterClose::Quit {
+            self.save_now();
+            cx.quit();
+        }
     }
 
     fn load_distros(&self, cx: &mut Context<Self>) {
@@ -225,6 +321,7 @@ impl WorkspaceView {
 
     /// root は正規化済みとする。shell は新しく開くときの既定のシェルの上書き。
     pub(crate) fn open_project(&mut self, root: ProjectRoot, shell: Option<ShellKind>, cx: &mut Context<Self>) {
+        self.touch_recent(&root, cx);
         self.workspace.open_project_with(root, shell, OpenMode::WithTerminal);
         self.refresh_active_branch(cx);
     }
@@ -244,7 +341,10 @@ impl WorkspaceView {
         let Some(path) = self.session_path.clone() else { return };
         let geom = geom_from_bounds(window.window_bounds());
         self.last_geom = Some(geom.clone());
-        let data = SessionData::capture(&self.workspace, Some(geom));
+        let data = SessionData::capture_keeping(&self.workspace, Some(geom), self.last_session.as_ref());
+        if data.has_projects() {
+            self.last_session = Some(data.clone());
+        }
         if self.saved.as_ref() == Some(&data) || self.pending.as_ref() == Some(&data) {
             return;
         }
@@ -270,7 +370,7 @@ impl WorkspaceView {
         let Some(path) = self.session_path.as_ref() else { return };
         self.save_task = None;
         self.pending = None;
-        let data = SessionData::capture(&self.workspace, self.last_geom.clone());
+        let data = SessionData::capture_keeping(&self.workspace, self.last_geom.clone(), self.last_session.as_ref());
         if self.saved.as_ref() == Some(&data) {
             return;
         }
@@ -498,6 +598,18 @@ mod tests {
     use super::geom_from_bounds;
     use fude_core::session::WindowGeom;
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
+
+    #[test]
+    fn last_project_closed_rules() {
+        use super::{AfterClose, last_project_closed_action};
+        use fude_core::settings::{LastProjectClosed, Settings};
+        let home = Settings::default();
+        let quit = Settings { on_last_project_closed: LastProjectClosed::Quit, ..Settings::default() };
+        assert_eq!(last_project_closed_action(&home, 1), AfterClose::Stay);
+        assert_eq!(last_project_closed_action(&quit, 2), AfterClose::Stay);
+        assert_eq!(last_project_closed_action(&home, 0), AfterClose::ShowHome);
+        assert_eq!(last_project_closed_action(&quit, 0), AfterClose::Quit);
+    }
 
     #[test]
     fn wsl_branch_is_read_in_background() {

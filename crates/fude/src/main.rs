@@ -19,8 +19,8 @@ mod wsl_host;
 use std::borrow::Cow;
 
 use fude_core::keymap::Platform;
+use fude_core::recent::{self, RecentList};
 use fude_core::session::{self, WindowGeom, window_is_visible};
-use fude_core::workspace::{OpenMode, Workspace};
 use fude_ipc::Message;
 use futures::StreamExt;
 use gpui_kit::component::TitleBar;
@@ -30,7 +30,7 @@ use crate::assets::FudeAssets;
 use crate::cli::{Launch, parse_launch};
 use crate::instance::{HandOff, hand_off, report_error};
 use crate::theme::Theme;
-use crate::workspace_view::{WorkspaceView, bind_keys};
+use crate::workspace_view::{InitialOpen, Startup, WorkspaceView, bind_keys};
 
 const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Regular.ttf");
 const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Bold.ttf");
@@ -81,17 +81,23 @@ fn main() {
         tx.unbounded_send(m).ok();
     });
 
-    // 前回の状態を戻し、引数のプロジェクトがあれば、その上で開いて選ぶ。
-    let session_path = session::session_path(Platform::current(), &|k| std::env::var(k).ok());
+    // 前回の状態は自動では戻さない。ウィンドウの位置と大きさだけを使い、残りはホーム画面の「前回の続き」で戻す。
+    let env = |k: &str| std::env::var(k).ok();
+    let session_path = session::session_path(Platform::current(), &env);
     let saved = session_path.as_deref().and_then(session::load);
     let saved_window = saved.as_ref().and_then(|d| d.window.clone());
-    let mut workspace = match &saved {
-        Some(data) => Workspace::restore(data, &|p| p.is_dir()),
-        None => Workspace::default(),
+    let recent_path = recent::recent_path(Platform::current(), &env);
+    let recent = recent_path
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|text| RecentList::parse(&text))
+        .unwrap_or_default();
+    let open = match launch {
+        Launch::Open { root, shell } => InitialOpen::Project { root, shell },
+        // ファイルを開く処理は計画5の Task 15 で入れる。
+        Launch::OpenFile { .. } | Launch::Activate => InitialOpen::Nothing,
     };
-    if let Launch::Open { root, shell } = launch {
-        workspace.open_project_with(root, shell, OpenMode::WithTerminal);
-    }
+    let startup = Startup { session_path, last_session: saved.filter(|d| d.has_projects()), recent_path, recent, open };
 
     application().with_assets(FudeAssets).run(move |cx: &mut App| {
         init(cx);
@@ -122,7 +128,7 @@ fn main() {
         // gpui_kit::open_window は Root で包み、gpui-component のテーマの背景色（既定はライト）で
         // 全面を塗るため、ウィンドウの透過が見えなくなる。部品を使うまでは直接開く。
         let handle = cx
-            .open_window(options, move |window, cx| cx.new(|cx| WorkspaceView::new(workspace, session_path, window, cx)))
+            .open_window(options, move |window, cx| cx.new(|cx| WorkspaceView::new(startup, window, cx)))
             .expect("ウィンドウを開けない");
         // 2 つ目の起動から届いた要求を、ウィンドウのビューで処理する。
         handle

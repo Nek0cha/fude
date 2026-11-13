@@ -82,6 +82,7 @@ impl WorkspaceView {
                 self.workspace.close_project(project);
                 self.branches.remove(&project);
                 self.refresh_active_branch(cx);
+                self.after_project_closed(cx);
             }
             ProjectAction::Reveal => {
                 let (program, args) = reveal_command(&root, Platform::current());
