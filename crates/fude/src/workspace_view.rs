@@ -79,6 +79,11 @@ pub(crate) fn branch_read(root: &ProjectRoot) -> BranchRead {
     }
 }
 
+/// ペインの FUDE_TERMINAL_ID。
+pub(crate) fn terminal_id(pane: PaneId) -> String {
+    format!("p{}", pane.raw())
+}
+
 /// 状態が変わってから保存するまでの待ち時間。続けて変わったら、最後の変化から数え直す。
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 
@@ -383,7 +388,8 @@ impl WorkspaceView {
             if self.terminals.contains_key(&id) {
                 continue;
             }
-            let view = cx.new(|cx| TerminalView::new(&kind, &root, window, cx));
+            let terminal_id = terminal_id(id);
+            let view = cx.new(|cx| TerminalView::new(&kind, &root, &terminal_id, window, cx));
             let sub = cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
                 match event {
                     TerminalEvent::Title(title) => this.workspace.set_pane_title(id, title.clone()),

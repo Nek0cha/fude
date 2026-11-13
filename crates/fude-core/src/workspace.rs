@@ -23,6 +23,13 @@ pub struct TabId(u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PaneId(u64);
 
+impl PaneId {
+    /// FUDE_TERMINAL_ID などに使う番号。
+    pub fn raw(&self) -> u64 {
+        self.0
+    }
+}
+
 /// ターミナルで動かすシェルの種類。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

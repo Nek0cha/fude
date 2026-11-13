@@ -57,9 +57,10 @@ pub struct TerminalView {
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl TerminalView {
-    pub fn new(kind: &ShellKind, root: &ProjectRoot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// terminal_id は FUDE_TERMINAL_ID として渡す（`p<ペインの番号>`）。
+    pub fn new(kind: &ShellKind, root: &ProjectRoot, terminal_id: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<SessionEvent>();
-        let spec = spawn_spec(kind, root, &|k| std::env::var(k).ok());
+        let spec = spawn_spec(kind, root, terminal_id, &|k| std::env::var(k).ok());
         let on_event = Arc::new(move |ev| {
             let _ = tx.unbounded_send(ev);
         });

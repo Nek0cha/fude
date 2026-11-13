@@ -1803,6 +1803,7 @@ dependencies = [
  "alacritty_terminal",
  "fude-core",
  "portable-pty",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
