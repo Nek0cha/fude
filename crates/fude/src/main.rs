@@ -14,6 +14,7 @@ mod terminal_view;
 mod theme;
 mod title_row;
 mod workspace_view;
+mod wsl_host;
 
 use std::borrow::Cow;
 

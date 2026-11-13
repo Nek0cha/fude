@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fude_core::git_head::read_branch;
 use fude_core::keymap::{Command, Platform, default_bindings};
 use fude_core::session::{self, SessionData, WindowGeom};
 use fude_core::workspace::{PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
@@ -16,6 +16,7 @@ use crate::main_area::render_main_area;
 use crate::popup::Popup;
 use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::theme::{Theme, ui_font};
+use crate::wsl_host::{WslHosts, project_fs};
 
 gpui_kit::actions!(
     fude,
@@ -63,17 +64,18 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 /// ブランチ名の読み方。
+#[derive(Debug, PartialEq)]
 pub(crate) enum BranchRead {
     /// その場で読む（ローカル）。
-    Now(PathBuf),
-    /// 裏で読む（WSL。止まっている WSL を起こすと数秒かかり、UI を止めてしまうため）。
-    Background(PathBuf),
+    Now,
+    /// 裏で fude serve から読む（WSL。止まっている WSL の起動や fude の配置に数秒かかり、UI を止めてしまうため）。
+    Background,
 }
 
 pub(crate) fn branch_read(root: &ProjectRoot) -> BranchRead {
     match root {
-        ProjectRoot::Local(path) => BranchRead::Now(path.clone()),
-        ProjectRoot::Wsl { .. } => BranchRead::Background(root.host_path()),
+        ProjectRoot::Local(_) => BranchRead::Now,
+        ProjectRoot::Wsl { .. } => BranchRead::Background,
     }
 }
 
@@ -112,6 +114,8 @@ pub struct WorkspaceView {
     pub(crate) project_menu: Option<(ProjectId, Popup)>,
     /// インストール済みの WSL のディストリビューション。起動時に 1 回だけ読む。
     pub(crate) distros: Vec<String>,
+    /// WSL のプロジェクトのファイルへのアクセス（ディストリビューションごとの fude serve）。
+    wsl_hosts: Arc<WslHosts>,
     focus: FocusHandle,
     /// セッションの保存先。環境変数から決まらなければ保存しない。
     session_path: Option<PathBuf>,
@@ -163,6 +167,7 @@ impl WorkspaceView {
             shell_menu: None,
             project_menu: None,
             distros: Vec::new(),
+            wsl_hosts: Arc::new(WslHosts::new()),
             focus,
             session_path,
             saved: None,
@@ -278,15 +283,24 @@ impl WorkspaceView {
     }
 
     /// 選択中のプロジェクトのブランチ名を読み直す。WSL のプロジェクトは裏で読み、届いたら描き直す。
+    /// 読めなければ None にし、理由を出す（次にそのプロジェクトを選んだときにやり直す）。
     pub(crate) fn refresh_active_branch(&mut self, cx: &mut Context<Self>) {
         let Some(p) = self.workspace.active_project() else { return };
         let id = p.id;
+        let root = p.root.clone();
+        let read = move |hosts: &WslHosts| {
+            project_fs(&root, hosts).and_then(|fs| fs.branch()).unwrap_or_else(|e| {
+                eprintln!("ブランチ名を読めない: {}: {e}", root.copy_text());
+                None
+            })
+        };
         match branch_read(&p.root) {
-            BranchRead::Now(path) => {
-                self.branches.insert(id, read_branch(&path));
+            BranchRead::Now => {
+                self.branches.insert(id, read(&self.wsl_hosts));
             }
-            BranchRead::Background(path) => {
-                let task = cx.background_spawn(async move { read_branch(&path) });
+            BranchRead::Background => {
+                let hosts = self.wsl_hosts.clone();
+                let task = cx.background_spawn(async move { read(&hosts) });
                 cx.spawn(async move |this, cx| {
                     let branch = task.await;
                     this.update(cx, |this, cx| {
@@ -484,9 +498,9 @@ mod tests {
         use super::{BranchRead, branch_read};
         use fude_core::workspace::ProjectRoot;
         let wsl = ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() };
-        assert!(matches!(branch_read(&wsl), BranchRead::Background(_)));
+        assert_eq!(branch_read(&wsl), BranchRead::Background);
         let local = ProjectRoot::Local(std::path::PathBuf::from("/w/a"));
-        assert!(matches!(branch_read(&local), BranchRead::Now(_)));
+        assert_eq!(branch_read(&local), BranchRead::Now);
     }
 
     #[test]
