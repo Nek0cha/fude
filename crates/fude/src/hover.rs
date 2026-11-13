@@ -25,12 +25,23 @@ pub enum HoverKey {
 #[derive(Default)]
 pub struct HoverFades {
     fades: HashMap<HoverKey, Fade>,
+    window_hovered: bool,
 }
 
 impl HoverFades {
     pub fn set(&mut self, key: HoverKey, hovered: bool, now: Instant) {
         let (target, duration) = if hovered { (1.0, HOVER_IN) } else { (0.0, HOVER_OUT) };
         self.fades.entry(key).or_insert_with(|| Fade::settled(0.0)).animate_to(target, duration, ease_out, now);
+    }
+
+    /// カーソルがウィンドウの上にあるかを伝える。外へ出た瞬間に 1 回だけ、すべてのホバーを外す。
+    /// Windows では、ウィンドウ操作ボタンとの行き来で一時的に「外」と判定されることがあり、
+    /// 「外」の間ずっと外し続けると、戻ってきたあとのホバーが効かなくなる。
+    pub fn set_window_hovered(&mut self, hovered: bool, now: Instant) {
+        if self.window_hovered && !hovered {
+            self.release_all(now);
+        }
+        self.window_hovered = hovered;
     }
 
     /// すべての部品のホバーを外す。カーソルがウィンドウの外へ出たときに使う。
@@ -69,6 +80,28 @@ mod tests {
         fades.release_all(t0 + ms(80));
         assert_eq!(fades.value(HoverKey::CaptionClose, t0 + ms(200)), 0.0);
         assert_eq!(fades.value(HoverKey::AddTab, t0 + ms(200)), 0.0);
+    }
+
+    /// 「外に出た」状態が続いても、消すのは切り替わった 1 回だけ。戻ってきたあとのホバーは効く。
+    #[test]
+    fn window_leave_releases_only_on_transition() {
+        let t0 = Instant::now();
+        let mut fades = HoverFades::default();
+        fades.set_window_hovered(true, t0);
+        fades.set_window_hovered(false, t0);
+        fades.set(HoverKey::AddTab, true, t0 + ms(10));
+        fades.set_window_hovered(false, t0 + ms(20));
+        assert_eq!(fades.value(HoverKey::AddTab, t0 + ms(200)), 1.0);
+    }
+
+    #[test]
+    fn window_leave_after_hover_fades_out() {
+        let t0 = Instant::now();
+        let mut fades = HoverFades::default();
+        fades.set_window_hovered(true, t0);
+        fades.set(HoverKey::CaptionClose, true, t0);
+        fades.set_window_hovered(false, t0 + ms(80));
+        assert_eq!(fades.value(HoverKey::CaptionClose, t0 + ms(300)), 0.0);
     }
 
     #[test]

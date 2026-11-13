@@ -152,9 +152,7 @@ impl Render for WorkspaceView {
         let now = Instant::now();
         // カーソルがウィンドウの外へ出ると、GPUI は再描画するが、部品の on_hover(false) は呼ばない
         // （Windows のウィンドウ操作ボタンの上から出たときなど）。ここでまとめて外す。
-        if !window.is_window_hovered() {
-            self.hover.release_all(now);
-        }
+        self.hover.set_window_hovered(window.is_window_hovered(), now);
         if self.hover.any_animating(now) {
             window.request_animation_frame();
         }
