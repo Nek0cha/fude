@@ -106,6 +106,18 @@ fn is_git_signal(rel: &Path) -> bool {
     matches!(parts.next().as_deref(), Some("HEAD" | "index" | "refs" | "packed-refs"))
 }
 
+/// 中身や並びが変わりうる通知か。開いた、読んだだけの通知（Linux の inotify が出す）は捨てる。
+/// git status がファイルを読むたびに知らせると、状態の読み直しが止まらなくなるため。
+fn changes_content(ev: &notify::Event) -> bool {
+    use notify::EventKind;
+    use notify::event::{AccessKind, AccessMode};
+    match ev.kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
+    }
+}
+
 fn worker(
     root: PathBuf,
     mut dirs: HashSet<PathBuf>,
@@ -127,7 +139,7 @@ fn worker(
         if let Some((_, erx)) = &extra {
             events.extend(erx.try_iter());
         }
-        for ev in events.into_iter().filter_map(Result::ok) {
+        for ev in events.into_iter().filter_map(Result::ok).filter(changes_content) {
             for path in ev.paths {
                 let Ok(rel) = path.strip_prefix(&root) else { continue };
                 if rel.starts_with(".git") {
@@ -236,6 +248,23 @@ mod tests {
         let names = changed(&got);
         assert!(names.contains(&"b.rs".to_string()), "{got:?}");
         assert!(!names.iter().any(|n| n.starts_with("target")), "{got:?}");
+    }
+
+    #[test]
+    fn reading_files_is_not_reported() {
+        // git status はファイルと .git/index を読む。読んだだけで知らせると、状態の読み直しが止まらなくなる。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git").join("index"), "i").unwrap();
+        std::fs::write(dir.path().join("a.rs"), "x").unwrap();
+        let (_w, rx) = start(dir.path());
+        for _ in 0..3 {
+            let _ = std::fs::read(dir.path().join("a.rs")).unwrap();
+            let _ = std::fs::read(dir.path().join(".git").join("index")).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let got = wait_for(&rx, Duration::from_secs(1), |b| !b.is_empty());
+        assert!(got.is_empty(), "{got:?}");
     }
 
     #[test]
