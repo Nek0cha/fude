@@ -4,6 +4,8 @@ mod assets;
 mod hover;
 mod main_area;
 mod rail;
+mod terminal_paint;
+mod terminal_view;
 mod theme;
 mod title_row;
 mod workspace_view;
@@ -11,6 +13,7 @@ mod workspace_view;
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+use fude_core::paths::simplify_verbatim;
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
@@ -39,7 +42,7 @@ fn initial_root() -> PathBuf {
         }
         None => cwd,
     };
-    std::fs::canonicalize(&root).unwrap_or(root)
+    std::fs::canonicalize(&root).map(simplify_verbatim).unwrap_or(root)
 }
 
 fn main() {

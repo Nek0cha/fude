@@ -6,11 +6,12 @@ use std::time::Instant;
 
 use fude_core::git_head::read_branch;
 use fude_core::keymap::{Command, Platform, default_bindings};
-use fude_core::workspace::{ProjectId, ShellKind, Workspace};
+use fude_core::workspace::{PaneId, ProjectId, ShellKind, Workspace};
 use gpui_kit::*;
 
 use crate::hover::{HoverFades, HoverKey};
 use crate::main_area::render_main_area;
+use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::theme::{Theme, ui_font};
 
 gpui_kit::actions!(
@@ -61,6 +62,10 @@ pub struct WorkspaceView {
     pub(crate) hover: HoverFades,
     /// macOS でタイトル行をドラッグしてウィンドウを動かすための状態。
     pub(crate) should_move: bool,
+    /// ペインごとのターミナル。表示したときに作り、ペインが無くなったら捨てる（子プロセスも終わる）。
+    terminals: HashMap<PaneId, (Entity<TerminalView>, Subscription)>,
+    /// 最後にフォーカスを当てたペイン。選択が変わったら、新しいペインへフォーカスを移す。
+    focused_pane: Option<PaneId>,
     focus: FocusHandle,
     _activation: Subscription,
 }
@@ -80,6 +85,8 @@ impl WorkspaceView {
             branches: HashMap::new(),
             hover: HoverFades::default(),
             should_move: false,
+            terminals: HashMap::new(),
+            focused_pane: None,
             focus,
             _activation: activation,
         };
@@ -112,7 +119,7 @@ impl WorkspaceView {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
             let root = match std::fs::canonicalize(&path) {
-                Ok(root) => root,
+                Ok(root) => fude_core::paths::simplify_verbatim(root),
                 Err(err) => {
                     eprintln!("フォルダを開けない: {}: {err}", path.display());
                     return;
@@ -140,6 +147,51 @@ impl WorkspaceView {
         Rgba { a: base.a * self.hover.value(key, now), ..base }
     }
 
+    /// 選択中のタブのペインにターミナルを用意し、無くなったペインのターミナルを捨てる。
+    /// 選択中のペインが変わったら、そのターミナルにフォーカスを移す。
+    fn sync_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let alive: std::collections::HashSet<PaneId> =
+            self.workspace.projects().iter().flat_map(|p| &p.tabs).flat_map(|t| &t.panes).map(|p| p.id).collect();
+        self.terminals.retain(|id, _| alive.contains(id));
+
+        let Some(project) = self.workspace.active_project() else { return };
+        let root = project.root.clone();
+        let Some(tab) = project.active_tab() else {
+            self.focused_pane = None;
+            return;
+        };
+        let panes: Vec<(PaneId, ShellKind)> = tab.panes.iter().map(|p| (p.id, p.kind.clone())).collect();
+        let target = tab.panes[tab.focused].id;
+        for (id, kind) in panes {
+            if self.terminals.contains_key(&id) {
+                continue;
+            }
+            let view = cx.new(|cx| TerminalView::new(&kind, &root, window, cx));
+            let sub = cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
+                match event {
+                    TerminalEvent::Title(title) => this.workspace.set_pane_title(id, title.clone()),
+                    TerminalEvent::Exited { success: true } => {
+                        this.workspace.close_pane(id);
+                    }
+                    TerminalEvent::Exited { success: false } => {}
+                    TerminalEvent::Focused => {
+                        this.workspace.focus_pane(id);
+                        this.focused_pane = Some(id);
+                    }
+                }
+                cx.notify();
+            });
+            self.terminals.insert(id, (view, sub));
+        }
+        if self.focused_pane != Some(target)
+            && let Some((view, _)) = self.terminals.get(&target)
+        {
+            self.focused_pane = Some(target);
+            let handle = view.read(cx).focus_handle();
+            window.focus(&handle, cx);
+        }
+    }
+
     fn activate_project_at(&mut self, index: usize, cx: &mut Context<Self>) {
         self.workspace.activate_project_at(index);
         self.refresh_active_branch();
@@ -158,8 +210,10 @@ impl Render for WorkspaceView {
         }
         let theme = *cx.global::<Theme>();
         let (bg, fg) = (theme.bg_window, theme.fg_default);
+        self.sync_terminals(window, cx);
         let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
-        let main = render_main_area(active_tab, cx);
+        let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
+        let main = render_main_area(active_tab, &terminals, cx);
         let title_row = self.render_title_row(window, cx, now);
         let rail = self.render_rail(cx, now);
 

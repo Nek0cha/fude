@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 gpui-kit = "0.9.1"
 fude-core = { path = "../fude-core" }
+fude-term = { path = "../fude-term" }
+futures = "0.3"
