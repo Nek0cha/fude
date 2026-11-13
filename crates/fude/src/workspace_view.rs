@@ -222,6 +222,10 @@ pub struct WorkspaceView {
     pub(crate) changes_menu: Option<(ProjectId, crate::popup::Popup)>,
     /// プロジェクトごとの右パネル。
     pub(crate) panels: HashMap<ProjectId, crate::right_panel::PanelSlot>,
+    /// 右パネルの出入りとエディタの移動の動き。
+    pub(crate) panel_anim: crate::right_panel::PanelAnim,
+    /// 左パネル（ツリー）の出入り。
+    pub(crate) tree_presence: crate::anim::Presence,
     /// タブと分割の動き。
     pub(crate) anims: crate::layout_anim::LayoutAnims,
     /// OS の「動きを減らす」設定。起動時とウィンドウが前面に来たときに読む。
@@ -301,6 +305,8 @@ impl WorkspaceView {
             allow_close: false,
             reduced_motion: crate::reduced_motion::reduced_motion(),
             anims: Default::default(),
+            panel_anim: Default::default(),
+            tree_presence: crate::anim::Presence::hidden(),
             panels: HashMap::new(),
             live: HashMap::new(),
             tree: crate::tree_view::TreeState::new(cx),
@@ -663,7 +669,7 @@ impl WorkspaceView {
 
     /// ターミナルの大きさが変わる動き（分割、右パネル、エディタの移動）の途中か。
     pub(crate) fn layout_animating(&self, now: Instant) -> bool {
-        self.anims.split_animating(now)
+        self.anims.split_animating(now) || self.panel_animating(now)
     }
 
     /// 動きの間は、選択中のタブのターミナルが PTY にサイズを送らないようにする。
@@ -706,7 +712,9 @@ impl Render for WorkspaceView {
         self.sync_terminals(window, cx);
         self.sync_live(cx);
         self.anims.observe(self.workspace.active_project(), now, self.reduced_motion);
-        if self.anims.tabs_animating(now) {
+        self.observe_panel(now);
+        self.observe_tree(now);
+        if self.anims.tabs_animating(now) || self.panel_animating(now) || self.tree_presence.is_animating(now) {
             window.request_animation_frame();
         }
         self.freeze_terminals(self.layout_animating(now), cx);
@@ -731,10 +739,10 @@ impl Render for WorkspaceView {
         } else {
             let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
             let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
-            let panel = self.active_panel_view().map(AnyView::from);
             let main_w = window.viewport_size().width - crate::theme::size::RAIL_W;
+            let panel = self.panel_for_render(main_w, now);
             let share = active_tab.map_or(1.0, |t| self.anims.split_share(t.id, now));
-            render_main_area(active_tab, &terminals, panel, main_w, share, cx)
+            render_main_area(active_tab, &terminals, panel, share, cx)
         };
         let main = main.opacity(self.screen_fade.value(now));
         let tree = if home { None } else { self.render_tree(cx, now) };

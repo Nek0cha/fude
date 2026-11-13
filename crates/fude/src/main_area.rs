@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use fude_core::workspace::{PaneId, Tab};
 use gpui_kit::*;
 
-use crate::right_panel::panel_width;
 use crate::terminal_view::TerminalView;
 use crate::theme::Theme;
 
@@ -29,12 +28,11 @@ pub(crate) fn layout_for(has_tabs: bool, panel_open: bool) -> Layout {
 }
 
 /// 選択中のタブのペインを横に均等に並べ、間に 1px の線を引く。panel があれば右に置く。main_w はメイン領域の幅。
-/// split_share は左のペインの幅の割合（分割の動きの途中も含む）。
+/// split_share は左のペインの幅の割合（分割の動きの途中も含む）。panel は (ビュー, 幅, 不透明度)。
 pub fn render_main_area(
     tab: Option<&Tab>,
     terminals: &HashMap<PaneId, Entity<TerminalView>>,
-    panel: Option<AnyView>,
-    main_w: Pixels,
+    panel: Option<(AnyView, Pixels, f32)>,
     split_share: f32,
     cx: &App,
 ) -> Div {
@@ -61,14 +59,14 @@ pub fn render_main_area(
     };
     match (layout_for(tab.is_some(), panel.is_some()), tab, panel) {
         (Layout::Terminals, Some(tab), _) => div().size_full().flex().child(terminals_row(tab)),
-        (Layout::TerminalsAndPanel, Some(tab), Some(panel)) => div()
+        (Layout::TerminalsAndPanel, Some(tab), Some((panel, w, opacity))) => div()
             .size_full()
             .flex()
             .flex_row()
             .child(terminals_row(tab))
             .child(line())
-            .child(div().w(panel_width(main_w)).flex_shrink_0().h_full().child(panel)),
-        (Layout::PanelOnly, _, Some(panel)) => div().size_full().child(panel),
+            .child(div().w(w).flex_shrink_0().h_full().overflow_hidden().opacity(opacity).child(panel)),
+        (Layout::PanelOnly, _, Some((panel, _, opacity))) => div().size_full().opacity(opacity).child(panel),
         _ => div().size_full(),
     }
 }

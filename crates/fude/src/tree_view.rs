@@ -186,10 +186,23 @@ impl WorkspaceView {
         }
     }
 
-    pub(crate) fn render_tree(&mut self, cx: &mut Context<Self>, _now: Instant) -> Option<Stateful<Div>> {
-        if !self.tree.open {
+    /// 描画のたびに呼ぶ。ツリーの出入りの動きを始める。
+    pub(crate) fn observe_tree(&mut self, now: Instant) {
+        use crate::theme::motion::{PANEL_IN, PANEL_OUT};
+        let reduced = self.reduced_motion;
+        if self.tree.open && !self.tree_presence.visible() {
+            self.tree_presence.show(PANEL_IN, reduced, now);
+        } else if !self.tree.open && self.tree_presence.visible() {
+            self.tree_presence.hide(PANEL_OUT, reduced, now);
+        }
+    }
+
+    pub(crate) fn render_tree(&mut self, cx: &mut Context<Self>, now: Instant) -> Option<Stateful<Div>> {
+        // 閉じたあとも、消える動きの間は描き続ける。
+        if !self.tree.open && self.tree_presence.is_gone(now) {
             return None;
         }
+        let presence = self.tree_presence;
         let project = self.workspace.active_project()?.id;
         let theme = *cx.global::<Theme>();
         let status = self.live.get(&project).and_then(|l| l.status.clone());
@@ -299,7 +312,8 @@ impl WorkspaceView {
                 // 下のターミナルにクリックを渡さない。
                 .occlude()
                 .absolute()
-                .left(size::RAIL_W)
+                .left(size::RAIL_W - TREE_W * 0.3 * (1.0 - presence.travel(now)))
+                .opacity(presence.value(now))
                 .top(px(0.))
                 .bottom(px(8.))
                 .w(TREE_W)

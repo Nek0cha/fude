@@ -22,6 +22,34 @@ pub(crate) fn panel_width(main_w: Pixels) -> Pixels {
     (main_w * 0.45).clamp(px(420.), px(900.))
 }
 
+/// 右パネルの幅。share は 1.0 でメイン領域の全体（ターミナルが 0 枚）、0.0 で panel_width（並べた形）。
+/// その間は線形に補う（エディタの移動の動き。設計書 §6.3）。
+pub(crate) fn panel_target_width(share: f32, main_w: Pixels) -> Pixels {
+    let narrow = panel_width(main_w);
+    narrow + (main_w - narrow) * share.clamp(0.0, 1.0)
+}
+
+/// 右パネルの出入りと、エディタの移動の動き（選択中のプロジェクトのもの）。
+pub(crate) struct PanelAnim {
+    pub presence: crate::anim::Presence,
+    /// 1.0 = メイン領域の全体、0.0 = 並べた幅。
+    pub share: fude_core::motion::Fade,
+    pub project: Option<ProjectId>,
+    /// 閉じて、消える動きの間だけ描き続けるビュー。
+    pub closing: Option<Entity<FileView>>,
+}
+
+impl Default for PanelAnim {
+    fn default() -> Self {
+        PanelAnim {
+            presence: crate::anim::Presence::hidden(),
+            share: fude_core::motion::Fade::settled(0.0),
+            project: None,
+            closing: None,
+        }
+    }
+}
+
 /// プロジェクトごとの右パネルの状態。
 #[derive(Default)]
 pub(crate) struct PanelSlot {
@@ -47,6 +75,49 @@ enum Replace {
 }
 
 impl WorkspaceView {
+    /// 描画のたびに呼ぶ。右パネルの出入りと、ターミナルの有無によるエディタの移動の動きを始める。
+    pub(crate) fn observe_panel(&mut self, now: std::time::Instant) {
+        use crate::theme::motion::{EDITOR_MOVE, PANEL_IN, PANEL_OUT, ease_out_quint};
+        let project = self.workspace.active_project().map(|p| p.id);
+        let has_tabs = self.workspace.active_project().is_some_and(|p| !p.tabs.is_empty());
+        let open = self.panel_open();
+        let reduced = self.reduced_motion;
+        let target = if has_tabs { 0.0 } else { 1.0 };
+        let a = &mut self.panel_anim;
+        if a.project != project {
+            // プロジェクトを切り替えたときは動かさない。
+            a.project = project;
+            a.presence = if open { crate::anim::Presence::shown() } else { crate::anim::Presence::hidden() };
+            a.share = fude_core::motion::Fade::settled(target);
+            a.closing = None;
+            return;
+        }
+        if open && !a.presence.visible() {
+            a.closing = None;
+            a.presence.show(PANEL_IN, reduced, now);
+        } else if !open && a.presence.visible() {
+            a.presence.hide(PANEL_OUT, reduced, now);
+        }
+        if a.presence.is_gone(now) {
+            a.closing = None;
+        }
+        let duration = if reduced || !open { std::time::Duration::ZERO } else { EDITOR_MOVE };
+        a.share.animate_to(target, duration, ease_out_quint, now);
+    }
+
+    /// 右パネルとエディタの移動が動いている（ターミナルの大きさが変わる）。
+    pub(crate) fn panel_animating(&self, now: std::time::Instant) -> bool {
+        self.panel_anim.presence.is_animating(now) || self.panel_anim.share.is_animating(now)
+    }
+
+    /// メイン領域に描く右パネルのビュー、幅、不透明度。
+    pub(crate) fn panel_for_render(&self, main_w: Pixels, now: std::time::Instant) -> Option<(AnyView, Pixels, f32)> {
+        let view = self.active_panel_view().or_else(|| self.panel_anim.closing.clone())?;
+        let p = &self.panel_anim.presence;
+        let w = panel_target_width(self.panel_anim.share.value(now), main_w) * p.travel(now);
+        Some((AnyView::from(view), w, p.value(now)))
+    }
+
     /// 選択中のプロジェクトの右パネルが開いているか。
     pub(crate) fn panel_open(&self) -> bool {
         self.workspace.active_project().and_then(|p| self.panels.get(&p.id)).is_some_and(PanelSlot::is_open)
@@ -105,7 +176,8 @@ impl WorkspaceView {
         let Some(project) = self.workspace.active_project().map(|p| p.id) else { return };
         self.confirm_leave(project, None, window, cx, move |this, window, cx| {
             if let Some(slot) = this.panels.get_mut(&project) {
-                slot.view = None;
+                // 消える動きの間だけ描き続ける。
+                this.panel_anim.closing = slot.view.take();
                 slot.loading = None;
                 slot._sub = None;
             }
@@ -235,6 +307,14 @@ impl WorkspaceView {
 mod tests {
     use super::panel_width;
     use gpui_kit::px;
+
+    #[test]
+    fn panel_target_width_lerps_between_panel_and_full() {
+        use super::panel_target_width;
+        assert_eq!(panel_target_width(1.0, px(1200.)), px(1200.));
+        assert_eq!(panel_target_width(0.0, px(1200.)), px(540.));
+        assert_eq!(panel_target_width(0.5, px(1200.)), px(870.));
+    }
 
     #[test]
     fn panel_width_rules() {
