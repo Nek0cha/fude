@@ -23,39 +23,19 @@ impl ProjectRoot {
     /// `\\wsl.localhost\<distro>\…` と `\\wsl$\<distro>\…`（ホスト名の大文字小文字は問わない）は Wsl。
     /// ただし `\mnt\<英字 1 文字>\…` の下は Local(`<英字の大文字>:\…`)。それ以外は Local。
     pub fn from_host_path(path: PathBuf) -> ProjectRoot {
-        let Some(text) = path.to_str() else { return ProjectRoot::Local(path) };
-        let Some(rest) = text.strip_prefix(r"\\") else { return ProjectRoot::Local(path) };
-        let mut parts = rest.split('\\').filter(|s| !s.is_empty());
-        let (Some(host), Some(distro)) = (parts.next(), parts.next()) else { return ProjectRoot::Local(path) };
-        if !WSL_HOSTS.iter().any(|h| h.eq_ignore_ascii_case(host)) {
-            return ProjectRoot::Local(path);
+        match parse_host_path(path) {
+            Place::Local(p) => ProjectRoot::Local(p),
+            Place::Wsl { distro, path } => ProjectRoot::Wsl { distro, path },
         }
-        let segments: Vec<&str> = parts.collect();
-        if let ["mnt", drive, tail @ ..] = segments.as_slice()
-            && drive.len() == 1
-            && drive.as_bytes()[0].is_ascii_alphabetic()
-        {
-            let mut local = format!("{}:\\", drive.to_ascii_uppercase());
-            local.push_str(&tail.join("\\"));
-            return ProjectRoot::Local(PathBuf::from(local));
-        }
-        let path = format!("/{}", segments.join("/"));
-        ProjectRoot::Wsl { distro: distro.to_string(), path }
     }
 
     /// WSL の中の絶対パスから作る。`/mnt/<英字 1 文字>` とその下は Local(`<大文字>:\…`)、それ以外は Wsl。
     /// 末尾の "/" は除く（"/" だけはそのまま）。
     pub fn from_wsl_path(distro: &str, path: &str) -> ProjectRoot {
-        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        if let ["mnt", drive, tail @ ..] = segments.as_slice()
-            && drive.len() == 1
-            && drive.as_bytes()[0].is_ascii_alphabetic()
-        {
-            let mut local = format!("{}:\\", drive.to_ascii_uppercase());
-            local.push_str(&tail.join("\\"));
-            return ProjectRoot::Local(PathBuf::from(local));
+        match parse_wsl_path(distro, path) {
+            Place::Local(p) => ProjectRoot::Local(p),
+            Place::Wsl { distro, path } => ProjectRoot::Wsl { distro, path },
         }
-        ProjectRoot::Wsl { distro: distro.to_string(), path: format!("/{}", segments.join("/")) }
     }
 
     /// このプロセスから開けるパス。Wsl は `\\wsl.localhost\<distro>\<path の / を \ にしたもの>`。
@@ -114,6 +94,104 @@ impl ProjectRoot {
             ProjectRoot::Wsl { .. } => None,
         }
     }
+}
+
+/// パスを分けた結果。ProjectRoot と FileLocation で同じ規則を使うため。
+enum Place {
+    Local(PathBuf),
+    Wsl { distro: String, path: String },
+}
+
+fn parse_host_path(path: PathBuf) -> Place {
+    let Some(text) = path.to_str() else { return Place::Local(path) };
+    let Some(rest) = text.strip_prefix(r"\\") else { return Place::Local(path) };
+    let mut parts = rest.split('\\').filter(|s| !s.is_empty());
+    let (Some(host), Some(distro)) = (parts.next(), parts.next()) else { return Place::Local(path) };
+    if !WSL_HOSTS.iter().any(|h| h.eq_ignore_ascii_case(host)) {
+        return Place::Local(path);
+    }
+    let segments: Vec<&str> = parts.collect();
+    from_segments(distro, &segments)
+}
+
+fn parse_wsl_path(distro: &str, path: &str) -> Place {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    from_segments(distro, &segments)
+}
+
+/// WSL の中の要素の並びから。`mnt/<英字 1 文字>/…` は Windows のドライブ。
+fn from_segments(distro: &str, segments: &[&str]) -> Place {
+    if let ["mnt", drive, tail @ ..] = segments
+        && drive.len() == 1
+        && drive.as_bytes()[0].is_ascii_alphabetic()
+    {
+        let mut local = format!("{}:\\", drive.to_ascii_uppercase());
+        local.push_str(&tail.join("\\"));
+        return Place::Local(PathBuf::from(local));
+    }
+    Place::Wsl { distro: distro.to_string(), path: format!("/{}", segments.join("/")) }
+}
+
+/// 開くファイルの場所。このマシンのファイルか、WSL のファイルか。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileLocation {
+    Local(PathBuf),
+    /// path は Linux の絶対パス。
+    Wsl { distro: String, path: String },
+}
+
+impl FileLocation {
+    /// ProjectRoot::from_host_path と同じ規則。
+    pub fn from_host_path(path: PathBuf) -> FileLocation {
+        match parse_host_path(path) {
+            Place::Local(p) => FileLocation::Local(p),
+            Place::Wsl { distro, path } => FileLocation::Wsl { distro, path },
+        }
+    }
+
+    /// ProjectRoot::from_wsl_path と同じ規則。
+    pub fn from_wsl_path(distro: &str, path: &str) -> FileLocation {
+        match parse_wsl_path(distro, path) {
+            Place::Local(p) => FileLocation::Local(p),
+            Place::Wsl { distro, path } => FileLocation::Wsl { distro, path },
+        }
+    }
+
+    /// root の中なら、root からの相対パス（"/" 区切り。root 自身は ""）。要素ごとに比べる。
+    /// Windows の Local は大文字小文字を区別しない。WSL はディストリビューション名だけ区別しない。
+    pub fn rel_within(&self, root: &ProjectRoot) -> Option<String> {
+        match (self, root) {
+            (FileLocation::Local(file), ProjectRoot::Local(dir)) => {
+                let file: Vec<String> = file.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                let dir: Vec<String> = dir.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                let same = |a: &String, b: &String| if cfg!(windows) { a.eq_ignore_ascii_case(b) } else { a == b };
+                if file.len() < dir.len() || !dir.iter().zip(&file).all(|(d, f)| same(d, f)) {
+                    return None;
+                }
+                Some(file[dir.len()..].join("/"))
+            }
+            (FileLocation::Wsl { distro: a, path: file }, ProjectRoot::Wsl { distro: b, path: dir }) => {
+                if !a.eq_ignore_ascii_case(b) {
+                    return None;
+                }
+                let file: Vec<&str> = file.split('/').filter(|s| !s.is_empty()).collect();
+                let dir: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+                if file.len() < dir.len() || dir.iter().zip(&file).any(|(d, f)| d != f) {
+                    return None;
+                }
+                Some(file[dir.len()..].join("/"))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// ファイルの親から上へたどり、has_git_marker(dir) が真の最初の dir。無ければファイルの親。
+/// has_git_marker は `.git`（ディレクトリかファイル）の有無を調べる関数を渡す。
+pub fn find_project_root(file: &Path, has_git_marker: &dyn Fn(&Path) -> bool) -> PathBuf {
+    let parent = file.parent().unwrap_or(file);
+    parent.ancestors().find(|d| has_git_marker(d)).unwrap_or(parent).to_path_buf()
 }
 
 #[cfg(test)]
@@ -196,5 +274,58 @@ mod tests {
         let l = ProjectRoot::Local(PathBuf::from(r"C:\w"));
         assert_eq!(l.default_shell(), ShellKind::Native);
         assert_eq!(l.copy_text(), r"C:\w");
+    }
+
+    fn local(p: &str) -> ProjectRoot {
+        ProjectRoot::Local(PathBuf::from(p))
+    }
+
+    #[test]
+    fn find_project_root_prefers_nearest_git() {
+        let marks = ["/w/repo", "/w/repo/sub"];
+        let has = |d: &Path| marks.iter().any(|m| Path::new(m) == d);
+        assert_eq!(find_project_root(Path::new("/w/repo/sub/src/a.rs"), &has), Path::new("/w/repo/sub"));
+        assert_eq!(find_project_root(Path::new("/w/repo/b.rs"), &has), Path::new("/w/repo"));
+        assert_eq!(find_project_root(Path::new("/tmp/notes/x.md"), &has), Path::new("/tmp/notes"));
+    }
+
+    #[test]
+    fn rel_within_rules() {
+        let f = FileLocation::Wsl { distro: "Ubuntu".into(), path: "/home/x/p/src/a.rs".into() };
+        assert_eq!(f.rel_within(&wsl("ubuntu", "/home/x/p")), Some("src/a.rs".into()));
+        assert_eq!(f.rel_within(&wsl("Ubuntu", "/home/x/pp")), None);
+        assert_eq!(f.rel_within(&wsl("Ubuntu", "/home/x/p/src/a.rs")), Some(String::new()));
+        assert_eq!(f.rel_within(&wsl("Ubuntu", "/")), Some("home/x/p/src/a.rs".into()));
+        assert_eq!(f.rel_within(&local("/home/x/p")), None);
+        let l = FileLocation::Local(PathBuf::from("/w/a/b.rs"));
+        assert_eq!(l.rel_within(&local("/w/a")), Some("b.rs".into()));
+        assert_eq!(l.rel_within(&local("/w/ab")), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rel_within_windows_ignores_case() {
+        let f = FileLocation::Local(PathBuf::from(r"C:\Work\App\src\main.rs"));
+        assert_eq!(f.rel_within(&local(r"c:\work\app")), Some("src/main.rs".into()));
+    }
+
+    #[test]
+    fn file_location_from_paths() {
+        assert_eq!(
+            FileLocation::from_host_path(PathBuf::from(r"\\wsl.localhost\Ubuntu\mnt\c\w\a.rs")),
+            FileLocation::Local(PathBuf::from(r"C:\w\a.rs"))
+        );
+        assert_eq!(
+            FileLocation::from_host_path(PathBuf::from(r"\\wsl$\Ubuntu\home\x\a.rs")),
+            FileLocation::Wsl { distro: "Ubuntu".into(), path: "/home/x/a.rs".into() }
+        );
+        assert_eq!(
+            FileLocation::from_wsl_path("Ubuntu", "/mnt/d/x/y.md"),
+            FileLocation::Local(PathBuf::from(r"D:\x\y.md"))
+        );
+        assert_eq!(
+            FileLocation::from_wsl_path("Ubuntu", "/home/x/y.md"),
+            FileLocation::Wsl { distro: "Ubuntu".into(), path: "/home/x/y.md".into() }
+        );
     }
 }
