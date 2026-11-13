@@ -23,7 +23,8 @@ pub(crate) fn needs_deploy(installed: Option<&str>, bundled: &str) -> bool {
 /// 確かめに失敗したら覚えず、次に使うときにやり直す。
 pub(crate) struct WslHosts {
     #[cfg(windows)]
-    clients: std::sync::Mutex<std::collections::HashMap<String, Arc<fude_fs::RemoteClient>>>,
+    /// ディストリビューション（小文字）ごとの枠。版の確認と配置は枠の中だけを止め、ほかのディストリビューションを待たせない。
+    clients: std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<Option<Arc<fude_fs::RemoteClient>>>>>>,
     /// WSL 側の置き場所（FUDE_WSL_BIN_DIR で変えられる）。
     #[cfg(windows)]
     bin: String,
@@ -49,9 +50,12 @@ mod imp {
 
         /// 裏のスレッドから呼ぶ（WSL の起動を待つことがある）。LINUX_BIN が None なら Err（同梱されていない）。
         pub fn client(&self, distro: &str) -> io::Result<Arc<RemoteClient>> {
-            let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
-            let key = distro.to_ascii_lowercase();
-            if let Some(client) = clients.get(&key) {
+            let slot = {
+                let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+                clients.entry(distro.to_ascii_lowercase()).or_default().clone()
+            };
+            let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(client) = slot.as_ref() {
                 return Ok(client.clone());
             }
             let (bytes, bundled) = bundled::LINUX_BIN.ok_or_else(|| {
@@ -63,7 +67,7 @@ mod imp {
             }
             let connector = WslConnector { distro: distro.to_string(), bin: self.bin.clone() };
             let client = Arc::new(RemoteClient::new(Box::new(connector), TIMEOUT).with_first_timeout(FIRST_TIMEOUT));
-            clients.insert(key, client.clone());
+            *slot = Some(client.clone());
             Ok(client)
         }
     }
