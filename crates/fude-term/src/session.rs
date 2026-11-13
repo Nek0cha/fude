@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use alacritty_terminal::sync::FairMutex;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::shell::SpawnSpec;
@@ -37,7 +38,8 @@ pub enum SessionEvent {
 type OnEvent = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 
 pub struct Session {
-    state: Arc<Mutex<TermState>>,
+    /// 読み取りスレッドが取り直し続けても UI の描画が待たされないよう、順番待ちが公平なロックを使う。
+    state: Arc<FairMutex<TermState>>,
     writer: Sender<Vec<u8>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
@@ -63,7 +65,7 @@ impl Session {
         let mut reader = pair.master.try_clone_reader().map_err(|e| fail("読み取り", &e))?;
         let mut pty_writer = pair.master.take_writer().map_err(|e| fail("書き込み", &e))?;
 
-        let state = Arc::new(Mutex::new(TermState::new(size, SCROLLBACK)));
+        let state = Arc::new(FairMutex::new(TermState::new(size, SCROLLBACK)));
         let (writer, writes) = mpsc::channel::<Vec<u8>>();
 
         thread::Builder::new().name("fude-pty-write".into()).spawn(move || {
@@ -87,7 +89,7 @@ impl Session {
                         Ok(n) => n,
                     };
                     let events = {
-                        let mut st = state.lock().expect("端末の状態のロック");
+                        let mut st = state.lock();
                         st.advance(&buf[..n]);
                         st.take_events()
                     };
@@ -137,7 +139,7 @@ impl Session {
     }
 
     pub fn with_state<R>(&self, f: impl FnOnce(&mut TermState) -> R) -> R {
-        f(&mut self.state.lock().expect("端末の状態のロック"))
+        f(&mut self.state.lock())
     }
 }
 
