@@ -193,7 +193,11 @@ impl WorkspaceView {
         let Some(project) = self.workspace.active_project() else { return };
         let root = project.root.clone();
         let Some(tab) = project.active_tab() else {
-            self.focused_pane = None;
+            // 最後のタブを閉じると、フォーカスしていたビューが無くなる。そのままだと、次に作った
+            // タブのターミナルへフォーカスが移らないため、ワークスペース自身に戻しておく。
+            if self.focused_pane.take().is_some() {
+                window.focus(&self.focus, cx);
+            }
             return;
         };
         let panes: Vec<(PaneId, ShellKind)> = tab.panes.iter().map(|p| (p.id, p.kind.clone())).collect();
