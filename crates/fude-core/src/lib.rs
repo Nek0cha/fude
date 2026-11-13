@@ -4,5 +4,7 @@ pub mod keys;
 pub mod location;
 pub mod motion;
 pub mod paths;
+pub mod recent;
 pub mod session;
+pub mod settings;
 pub mod workspace;

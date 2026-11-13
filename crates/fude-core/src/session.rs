@@ -109,13 +109,18 @@ impl Workspace {
 /// Windows: %APPDATA%\fude\session.json。macOS: $HOME/.config/fude/session.json（設定ファイルと同じ場所）。
 /// FUDE_INSTANCE=x のときは session-x.json。環境変数が無ければ None。
 pub fn session_path(os: Platform, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    data_file(os, env, "session")
+}
+
+/// fude のデータのディレクトリの `<stem>.json`（FUDE_INSTANCE=x なら `<stem>-x.json`）。
+pub(crate) fn data_file(os: Platform, env: &dyn Fn(&str) -> Option<String>, stem: &str) -> Option<PathBuf> {
     let dir = match os {
         Platform::Windows => PathBuf::from(env("APPDATA").filter(|v| !v.is_empty())?).join("fude"),
         Platform::MacOs => PathBuf::from(env("HOME").filter(|v| !v.is_empty())?).join(".config").join("fude"),
     };
     let name = match env("FUDE_INSTANCE").filter(|v| !v.is_empty()) {
-        Some(instance) => format!("session-{instance}.json"),
-        None => "session.json".to_string(),
+        Some(instance) => format!("{stem}-{instance}.json"),
+        None => format!("{stem}.json"),
     };
     Some(dir.join(name))
 }
@@ -130,15 +135,20 @@ pub fn load(path: &Path) -> Option<SessionData> {
     data
 }
 
-/// 親のディレクトリを作り、同じ場所の `<name>.tmp` に書いてから rename する。
+/// セッションを書く。
 pub fn save(path: &Path, data: &SessionData) -> io::Result<()> {
+    write_atomic(path, &data.to_json())
+}
+
+/// 親のディレクトリを作り、同じ場所の `<name>.tmp` に書いてから rename する。
+pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, data.to_json())?;
+    std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path)
 }
 
