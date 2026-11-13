@@ -17,7 +17,7 @@ pub struct Theme {
     pub accent: Rgba,
     pub warn: Rgba,
     pub danger: Rgba,
-    /// Windows の閉じるボタンのホバー。OS の慣習に合わせる。
+    /// Windows の閉じるボタンのホバー。danger の色を薄く重ねる（OS 標準の濃い赤は強すぎるため）。
     pub window_close_hover: Rgba,
     /// プロジェクトのアイコンの色。明度と彩度を揃えた 6 色。
     pub project_colors: [Rgba; 6],
@@ -35,7 +35,7 @@ impl Theme {
             accent: rgb(0xb9a8ff),
             warn: rgb(0xffd28a),
             danger: rgb(0xff8a8a),
-            window_close_hover: rgb(0xc42b1c),
+            window_close_hover: rgba(0xff8a8a38),
             project_colors: [
                 rgba(0x8fa7ff47),
                 rgba(0x7fd1c747),
