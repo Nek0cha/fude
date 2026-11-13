@@ -106,9 +106,9 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// 監視の通知。開いているファイルが変わっていれば読み直させ、Git の状態を読み直す。
+    /// 監視の通知。開いているファイル（選んでいないタブも含む）が変わっていれば読み直させ、Git の状態を読み直す。
     fn on_watch(&mut self, project: ProjectId, batch: WatchBatch, cx: &mut Context<Self>) {
-        if let Some(view) = self.panels.get(&project).and_then(|s| s.view.clone()) {
+        for view in self.project_views(project) {
             let rel = view.read(cx).rel.clone();
             if batch.changed.iter().any(|p| p.as_str() == rel) {
                 view.update(cx, |v, cx| v.on_external_change(cx));
@@ -148,12 +148,13 @@ impl WorkspaceView {
         }
     }
 
-    /// 開いているファイルに、新しい Git の記号を渡す。
+    /// 開いているファイル（選んでいないタブも含む）に、新しい Git の記号を渡す。
     fn apply_marks(&mut self, project: ProjectId, cx: &mut Context<Self>) {
-        let Some(view) = self.panels.get(&project).and_then(|s| s.view.clone()) else { return };
-        let rel = view.read(cx).rel.clone();
-        let mark = self.git_mark(project, &rel);
-        view.update(cx, |v, cx| v.set_mark(mark, cx));
+        for view in self.project_views(project) {
+            let rel = view.read(cx).rel.clone();
+            let mark = self.git_mark(project, &rel);
+            view.update(cx, |v, cx| v.set_mark(mark, cx));
+        }
     }
 
     /// project の Git の記号。

@@ -115,7 +115,7 @@ impl WorkspaceView {
                             return;
                         }
                         this.close_changes_menu(window, cx);
-                        this.open_in_panel(project, rel.clone(), Some(initial_mode(Some(mark))), window, cx);
+                        this.open_in_editor(project, rel.clone(), Some(initial_mode(Some(mark))), None, window, cx);
                     }))
                     .into_any_element()
             })

@@ -231,13 +231,13 @@ impl WorkspaceView {
                         return;
                     }
                     if kind == EditKind::Rename {
-                        this.panel_renamed(project, target.as_str(), dest.as_str(), cx);
+                        this.editor_renamed(project, target.as_str(), dest.as_str(), cx);
                     }
                     // 作り先のフォルダを開いて読み直す（監視の通知を待たない）。
                     this.tree.models.entry(project).or_default().expand(&parent);
                     this.load_tree_dir(project, parent.clone(), cx);
                     if kind == EditKind::NewFile {
-                        this.open_in_panel(project, dest.as_str().to_string(), None, window, cx);
+                        this.open_in_editor(project, dest.as_str().to_string(), None, None, window, cx);
                     }
                 })
                 .ok();

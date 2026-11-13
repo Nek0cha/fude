@@ -211,7 +211,6 @@ pub struct WorkspaceView {
     /// ホーム画面で薄く出す（フォルダが見つからない）プロジェクト。
     pub(crate) missing_roots: HashSet<ProjectRoot>,
     /// 右パネルに開いたあとで、カーソルを置く位置（プロジェクト、1 始まりの行と列）。
-    pub(crate) pending_goto: Option<(ProjectId, u32, Option<u32>)>,
     /// ファイルツリー（左パネル）。
     pub(crate) tree: crate::tree_view::TreeState,
     /// プロジェクトごとの ProjectFs、監視、Git の状態。
@@ -219,9 +218,9 @@ pub struct WorkspaceView {
     /// 変更したファイルの一覧（「● N」を押すと出る）。
     pub(crate) changes_menu: Option<(ProjectId, crate::popup::Popup)>,
     /// プロジェクトごとの右パネル。
-    pub(crate) panels: HashMap<ProjectId, crate::right_panel::PanelSlot>,
+    pub(crate) editors: HashMap<ProjectId, crate::editor_column::EditorSlot>,
     /// 右パネルの出入りとエディタの移動の動き。
-    pub(crate) panel_anim: crate::right_panel::PanelAnim,
+    pub(crate) panel_anim: crate::editor_column::PanelAnim,
     /// 左パネル（ツリー）の出入り。
     pub(crate) tree_presence: crate::anim::Presence,
     /// タブと分割の動き。
@@ -305,11 +304,10 @@ impl WorkspaceView {
             anims: Default::default(),
             panel_anim: Default::default(),
             tree_presence: crate::anim::Presence::hidden(),
-            panels: HashMap::new(),
+            editors: HashMap::new(),
             live: HashMap::new(),
             tree: crate::tree_view::TreeState::new(cx),
             changes_menu: None,
-            pending_goto: None,
             screen_fade: Fade::settled(1.0),
             showing_home: None,
             saved: None,
@@ -364,11 +362,10 @@ impl WorkspaceView {
             self.recent.touch(root, now);
         }
         self.save_recent(cx);
-        // 開いていたファイルを右パネルに開き直す。
-        let files: Vec<(ProjectId, String)> =
-            self.workspace.projects().iter().filter_map(|p| p.editor.active().map(|f| (p.id, f.rel.clone()))).collect();
-        for (project, rel) in files {
-            self.open_in_panel(project, rel, None, window, cx);
+        // 戻したタブは、選ばれているものだけビューを作る（残りは選んだときに作る）。
+        let projects: Vec<ProjectId> = self.workspace.projects().iter().map(|p| p.id).collect();
+        for project in projects {
+            self.show_active_tab(project, window, cx);
         }
         self.refocus_pane();
         self.refresh_active_branch(cx);
@@ -408,7 +405,7 @@ impl WorkspaceView {
         let has_pane = self.workspace.active_project().and_then(|p| p.active_tab()).is_some();
         if has_pane {
             self.refocus_pane();
-        } else if let Some(view) = self.active_panel_view() {
+        } else if let Some(view) = self.active_editor_view() {
             self.focused_pane = None;
             let focus = view.read(cx).focus_handle();
             window.focus(&focus, cx);
@@ -593,7 +590,7 @@ impl WorkspaceView {
             // 最後のタブを閉じると、フォーカスしていたビューが無くなる。そのままだと、次に作った
             // タブのターミナルへフォーカスが移らないため、右パネル（無ければワークスペース自身）に戻しておく。
             if self.focused_pane.take().is_some() || lost {
-                match self.active_panel_view() {
+                match self.active_editor_view() {
                     Some(view) => {
                         let focus = view.read(cx).focus_handle();
                         window.focus(&focus, cx);

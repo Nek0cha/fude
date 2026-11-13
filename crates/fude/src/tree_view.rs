@@ -182,7 +182,7 @@ impl WorkspaceView {
             }
             cx.notify();
         } else {
-            self.open_in_panel(project, row.rel.as_str().to_string(), None, window, cx);
+            self.open_in_editor(project, row.rel.as_str().to_string(), None, None, window, cx);
         }
     }
 

@@ -64,7 +64,7 @@ impl WorkspaceView {
             OpenPlan::Existing { project, rel } => {
                 self.workspace.activate_project(project);
                 self.refresh_active_branch(cx);
-                self.open_in_panel_at(project, rel, at, window, cx);
+                self.open_at(project, rel, at, window, cx);
             }
             OpenPlan::New { root, rel } => self.open_file_in_new_project(root, rel, at, window, cx),
             OpenPlan::FindRemoteRoot { distro, file: path } => {
@@ -102,10 +102,10 @@ impl WorkspaceView {
         self.touch_recent(&root, cx);
         let project = self.workspace.open_project_with(root, None, OpenMode::EditorOnly);
         self.refresh_active_branch(cx);
-        self.open_in_panel_at(project, rel, at, window, cx);
+        self.open_at(project, rel, at, window, cx);
     }
 
-    fn open_in_panel_at(
+    fn open_at(
         &mut self,
         project: ProjectId,
         rel: String,
@@ -113,12 +113,9 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 行を指定したら、全体の表示で開く。
         let mode = at.map(|_| fude_core::panel::FileMode::Full);
-        // 開き直し（同じファイル）は open_in_panel の中ですぐ行を移すため、先に入れておく。
-        if let Some((line, col)) = at {
-            self.pending_goto = Some((project, line, col));
-        }
-        self.open_in_panel(project, rel, mode, window, cx);
+        self.open_in_editor(project, rel, mode, at, window, cx);
     }
 
     #[cfg(windows)]
