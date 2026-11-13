@@ -4,6 +4,7 @@ mod assets;
 mod hover;
 mod main_area;
 mod rail;
+mod shell_menu;
 mod terminal_paint;
 mod terminal_view;
 mod theme;

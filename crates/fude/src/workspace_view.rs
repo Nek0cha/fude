@@ -11,6 +11,7 @@ use gpui_kit::*;
 
 use crate::hover::{HoverFades, HoverKey};
 use crate::main_area::render_main_area;
+use crate::shell_menu::ShellMenu;
 use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::theme::{Theme, ui_font};
 
@@ -70,6 +71,10 @@ pub struct WorkspaceView {
     terminals: HashMap<PaneId, (Entity<TerminalView>, Subscription)>,
     /// 最後にフォーカスを当てたペイン。選択が変わったら、新しいペインへフォーカスを移す。
     focused_pane: Option<PaneId>,
+    /// ＋の右クリックメニュー。
+    pub(crate) shell_menu: Option<ShellMenu>,
+    /// インストール済みの WSL のディストリビューション。起動時に 1 回だけ読む。
+    pub(crate) distros: Vec<String>,
     focus: FocusHandle,
     _activation: Subscription,
 }
@@ -91,11 +96,38 @@ impl WorkspaceView {
             should_move: false,
             terminals: HashMap::new(),
             focused_pane: None,
+            shell_menu: None,
+            distros: Vec::new(),
             focus,
             _activation: activation,
         };
         this.open_project(initial_root);
+        this.load_distros(cx);
         this
+    }
+
+    fn load_distros(&self, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async { fude_term::list_distros() });
+        cx.spawn(async move |this, cx| {
+            let distros = match task.await {
+                Ok(d) => d,
+                Err(err) => {
+                    eprintln!("WSL のディストリビューションを読めない: {err}");
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.distros = distros;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 次の描画で、選択中のペインへフォーカスを当て直す。
+    pub(crate) fn refocus_pane(&mut self) {
+        self.focused_pane = None;
     }
 
     /// root は正規化済みとする。
@@ -220,6 +252,7 @@ impl Render for WorkspaceView {
         let main = render_main_area(active_tab, &terminals, cx);
         let title_row = self.render_title_row(window, cx, now);
         let rail = self.render_rail(cx, now);
+        let menu = self.render_shell_menu(window, cx, now);
 
         div()
             .id("workspace")
@@ -266,5 +299,6 @@ impl Render for WorkspaceView {
                     .child(rail)
                     .child(div().flex_1().min_w_0().h_full().child(main)),
             )
+            .children(menu)
     }
 }

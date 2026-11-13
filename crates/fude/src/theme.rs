@@ -2,7 +2,7 @@
 //! 描画コードには色や寸法の値を直接書かず、ここを通す。
 
 use fude_term::Palette;
-use gpui_kit::{Font, FontFallbacks, Global, Rgba, font, rgb, rgba};
+use gpui_kit::{BoxShadow, Font, FontFallbacks, Global, Rgba, font, hsla, point, px, rgb, rgba};
 
 pub const MONO_FAMILY: &str = "HackGen Console NF";
 
@@ -95,6 +95,19 @@ pub mod motion {
     pub fn ease_out(t: f32) -> f32 {
         1.0 - (1.0 - t) * (1.0 - t)
     }
+
+    /// ポップアップ（メニュー）の出るときと消えるとき。
+    pub const POPUP_IN: Duration = Duration::from_millis(120);
+    pub const POPUP_OUT: Duration = Duration::from_millis(80);
+
+    pub fn ease_out_quint(t: f32) -> f32 {
+        1.0 - (1.0 - t).powi(5)
+    }
+}
+
+/// 浮いているもの（メニュー、パレット、パネル）に使う、ただ 1 種類の影。
+pub fn popup_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow { color: hsla(0., 0., 0., 0.35), offset: point(px(0.), px(8.)), blur_radius: px(24.), spread_radius: px(0.), inset: false }]
 }
 
 pub fn ui_font() -> Font {
@@ -110,4 +123,16 @@ pub fn ui_font() -> Font {
 
 pub fn mono_font() -> Font {
     font(MONO_FAMILY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::motion::ease_out_quint;
+
+    #[test]
+    fn ease_out_quint_endpoints() {
+        assert_eq!(ease_out_quint(0.0), 0.0);
+        assert_eq!(ease_out_quint(1.0), 1.0);
+        assert!(ease_out_quint(0.5) > 0.9);
+    }
 }
