@@ -247,6 +247,8 @@ pub struct WorkspaceView {
     pub(crate) allow_close: bool,
     /// 確認ダイアログ。
     pub(crate) dialog: Option<crate::dialog::OpenDialog>,
+    /// コマンドパレット。
+    pub(crate) palette: Option<crate::palette_view::PaletteState>,
     /// ホーム画面の「最近」の右クリックメニュー。
     pub(crate) home_menu: Option<(ProjectRoot, crate::popup::Popup)>,
     /// ホーム画面とプロジェクトの画面の切り替えのフェード（新しい画面の不透明度）。
@@ -314,6 +316,7 @@ impl WorkspaceView {
             last_session,
             missing_roots: HashSet::new(),
             home_menu: None,
+            palette: None,
             dialog: None,
             allow_close: false,
             reduced_motion: crate::reduced_motion::reduced_motion(),
@@ -784,6 +787,7 @@ impl Render for WorkspaceView {
         let changes_menu = self.render_changes_menu(window, cx, now);
         let tree_menu = self.render_tree_menu(window, cx, now);
         let dialog = self.render_dialog(window, cx, now);
+        let palette = self.render_palette(window, cx, now);
 
         div()
             .id("workspace")
@@ -791,6 +795,15 @@ impl Render for WorkspaceView {
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &crate::tree_view::ToggleTree, window, cx| this.toggle_tree(window, cx)))
             .on_action(cx.listener(|this, _: &CloseItem, window, cx| this.close_key(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
+                this.open_palette(fude_core::palette::Scope::All, "", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToFile, window, cx| {
+                this.open_palette(fude_core::palette::Scope::Files, "", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FindInFiles, window, cx| {
+                this.open_palette(fude_core::palette::Scope::Search, "#", window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.new_default_tab();
                 cx.notify();
@@ -834,6 +847,7 @@ impl Render for WorkspaceView {
             .children(home_menu)
             .children(changes_menu)
             .children(tree_menu)
+            .children(palette)
             .children(dialog)
     }
 }

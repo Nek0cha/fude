@@ -74,6 +74,28 @@ impl PaletteCommand {
         }
     }
 
+    /// 英字で探すための別名（表示名は日本語のため）。
+    pub fn keywords(self) -> &'static str {
+        match self {
+            PaletteCommand::NewTerminal => "new terminal tab",
+            PaletteCommand::SplitTerminal => "split terminal",
+            PaletteCommand::ToggleTree => "toggle file tree explorer",
+            PaletteCommand::Close => "close",
+            PaletteCommand::Save => "save",
+            PaletteCommand::OpenFolder => "open folder project",
+            PaletteCommand::GoToFile => "go to file open",
+            PaletteCommand::FindInFiles => "find search in files grep",
+            PaletteCommand::FindInTerminal => "find search in terminal",
+            PaletteCommand::NextTab => "next tab",
+            PaletteCommand::PrevTab => "previous tab",
+        }
+    }
+
+    /// プロジェクトを開いていないと使えないか。
+    pub fn needs_project(self) -> bool {
+        self != PaletteCommand::OpenFolder
+    }
+
     /// 割り当てたキー（keymap の Command）。無ければ None。
     pub fn keymap_command(self) -> Option<Command> {
         match self {
@@ -84,10 +106,10 @@ impl PaletteCommand {
             PaletteCommand::Save => Some(Command::Save),
             PaletteCommand::NextTab => Some(Command::NextTab),
             PaletteCommand::PrevTab => Some(Command::PrevTab),
-            PaletteCommand::OpenFolder
-            | PaletteCommand::GoToFile
-            | PaletteCommand::FindInFiles
-            | PaletteCommand::FindInTerminal => None,
+            PaletteCommand::GoToFile => Some(Command::GoToFile),
+            PaletteCommand::FindInFiles => Some(Command::FindInFiles),
+            PaletteCommand::FindInTerminal => Some(Command::FindInTerminal),
+            PaletteCommand::OpenFolder => None,
         }
     }
 }
