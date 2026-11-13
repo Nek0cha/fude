@@ -176,12 +176,25 @@ impl TerminalView {
         cx.notify();
     }
 
+    fn on_right_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        let Some(session) = self.session.clone() else { return };
+        let has_selection = session.with_state(|st| st.selection_text().is_some());
+        match right_click_action(has_selection) {
+            RightClick::Copy => {
+                self.copy(cx);
+                session.with_state(|st| st.clear_selection());
+            }
+            RightClick::Paste => self.paste(cx),
+        }
+        cx.notify();
+    }
+
     fn on_mouse_up(&mut self, cx: &mut Context<Self>) {
         if let Some(moved) = self.drag.take() {
-            if made_selection(moved, self.click_count) {
-                // 選んだらすぐクリップボードへ入れる（ユーザーの決定）。
-                self.copy(cx);
-            } else if let Some(s) = &self.session {
+            if !made_selection(moved, self.click_count)
+                && let Some(s) = &self.session
+            {
                 // 押しただけで動かさなかったクリックは、選択を残さない。
                 s.with_state(|st| st.clear_selection());
             }
@@ -278,6 +291,18 @@ impl TerminalView {
         let at = point(origin.x + m.cell_w * f32::from(cursor.col), origin.y + m.line_h * f32::from(cursor.row));
         Some(Bounds::new(at, size(m.cell_w, m.line_h)))
     }
+}
+
+/// 右クリックで行うこと。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RightClick {
+    Copy,
+    Paste,
+}
+
+/// 右クリックは、選択があればコピー、無ければ貼り付け（Windows Terminal と同じ。ユーザーの決定）。
+pub(crate) fn right_click_action(has_selection: bool) -> RightClick {
+    if has_selection { RightClick::Copy } else { RightClick::Paste }
 }
 
 /// マウスを離した時点で、選択ができているか（ドラッグしたか、ダブル・トリプルクリックか）。
@@ -412,6 +437,7 @@ impl Render for TerminalView {
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| this.on_mouse_down(ev, window, cx)),
             )
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, _: &MouseDownEvent, window, cx| this.on_right_click(window, cx)))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| this.on_mouse_move(ev, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_mouse_up(cx)))
             .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| this.on_scroll(ev, cx)))
@@ -430,7 +456,7 @@ impl Render for TerminalView {
 #[cfg(test)]
 mod tests {
     // gpui_kit の glob は test 属性マクロを含むため、必要な名前だけを取り込む。
-    use super::{CellMetrics, GridSize, made_selection, point_to_cell};
+    use super::{CellMetrics, GridSize, RightClick, made_selection, point_to_cell, right_click_action};
     use gpui_kit::{point, px};
 
     fn metrics() -> CellMetrics {
@@ -445,9 +471,16 @@ mod tests {
         assert_eq!(point_to_cell(point(px(3.), px(1.)), metrics(), SIZE), (0, 0, false));
     }
 
-    /// ドラッグか、ダブル・トリプルクリックで選んだときだけ、離した時点でコピーする。
+    /// 右クリックは、選択があればコピー、無ければ貼り付け（Windows Terminal と同じ）。
     #[test]
-    fn copy_on_release_only_after_selecting() {
+    fn right_click_copies_selection_else_pastes() {
+        assert_eq!(right_click_action(true), RightClick::Copy);
+        assert_eq!(right_click_action(false), RightClick::Paste);
+    }
+
+    /// ドラッグか、ダブル・トリプルクリックで選んだときだけ、離したあとも選択を残す。
+    #[test]
+    fn selection_kept_only_after_selecting() {
         assert!(!made_selection(false, 1));
         assert!(made_selection(true, 1));
         assert!(made_selection(false, 2));
