@@ -177,14 +177,15 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, cx: &mut Context<Self>) {
-        // 押しただけで動かさなかったクリックは、選択を残さない。
-        if self.drag == Some(false)
-            && self.click_count <= 1
-            && let Some(s) = &self.session
-        {
-            s.with_state(|st| st.clear_selection());
+        if let Some(moved) = self.drag.take() {
+            if made_selection(moved, self.click_count) {
+                // 選んだらすぐクリップボードへ入れる（ユーザーの決定）。
+                self.copy(cx);
+            } else if let Some(s) = &self.session {
+                // 押しただけで動かさなかったクリックは、選択を残さない。
+                s.with_state(|st| st.clear_selection());
+            }
         }
-        self.drag = None;
         cx.notify();
     }
 
@@ -277,6 +278,11 @@ impl TerminalView {
         let at = point(origin.x + m.cell_w * f32::from(cursor.col), origin.y + m.line_h * f32::from(cursor.row));
         Some(Bounds::new(at, size(m.cell_w, m.line_h)))
     }
+}
+
+/// マウスを離した時点で、選択ができているか（ドラッグしたか、ダブル・トリプルクリックか）。
+pub(crate) fn made_selection(moved: bool, click_count: usize) -> bool {
+    moved || click_count >= 2
 }
 
 /// 要素の中の位置（パディングを引いたあと）をセルにする。範囲外は端に寄せる。
@@ -424,7 +430,7 @@ impl Render for TerminalView {
 #[cfg(test)]
 mod tests {
     // gpui_kit の glob は test 属性マクロを含むため、必要な名前だけを取り込む。
-    use super::{CellMetrics, GridSize, point_to_cell};
+    use super::{CellMetrics, GridSize, made_selection, point_to_cell};
     use gpui_kit::{point, px};
 
     fn metrics() -> CellMetrics {
@@ -437,6 +443,15 @@ mod tests {
     fn point_to_cell_basic() {
         assert_eq!(point_to_cell(point(px(20.), px(40.)), metrics(), SIZE), (2, 2, true));
         assert_eq!(point_to_cell(point(px(3.), px(1.)), metrics(), SIZE), (0, 0, false));
+    }
+
+    /// ドラッグか、ダブル・トリプルクリックで選んだときだけ、離した時点でコピーする。
+    #[test]
+    fn copy_on_release_only_after_selecting() {
+        assert!(!made_selection(false, 1));
+        assert!(made_selection(true, 1));
+        assert!(made_selection(false, 2));
+        assert!(made_selection(false, 3));
     }
 
     #[test]
