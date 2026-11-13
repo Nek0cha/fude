@@ -57,7 +57,7 @@ pub mod size {
     pub const TITLE_ROW_H: Pixels = px(38.);
     pub const RAIL_W: Pixels = px(52.);
     /// タイトル行の左端の空き。macOS は信号機ボタンの場所を取る。
-    pub const TITLE_LEAD_W: Pixels = if cfg!(target_os = "macos") { px(80.) } else { RAIL_W };
+    pub const TITLE_LEAD_W: Pixels = if cfg!(target_os = "macos") { px(92.) } else { RAIL_W };
     pub const TAB_H: Pixels = px(28.);
     pub const TAB_MAX_W: Pixels = px(200.);
     pub const CAPTION_BTN_W: Pixels = px(46.);
