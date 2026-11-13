@@ -4,6 +4,7 @@ mod anim;
 mod assets;
 mod changes_menu;
 mod close_flow;
+mod columns;
 mod cli;
 mod dialog;
 mod file_view;
