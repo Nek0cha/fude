@@ -20,6 +20,10 @@ pub enum Command {
     PrevTab,
     /// 1〜9。
     ActivateProject(u8),
+    /// ターミナルの選択範囲をコピーする。ターミナルの中だけで効く。
+    Copy,
+    /// クリップボードの文字列をターミナルに貼り付ける。ターミナルの中だけで効く。
+    Paste,
 }
 
 const PROJECT_KEYS_MAC: [&str; 9] = ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9"];
@@ -37,6 +41,8 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("cmd-d", Command::SplitTab),
                 ("cmd-}", Command::NextTab),
                 ("cmd-{", Command::PrevTab),
+                ("cmd-c", Command::Copy),
+                ("cmd-v", Command::Paste),
             ],
             PROJECT_KEYS_MAC,
         ),
@@ -46,6 +52,9 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("ctrl-shift-d", Command::SplitTab),
                 ("ctrl-}", Command::NextTab),
                 ("ctrl-{", Command::PrevTab),
+                // Ctrl+V は Claude Code の画像の貼り付けのため、端末へそのまま送る。
+                ("ctrl-shift-c", Command::Copy),
+                ("ctrl-shift-v", Command::Paste),
             ],
             PROJECT_KEYS_WIN,
         ),
@@ -101,6 +110,18 @@ mod tests {
                 .collect();
             assert_eq!(projects, (1..=9).collect::<Vec<u8>>());
         }
+    }
+
+    /// Windows の Ctrl+V は Claude Code の画像の貼り付けに使うため、端末へそのまま送る。
+    #[test]
+    fn copy_paste_bindings() {
+        let mac = default_bindings(Platform::MacOs);
+        assert!(mac.contains(&("cmd-c", Command::Copy)));
+        assert!(mac.contains(&("cmd-v", Command::Paste)));
+        let win = default_bindings(Platform::Windows);
+        assert!(win.contains(&("ctrl-shift-c", Command::Copy)));
+        assert!(win.contains(&("ctrl-shift-v", Command::Paste)));
+        assert!(!win.iter().any(|(k, _)| *k == "ctrl-v"));
     }
 
     #[test]

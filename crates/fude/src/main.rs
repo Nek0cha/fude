@@ -4,6 +4,9 @@ mod assets;
 mod hover;
 mod main_area;
 mod rail;
+mod shell_menu;
+mod terminal_paint;
+mod terminal_view;
 mod theme;
 mod title_row;
 mod workspace_view;
@@ -11,6 +14,7 @@ mod workspace_view;
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+use fude_core::paths::simplify_verbatim;
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
@@ -21,12 +25,8 @@ use crate::workspace_view::{WorkspaceView, bind_keys};
 const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Regular.ttf");
 const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Bold.ttf");
 
-/// ウィンドウの背景の方式。検証2の採用案（Windows は Mica、macOS は Blurred）。
-const WINDOW_BACKGROUND: WindowBackgroundAppearance = if cfg!(windows) {
-    WindowBackgroundAppearance::MicaBackdrop
-} else {
-    WindowBackgroundAppearance::Blurred
-};
+/// ウィンドウの背景の方式。Windows と macOS のどちらも Blurred（ユーザーが検証2の画面で選んだ見た目）。
+const WINDOW_BACKGROUND: WindowBackgroundAppearance = WindowBackgroundAppearance::Blurred;
 
 /// 起動時に開くプロジェクト。引数の 1 つ目、無ければ現在のディレクトリ。
 fn initial_root() -> PathBuf {
@@ -39,7 +39,7 @@ fn initial_root() -> PathBuf {
         }
         None => cwd,
     };
-    std::fs::canonicalize(&root).unwrap_or(root)
+    std::fs::canonicalize(&root).map(simplify_verbatim).unwrap_or(root)
 }
 
 fn main() {

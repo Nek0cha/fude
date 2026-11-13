@@ -20,7 +20,9 @@ impl ShellKind {
     /// タブやペインに表示する短い名前。
     pub fn label(&self) -> String {
         match self {
-            ShellKind::Native if cfg!(target_os = "macos") => "zsh".into(),
+            ShellKind::Native if cfg!(target_os = "macos") => {
+                native_label_from_shell(std::env::var("SHELL").ok().as_deref())
+            }
             ShellKind::Native => "pwsh".into(),
             ShellKind::Wsl { distro } => format!("wsl·{distro}"),
         }
@@ -30,6 +32,8 @@ impl ShellKind {
 pub struct Pane {
     pub id: PaneId,
     pub kind: ShellKind,
+    /// 端末が OSC で設定した題名。
+    pub title: Option<String>,
 }
 
 /// ターミナルのタブ。ペインを 1 つか 2 つ（左右の分割）持つ。
@@ -40,9 +44,10 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// フォーカス中のペインの名前。
+    /// フォーカス中のペインの名前。端末が題名を設定していればそれ、無ければシェルの種類。
     pub fn title(&self) -> String {
-        self.panes[self.focused].kind.label()
+        let pane = &self.panes[self.focused];
+        pane.title.as_deref().and_then(display_title).unwrap_or_else(|| pane.kind.label())
     }
 }
 
@@ -95,7 +100,7 @@ impl Workspace {
 
     fn make_tab(&mut self, kind: ShellKind) -> Tab {
         let id = TabId(self.alloc());
-        let pane = Pane { id: PaneId(self.alloc()), kind };
+        let pane = Pane { id: PaneId(self.alloc()), kind, title: None };
         Tab { id, panes: vec![pane], focused: 0 }
     }
 
@@ -161,13 +166,48 @@ impl Workspace {
 
     /// 閉じたタブが選択中なら、右隣、無ければ左隣を選ぶ。
     pub fn close_tab(&mut self, id: TabId) {
-        let Some(p) = self.active_project_mut() else { return };
-        let Some(i) = p.tabs.iter().position(|t| t.id == id) else { return };
-        p.tabs.remove(i);
-        if p.active_tab == Some(id) {
-            let next = if i < p.tabs.len() { Some(i) } else { i.checked_sub(1) };
-            p.active_tab = next.map(|n| p.tabs[n].id);
+        if let Some(p) = self.active_project_mut() {
+            remove_tab(p, id);
         }
+    }
+
+    fn find_pane_mut(&mut self, pane: PaneId) -> Option<(&mut Project, usize, usize)> {
+        self.projects.iter_mut().find_map(|p| {
+            let (ti, pi) = p
+                .tabs
+                .iter()
+                .enumerate()
+                .find_map(|(ti, t)| t.panes.iter().position(|x| x.id == pane).map(|pi| (ti, pi)))?;
+            Some((p, ti, pi))
+        })
+    }
+
+    /// どのプロジェクトのペインでもよい。見つからなければ何もしない。
+    pub fn set_pane_title(&mut self, pane: PaneId, title: Option<String>) {
+        if let Some((p, ti, pi)) = self.find_pane_mut(pane) {
+            p.tabs[ti].panes[pi].title = title;
+        }
+    }
+
+    /// ペインを含むタブの focused をそのペインにする。
+    pub fn focus_pane(&mut self, pane: PaneId) {
+        if let Some((p, ti, pi)) = self.find_pane_mut(pane) {
+            p.tabs[ti].focused = pi;
+        }
+    }
+
+    /// ペインを取り除く。タブが空になったらタブも閉じ、閉じたタブの id を返す。
+    pub fn close_pane(&mut self, pane: PaneId) -> Option<TabId> {
+        let (p, ti, pi) = self.find_pane_mut(pane)?;
+        let tab = &mut p.tabs[ti];
+        tab.panes.remove(pi);
+        if tab.panes.is_empty() {
+            let id = tab.id;
+            remove_tab(p, id);
+            return Some(id);
+        }
+        tab.focused = tab.focused.min(tab.panes.len() - 1);
+        None
     }
 
     /// 選択中のタブを左右に分割する。新しいペインはフォーカス中のペインと同じ種類で、
@@ -181,7 +221,7 @@ impl Workspace {
         else {
             return;
         };
-        let pane = Pane { id: PaneId(self.alloc()), kind };
+        let pane = Pane { id: PaneId(self.alloc()), kind, title: None };
         if let Some(p) = self.active_project_mut()
             && let Some(i) = p.active_index()
         {
@@ -190,6 +230,42 @@ impl Workspace {
             tab.focused = tab.panes.len() - 1;
         }
     }
+}
+
+/// タブを取り除く。選択中のタブなら、右隣、無ければ左隣を選ぶ。
+fn remove_tab(p: &mut Project, id: TabId) {
+    let Some(i) = p.tabs.iter().position(|t| t.id == id) else { return };
+    p.tabs.remove(i);
+    if p.active_tab == Some(id) {
+        let next = if i < p.tabs.len() { Some(i) } else { i.checked_sub(1) };
+        p.active_tab = next.map(|n| p.tabs[n].id);
+    }
+}
+
+/// OSC の題名を表示用に整える。前後の空白を除き、空なら None。
+/// 絶対パスなら、ファイル名から拡張子を除いたものにする（pwsh が自分の exe のパスを題名にするため）。
+pub fn display_title(raw: &str) -> Option<String> {
+    let title = raw.trim();
+    if title.is_empty() {
+        return None;
+    }
+    if title.contains('\\') || title.starts_with('/') {
+        let name = title.rsplit(['\\', '/']).next().unwrap_or(title);
+        let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+        if !stem.is_empty() {
+            return Some(stem.to_string());
+        }
+    }
+    Some(title.to_string())
+}
+
+/// macOS のネイティブシェルの名前。ログインシェル（$SHELL）のファイル名、無ければ zsh。
+/// 起動するシェル（fude-term の spawn_spec）と同じ規則にする。
+pub fn native_label_from_shell(shell: Option<&str>) -> String {
+    shell
+        .filter(|s| !s.is_empty())
+        .and_then(|s| Path::new(s).file_name())
+        .map_or_else(|| "zsh".to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// プロジェクトのアイコンの色を、root から決める（6 色の中から）。
@@ -307,6 +383,80 @@ mod tests {
         let tab = active(&ws).active_tab().unwrap();
         assert_eq!(tab.panes.len(), 2);
         assert_eq!(tab.focused, 1);
+    }
+
+    fn pane_ids(ws: &Workspace) -> Vec<PaneId> {
+        active(ws).active_tab().unwrap().panes.iter().map(|p| p.id).collect()
+    }
+
+    #[test]
+    fn close_pane_in_split_keeps_tab() {
+        let mut ws = ws_with(&["/w/a"]);
+        ws.split_active_tab();
+        let panes = pane_ids(&ws);
+        assert_eq!(ws.close_pane(panes[1]), None);
+        let tab = active(&ws).active_tab().unwrap();
+        assert_eq!(tab.panes.len(), 1);
+        assert_eq!(tab.focused, 0);
+    }
+
+    #[test]
+    fn close_last_pane_closes_tab_and_selects_neighbor() {
+        let mut ws = ws_with(&["/w/a"]);
+        ws.new_tab(ShellKind::Native);
+        ws.new_tab(ShellKind::Native);
+        let ids = tab_ids(&ws);
+        ws.activate_tab(ids[1]);
+        let pane = pane_ids(&ws)[0];
+        assert_eq!(ws.close_pane(pane), Some(ids[1]));
+        assert_eq!(active(&ws).tabs.len(), 2);
+        assert_eq!(active(&ws).active_tab, Some(ids[2]));
+    }
+
+    #[test]
+    fn close_pane_in_inactive_project() {
+        let mut ws = ws_with(&["/w/a", "/w/b"]);
+        let a = &ws.projects()[0];
+        let (a_id, pane) = (a.id, a.tabs[0].panes[0].id);
+        let b_id = active(&ws).id;
+        ws.close_pane(pane);
+        assert!(ws.projects().iter().find(|p| p.id == a_id).unwrap().tabs.is_empty());
+        assert_eq!(active(&ws).id, b_id);
+    }
+
+    #[test]
+    fn focus_pane_sets_focused() {
+        let mut ws = ws_with(&["/w/a"]);
+        ws.split_active_tab();
+        let panes = pane_ids(&ws);
+        ws.focus_pane(panes[0]);
+        assert_eq!(active(&ws).active_tab().unwrap().focused, 0);
+    }
+
+    #[test]
+    fn pane_title_overrides_label() {
+        let mut ws = ws_with(&["/w/a"]);
+        let pane = pane_ids(&ws)[0];
+        ws.set_pane_title(pane, Some("✳ Claude Code".into()));
+        assert_eq!(active(&ws).active_tab().unwrap().title(), "✳ Claude Code");
+        ws.set_pane_title(pane, None);
+        assert_eq!(active(&ws).active_tab().unwrap().title(), ShellKind::Native.label());
+    }
+
+    #[test]
+    fn display_title_rules() {
+        assert_eq!(display_title("C:\\Program Files\\PowerShell\\7\\pwsh.exe").as_deref(), Some("pwsh"));
+        assert_eq!(display_title("/usr/bin/zsh").as_deref(), Some("zsh"));
+        assert_eq!(display_title(" ✳ Claude Code ").as_deref(), Some("✳ Claude Code"));
+        assert_eq!(display_title("  "), None);
+    }
+
+    #[test]
+    fn mac_native_label_follows_login_shell() {
+        assert_eq!(native_label_from_shell(Some("/opt/homebrew/bin/fish")), "fish");
+        assert_eq!(native_label_from_shell(Some("/bin/zsh")), "zsh");
+        assert_eq!(native_label_from_shell(Some("")), "zsh");
+        assert_eq!(native_label_from_shell(None), "zsh");
     }
 
     #[test]

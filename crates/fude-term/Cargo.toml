@@ -1,0 +1,9 @@
+[package]
+name = "fude-term"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = { version = "0.26.0", default-features = false }
+portable-pty = "0.9.0"
+fude-core = { path = "../fude-core" }

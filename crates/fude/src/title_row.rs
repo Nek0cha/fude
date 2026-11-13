@@ -32,7 +32,11 @@ impl WorkspaceView {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.workspace.new_tab(ShellKind::Native);
                 cx.notify();
-            }));
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| this.open_shell_menu(ev.position, window, cx)),
+            );
         let split = self
             .tool_button("split", HoverKey::Split, IconName::Columns2, cx, now)
             .on_click(cx.listener(|this, _, _, cx| {

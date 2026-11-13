@@ -1,7 +1,8 @@
 //! 色、寸法、動き、フォントのトークン（設計書 §6.2、§6.3）。
 //! 描画コードには色や寸法の値を直接書かず、ここを通す。
 
-use gpui_kit::{Font, FontFallbacks, Global, Rgba, font, rgb, rgba};
+use fude_term::Palette;
+use gpui_kit::{BoxShadow, Font, FontFallbacks, Global, Rgba, font, hsla, point, px, rgb, rgba};
 
 pub const MONO_FAMILY: &str = "HackGen Console NF";
 
@@ -21,6 +22,10 @@ pub struct Theme {
     pub window_close_hover: Rgba,
     /// プロジェクトのアイコンの色。明度と彩度を揃えた 6 色。
     pub project_colors: [Rgba; 6],
+    /// ターミナルの色。既存のトークンと同じ明度の系統にそろえる。
+    pub term_palette: Palette,
+    /// ターミナルの選択範囲。accent の 30%。
+    pub selection: Rgba,
 }
 
 impl Theme {
@@ -44,6 +49,16 @@ impl Theme {
                 rgba(0x9fd38a47),
                 rgba(0xe59a9a47),
             ],
+            term_palette: Palette {
+                ansi: [
+                    0x1e1e2a, 0xff8a8a, 0x5fe0b0, 0xffd28a, 0x8fa7ff, 0xd99ad6, 0x7fd1c7, 0xd8d8e2, //
+                    0x7b7d90, 0xffa3a3, 0x84ecc4, 0xffe0a8, 0xaabcff, 0xe8b4e6, 0x9fe3da, 0xf2f2f7,
+                ],
+                foreground: 0xd8d8e2,
+                background: 0x0e0e14,
+                cursor: 0xb9a8ff,
+            },
+            selection: rgba(0xb9a8ff4d),
         }
     }
 }
@@ -64,6 +79,10 @@ pub mod size {
     pub const PROJECT_ICON: Pixels = px(32.);
     pub const RADIUS_SM: Pixels = px(6.);
     pub const RADIUS_MD: Pixels = px(8.);
+    pub const TERM_FONT_SIZE: Pixels = px(14.);
+    pub const TERM_LINE_HEIGHT: Pixels = px(18.);
+    pub const TERM_PAD_X: Pixels = px(12.);
+    pub const TERM_PAD_Y: Pixels = px(8.);
 }
 
 /// 動きのトークン。
@@ -76,6 +95,19 @@ pub mod motion {
     pub fn ease_out(t: f32) -> f32 {
         1.0 - (1.0 - t) * (1.0 - t)
     }
+
+    /// ポップアップ（メニュー）の出るときと消えるとき。
+    pub const POPUP_IN: Duration = Duration::from_millis(120);
+    pub const POPUP_OUT: Duration = Duration::from_millis(80);
+
+    pub fn ease_out_quint(t: f32) -> f32 {
+        1.0 - (1.0 - t).powi(5)
+    }
+}
+
+/// 浮いているもの（メニュー、パレット、パネル）に使う、ただ 1 種類の影。
+pub fn popup_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow { color: hsla(0., 0., 0., 0.35), offset: point(px(0.), px(8.)), blur_radius: px(24.), spread_radius: px(0.), inset: false }]
 }
 
 pub fn ui_font() -> Font {
@@ -91,4 +123,16 @@ pub fn ui_font() -> Font {
 
 pub fn mono_font() -> Font {
     font(MONO_FAMILY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::motion::ease_out_quint;
+
+    #[test]
+    fn ease_out_quint_endpoints() {
+        assert_eq!(ease_out_quint(0.0), 0.0);
+        assert_eq!(ease_out_quint(1.0), 1.0);
+        assert!(ease_out_quint(0.5) > 0.9);
+    }
 }

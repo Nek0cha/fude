@@ -20,6 +20,10 @@ pub enum HoverKey {
     CaptionMin,
     CaptionMax,
     CaptionClose,
+    /// ターミナルの「最新へ」。ビューごとに HoverFades を持つため、ペインの id は要らない。
+    ScrollToBottom,
+    /// ＋の右クリックメニューの項目。
+    MenuItem(usize),
 }
 
 /// 部品ごとのホバーの状態と、カーソルがウィンドウの上にあるかの状態を持つ。
