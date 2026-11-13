@@ -636,6 +636,7 @@ impl Render for WorkspaceView {
         let project_menu = self.render_project_menu(window, cx, now);
         let home_menu = self.render_home_menu(window, cx, now);
         let changes_menu = self.render_changes_menu(window, cx, now);
+        let tree_menu = self.render_tree_menu(window, cx, now);
         let dialog = self.render_dialog(window, cx, now);
 
         div()
@@ -692,6 +693,7 @@ impl Render for WorkspaceView {
             .children(project_menu)
             .children(home_menu)
             .children(changes_menu)
+            .children(tree_menu)
             .children(dialog)
     }
 }

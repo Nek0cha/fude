@@ -21,6 +21,7 @@ mod terminal_paint;
 mod terminal_view;
 mod theme;
 mod title_row;
+mod tree_menu;
 mod tree_model;
 mod tree_view;
 mod workspace_view;

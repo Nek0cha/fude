@@ -96,6 +96,13 @@ impl TreeModel {
         }
     }
 
+    /// dir を開いた状態にする（ルートは常に開いている）。
+    pub fn expand(&mut self, dir: &RelPath) {
+        if !dir.is_root() {
+            self.expanded.insert(dir.as_str().to_string());
+        }
+    }
+
     /// ファイル名で絞り込む（大文字小文字を区別しない部分一致）。all_files は全ファイルの一覧（無ければ、届くまで何も出さない）。
     pub fn set_filter(&mut self, query: &str, all_files: Option<&[RelPath]>) {
         self.filter = query.trim().to_lowercase();
@@ -206,6 +213,9 @@ mod tests {
         assert!(m.rows(None)[0].expanded);
         assert!(!m.toggle(&rel("src")));
         assert_eq!(m.rows(None).len(), 2);
+        m.expand(&rel("src"));
+        m.expand(&rel("src"));
+        assert_eq!(m.rows(None).len(), 4);
     }
 
     #[test]

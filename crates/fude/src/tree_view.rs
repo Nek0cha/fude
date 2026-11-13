@@ -46,6 +46,10 @@ pub(crate) struct TreeState {
     pub rows: Vec<TreeRow>,
     /// 選択中（最後にクリックした）行。
     pub selected: Option<RelPath>,
+    /// 右クリックメニューと、その対象の行（None は何も無いところ）。
+    pub menu: Option<(Option<TreeRow>, crate::popup::Popup)>,
+    /// 新規や名前の変更で、名前を入れている途中。
+    pub edit: Option<crate::tree_menu::TreeEdit>,
     _filter_sub: Option<Subscription>,
 }
 
@@ -58,6 +62,8 @@ impl TreeState {
             focus: cx.focus_handle(),
             rows: Vec::new(),
             selected: None,
+            menu: None,
+            edit: None,
             _filter_sub: None,
         }
     }
@@ -237,9 +243,11 @@ impl WorkspaceView {
                             div().w(px(12.)).flex_shrink_0().font(mono_font()).text_size(px(11.)).text_color(color).child(letter)
                         });
                         let clicked = row.clone();
+                        let menu_row = row.clone();
                         div()
                             .id(ElementId::Name(format!("tree-row-{}", range.start + i).into()))
                             .h(ROW_H)
+                            .w_full()
                             .pl(px(8. + INDENT * row.depth as f32))
                             .pr(px(8.))
                             .flex()
@@ -254,11 +262,37 @@ impl WorkspaceView {
                             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(row.name.clone()))
                             .children(mark)
                             .on_click(cx.listener(move |this, _, window, cx| this.click_row(clicked.clone(), window, cx)))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_tree_menu(Some(menu_row.clone()), ev.position, window, cx);
+                                }),
+                            )
                     })
                     .collect::<Vec<_>>()
             }),
         )
         .flex_1();
+        let edit_row = self.tree.edit.as_ref().map(|e| {
+            let kind_icon = match e.kind {
+                crate::tree_menu::EditKind::NewFile => IconName::FilePlus,
+                crate::tree_menu::EditKind::NewFolder => IconName::FolderPlus,
+                crate::tree_menu::EditKind::Rename => IconName::Pencil,
+            };
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .px(px(4.))
+                .rounded(size::RADIUS_SM)
+                .border_1()
+                .border_color(theme.accent)
+                .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| this.cancel_tree_edit(window, cx)))
+                .child(icon(kind_icon, theme.fg_dim))
+                .child(div().flex_1().child(Input::new(&e.input).appearance(false)))
+        });
 
         Some(
             div()
@@ -287,7 +321,20 @@ impl WorkspaceView {
                 .text_size(px(13.))
                 .text_color(theme.fg_default)
                 .child(div().flex().flex_row().items_center().gap(px(4.)).children(filter.map(|f| div().flex_1().child(f))).child(toggle_changed))
-                .child(list),
+                .children(edit_row)
+                .child(
+                    div()
+                        .id("tree-body")
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, ev: &MouseDownEvent, window, cx| this.open_tree_menu(None, ev.position, window, cx)),
+                        )
+                        .child(list),
+                ),
         )
     }
 }

@@ -21,4 +21,8 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     Search,
     ChevronDown,
     File,
+    FilePlus,
+    FolderPlus,
+    Pencil,
+    Trash,
 ]);
