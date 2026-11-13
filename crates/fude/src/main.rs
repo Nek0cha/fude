@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod anim;
 mod assets;
 mod changes_menu;
 mod close_flow;
@@ -16,6 +17,7 @@ mod popup;
 mod project_state;
 mod project_menu;
 mod rail;
+mod reduced_motion;
 mod right_panel;
 mod shell_menu;
 mod terminal_paint;

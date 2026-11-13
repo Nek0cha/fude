@@ -107,6 +107,22 @@ pub mod motion {
 
     /// ホーム画面とプロジェクトの画面の切り替え。
     pub const SCREEN_FADE: Duration = Duration::from_millis(160);
+    /// タブの追加（幅と文字）。
+    pub const TAB_IN: Duration = Duration::from_millis(160);
+    /// タブを閉じるときの、文字が消えるまでと、幅が縮むまで。
+    pub const TAB_TEXT_OUT: Duration = Duration::from_millis(80);
+    pub const TAB_OUT: Duration = Duration::from_millis(140);
+    /// 分割の境目の移動。
+    pub const SPLIT: Duration = Duration::from_millis(180);
+    /// ターミナルの中身のフェードイン。
+    pub const TERM_IN: Duration = Duration::from_millis(140);
+    /// ターミナルが 0 枚の画面と並べた画面の間の、エディタの移動。
+    pub const EDITOR_MOVE: Duration = Duration::from_millis(180);
+    /// 右パネルと左パネルの出入り。
+    pub const PANEL_IN: Duration = Duration::from_millis(180);
+    pub const PANEL_OUT: Duration = Duration::from_millis(140);
+    /// OS の「動きを減らす」がオンのときの、不透明度だけの変化。
+    pub const REDUCED: Duration = Duration::from_millis(80);
 
     pub fn ease_out_quint(t: f32) -> f32 {
         1.0 - (1.0 - t).powi(5)

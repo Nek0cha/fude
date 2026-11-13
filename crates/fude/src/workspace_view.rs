@@ -222,6 +222,8 @@ pub struct WorkspaceView {
     pub(crate) changes_menu: Option<(ProjectId, crate::popup::Popup)>,
     /// プロジェクトごとの右パネル。
     pub(crate) panels: HashMap<ProjectId, crate::right_panel::PanelSlot>,
+    /// OS の「動きを減らす」設定。起動時とウィンドウが前面に来たときに読む。
+    pub(crate) reduced_motion: bool,
     /// 確かめ終えて、ウィンドウを閉じてよい（× の 2 回目）。
     pub(crate) allow_close: bool,
     /// 確認ダイアログ。
@@ -244,6 +246,7 @@ impl WorkspaceView {
         let workspace = Workspace::default();
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
+                this.reduced_motion = crate::reduced_motion::reduced_motion();
                 this.refresh_active_branch(cx);
                 if let Some(id) = this.workspace.active_project().map(|p| p.id) {
                     this.refresh_status(id, std::time::Duration::ZERO, cx);
@@ -294,6 +297,7 @@ impl WorkspaceView {
             home_menu: None,
             dialog: None,
             allow_close: false,
+            reduced_motion: crate::reduced_motion::reduced_motion(),
             panels: HashMap::new(),
             live: HashMap::new(),
             tree: crate::tree_view::TreeState::new(cx),
