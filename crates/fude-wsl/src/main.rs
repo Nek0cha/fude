@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 enum Cli {
     Open(PathBuf),
     Serve,
+    /// root の変更を監視し、WatchBatch を JSON 1 行ずつ標準出力に書く。標準入力が閉じたら終わる。
+    Watch(PathBuf),
     Version,
 }
 
@@ -28,8 +30,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         [] => Ok(Cli::Open(PathBuf::from("."))),
         [cmd] if cmd == "serve" => Ok(Cli::Serve),
         [cmd] if cmd == "version" => Ok(Cli::Version),
+        [cmd, root] if cmd == "watch" => Ok(Cli::Watch(PathBuf::from(root))),
         [path] => Ok(Cli::Open(PathBuf::from(path))),
-        _ => Err("使い方: fude [フォルダ | ファイル] | fude serve | fude version".to_string()),
+        _ => Err("使い方: fude [フォルダ | ファイル] | fude serve | fude watch <フォルダ> | fude version".to_string()),
     }
 }
 
@@ -81,6 +84,7 @@ fn main() {
                 }
             }
         }
+        Ok(Cli::Watch(root)) => watch(root),
         Ok(Cli::Open(path)) => open(&path).unwrap_or_else(|message| {
             eprintln!("fude: {message}");
             2
@@ -91,6 +95,28 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// root を監視して、変更を 1 行ずつ書く。標準入力が閉じる（Windows 側が wsl.exe を終わらせる）か、
+/// 書けなくなったら終わる。
+fn watch(root: PathBuf) -> i32 {
+    let on_batch = Box::new(|batch: fude_fs::watch::WatchBatch| {
+        use std::io::Write;
+        let Ok(line) = serde_json::to_string(&batch) else { return };
+        let mut out = io::stdout().lock();
+        if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+            std::process::exit(0);
+        }
+    });
+    let _watcher = match fude_fs::watch::LocalWatcher::start(root, on_batch) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("fude watch: {e}");
+            return 1;
+        }
+    };
+    let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+    0
 }
 
 /// 子プロセスを新しいセッションで起動する。WSL は、起動した wsl.exe のセッションが終わるときに、その中から
@@ -163,6 +189,7 @@ mod tests {
         assert_eq!(parse(&[]), Ok(Cli::Open(PathBuf::from("."))));
         assert_eq!(parse(&["serve"]), Ok(Cli::Serve));
         assert_eq!(parse(&["version"]), Ok(Cli::Version));
+        assert_eq!(parse(&["watch", "/home/x/p"]), Ok(Cli::Watch(PathBuf::from("/home/x/p"))));
         assert_eq!(parse(&["~/x"]), Ok(Cli::Open(PathBuf::from("~/x"))));
         assert!(parse(&["a", "b"]).is_err());
     }

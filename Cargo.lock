@@ -1779,6 +1779,7 @@ version = "0.1.0"
 dependencies = [
  "fude-core",
  "ignore",
+ "notify",
  "serde",
  "serde_json",
  "tempfile",
@@ -1810,6 +1811,7 @@ version = "0.1.0"
 dependencies = [
  "fude-core",
  "fude-fs",
+ "serde_json",
 ]
 
 [[package]]

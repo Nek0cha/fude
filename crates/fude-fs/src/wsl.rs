@@ -246,6 +246,67 @@ impl Read for ServerOutput {
     }
 }
 
+/// WSL のフォルダの監視。`fude watch <root>` を wsl.exe の子プロセスとして動かし、1 行ずつ WatchBatch を読む。
+/// 子プロセスが終わったら、crate::watch::backoff の間をおいて起動し直す。捨てると子プロセスを終わらせる。
+/// Linux 用の fude が置いてあること（WslHosts の確認と配置のあと）を前提にする。
+pub struct WslWatcher {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+impl WslWatcher {
+    pub fn start(distro: String, bin: String, root: String, on_batch: Box<dyn Fn(crate::watch::WatchBatch) + Send>) -> WslWatcher {
+        use std::sync::atomic::Ordering;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+        let (stop2, child2) = (stop.clone(), child.clone());
+        std::thread::spawn(move || {
+            let mut attempt = 0u32;
+            while !stop2.load(Ordering::Relaxed) {
+                let script = format!(r#"{RESOLVE}b=$(r "$1"); exec "$b" watch "$2""#);
+                let spawned = wsl_command(&distro, &script, &[&bin, &root])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn();
+                let mut received = false;
+                if let Ok(mut c) = spawned {
+                    let stdout = c.stdout.take().expect("stdout はパイプにしてある");
+                    *child2.lock().unwrap_or_else(|e| e.into_inner()) = Some(c);
+                    for line in BufReader::new(stdout).lines() {
+                        let Ok(line) = line else { break };
+                        if let Ok(batch) = serde_json::from_str::<crate::watch::WatchBatch>(&line) {
+                            received = true;
+                            on_batch(batch);
+                        }
+                    }
+                    if let Some(mut c) = child2.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                    }
+                }
+                if stop2.load(Ordering::Relaxed) {
+                    break;
+                }
+                // 通知を受け取れていた接続のあとは、待ち時間を最初から数え直す。
+                attempt = if received { 0 } else { attempt + 1 };
+                std::thread::sleep(crate::watch::backoff(attempt));
+            }
+        });
+        WslWatcher { stop, child }
+    }
+}
+
+impl Drop for WslWatcher {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(mut c) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

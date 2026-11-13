@@ -10,6 +10,7 @@ mod local;
 pub mod procs;
 mod remote;
 pub mod serve;
+pub mod watch;
 pub mod wire;
 #[cfg(windows)]
 pub mod wsl;
