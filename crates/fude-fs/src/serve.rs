@@ -18,7 +18,7 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write, build_id: &str) ->
                 write_frame(&mut output, &resp, &data)?;
             }
             Err(e) => {
-                let resp = Response::Error { message: format!("要求を読めない: {e}"), not_found: false, already_exists: false };
+                let resp = Response::Error { message: format!("要求を読めない: {e}"), not_found: false, already_exists: false, invalid_input: false };
                 write_frame(&mut output, &resp, &[])?;
                 return Err(e);
             }
@@ -61,6 +61,10 @@ fn handle(req: Request, payload: &[u8], build_id: &str) -> (Response, Vec<u8>) {
         Request::GitDiff { root, path } => {
             local(&root).and_then(|fs| fs.git_diff(&path)).map(|patch| (Response::Patch, patch.into_bytes()))
         }
+        Request::Search { root, query } => local(&root).and_then(|fs| fs.search(&query)).and_then(|results| {
+            let json = serde_json::to_vec(&results).map_err(io::Error::other)?;
+            Ok((Response::Matches, json))
+        }),
         Request::Busy { terminal_id } => crate::procs::terminal_busy(Path::new("/proc"), &terminal_id)
             .map(|busy| (Response::Busy { busy }, Vec::new())),
     };
@@ -69,6 +73,7 @@ fn handle(req: Request, payload: &[u8], build_id: &str) -> (Response, Vec<u8>) {
             message: e.to_string(),
             not_found: e.kind() == io::ErrorKind::NotFound,
             already_exists: e.kind() == io::ErrorKind::AlreadyExists,
+            invalid_input: e.kind() == io::ErrorKind::InvalidInput,
         };
         (resp, Vec::new())
     })
@@ -176,5 +181,25 @@ mod tests {
     fn serve_rejects_relative_root() {
         let out = run(&[(Request::Branch { root: "home/x".into() }, vec![])]);
         assert!(matches!(out[0].0, Response::Error { not_found: false, .. }), "{:?}", out[0]);
+    }
+
+    #[test]
+    fn search_roundtrip_and_invalid_input() {
+        use crate::search::{SearchQuery, SearchResults};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "foo
+").unwrap();
+        let root = root_of(&dir);
+        let out = run(&[
+            (Request::Search { root: root.clone(), query: SearchQuery { pattern: "foo".into(), ..Default::default() } }, vec![]),
+            (
+                Request::Search { root: root.clone(), query: SearchQuery { pattern: "(".into(), regex: true, ..Default::default() } },
+                vec![],
+            ),
+        ]);
+        assert_eq!(out[0].0, Response::Matches);
+        let results: SearchResults = serde_json::from_slice(&out[0].1).unwrap();
+        assert_eq!(results.files[0].rel.as_str(), "a.txt");
+        assert!(matches!(out[1].0, Response::Error { invalid_input: true, .. }), "{:?}", out[1]);
     }
 }

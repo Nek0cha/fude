@@ -29,6 +29,8 @@ pub enum Request {
     Busy { terminal_id: String },
     GitStatus { root: String },
     GitDiff { root: String, path: RelPath },
+    /// 全体検索（計画6で足した）。
+    Search { root: String, query: crate::search::SearchQuery },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -50,12 +52,17 @@ pub enum Response {
     Status,
     /// unified diff は payload。
     Patch,
+    /// SearchResults の JSON は payload。
+    Matches,
     /// already_exists は計画5で足した（古いサーバーの応答には無い）。
     Error {
         message: String,
         not_found: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         already_exists: bool,
+        /// 計画6で足した（正しくない検索の条件）。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        invalid_input: bool,
     },
 }
 
