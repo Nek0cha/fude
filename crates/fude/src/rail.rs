@@ -88,6 +88,10 @@ impl WorkspaceView {
                     .text_color(theme.fg_default)
                     .child(initial),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| this.open_project_menu(id, ev.position, window, cx)),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.workspace.activate_project(id);
                 this.refresh_active_branch();

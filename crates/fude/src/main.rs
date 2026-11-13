@@ -5,6 +5,8 @@ mod cli;
 mod hover;
 mod instance;
 mod main_area;
+mod popup;
+mod project_menu;
 mod rail;
 mod shell_menu;
 mod terminal_paint;

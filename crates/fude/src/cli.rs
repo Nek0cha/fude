@@ -55,7 +55,7 @@ mod tests {
         let launch = parse_launch(&args(&["."]), dir.path()).unwrap();
         assert_eq!(launch, Launch::Open(canonical(dir.path())));
         let Launch::Open(ProjectRoot::Local(p)) = launch else { panic!() };
-        assert!(!p.to_string_lossy().starts_with(r"\?\"));
+        assert!(!p.to_string_lossy().starts_with(r"\\?\"));
     }
 
     #[test]

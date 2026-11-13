@@ -11,4 +11,6 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     WindowRestore,
     WindowClose,
     ArrowDown,
+    FolderOpen,
+    Copy,
 ]);

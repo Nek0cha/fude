@@ -163,6 +163,16 @@ impl Workspace {
         }
     }
 
+    /// プロジェクトを取り除く。選択中なら右隣、無ければ左隣、無ければ未選択にする。
+    pub fn close_project(&mut self, id: ProjectId) {
+        let Some(i) = self.projects.iter().position(|p| p.id == id) else { return };
+        self.projects.remove(i);
+        if self.active == Some(id) {
+            let next = if i < self.projects.len() { Some(i) } else { i.checked_sub(1) };
+            self.active = next.map(|n| self.projects[n].id);
+        }
+    }
+
     /// ⌘1〜9 用。index は 0 始まり。範囲外なら何もしない。
     pub fn activate_project_at(&mut self, index: usize) {
         if let Some(p) = self.projects.get(index) {
@@ -367,6 +377,35 @@ mod tests {
         assert_eq!(p.name, "x");
         assert_eq!(p.tabs[0].panes[0].kind, ShellKind::Wsl { distro: "Ubuntu".into() });
         assert_eq!(p.default_shell(), ShellKind::Wsl { distro: "Ubuntu".into() });
+    }
+
+    #[test]
+    fn close_active_project_selects_right_neighbor() {
+        let mut ws = ws_with(&["/w/a", "/w/b", "/w/c"]);
+        let ids: Vec<_> = ws.projects().iter().map(|p| p.id).collect();
+        ws.activate_project(ids[1]);
+        ws.close_project(ids[1]);
+        assert_eq!(ws.projects().len(), 2);
+        assert_eq!(active(&ws).id, ids[2]);
+        ws.close_project(ids[2]);
+        assert_eq!(active(&ws).id, ids[0]);
+    }
+
+    #[test]
+    fn close_last_project_leaves_none() {
+        let mut ws = ws_with(&["/w/a"]);
+        let id = ws.projects()[0].id;
+        ws.close_project(id);
+        assert!(ws.active_project().is_none());
+        assert!(ws.projects().is_empty());
+    }
+
+    #[test]
+    fn close_inactive_project_keeps_selection() {
+        let mut ws = ws_with(&["/w/a", "/w/b"]);
+        let (a, b) = (ws.projects()[0].id, ws.projects()[1].id);
+        ws.close_project(a);
+        assert_eq!(active(&ws).id, b);
     }
 
     #[test]
