@@ -202,7 +202,7 @@ impl WorkspaceView {
 
     /// メイン領域に描くツリーとエディタ列。main_w はメイン領域の幅。並べ方は columns で決め、
     /// 並べた列の幅には出入りの動きを掛ける（重ねた列は不透明度だけを変える）。
-    pub(crate) fn render_columns(&mut self, main_w: Pixels, now: std::time::Instant, cx: &mut Context<Self>) -> (Option<ColumnEl>, Option<ColumnEl>) {
+    pub(crate) fn render_columns(&mut self, main_w: Pixels, window_w: Pixels, now: std::time::Instant, cx: &mut Context<Self>) -> (Option<ColumnEl>, Option<ColumnEl>) {
         let Some(project) = self.workspace.active_project().map(|p| p.id) else { return (None, None) };
         let main = f32::from(main_w);
         let tree_presence = self.tree_presence;
@@ -211,8 +211,10 @@ impl WorkspaceView {
         let has_view = self.active_editor_view().is_some() || self.editor_anim.closing.is_some();
         let editor_shown = self.editor_open() || (has_view && !editor_presence.is_gone(now));
         let share = self.editor_anim.share.value(now);
-        let with_terms = columns(main, true, tree_shown, editor_shown);
-        let without = columns(main, false, tree_shown, editor_shown);
+        let window_w = f32::from(window_w);
+        // ピン列は Task 7 で入れる。
+        let with_terms = columns(main, window_w, true, tree_shown, editor_shown, false);
+        let without = columns(main, window_w, false, tree_shown, editor_shown, false);
         // 置き方は、ターミナルの有無が変わり終えた側で決める。幅は動きの間を補う。
         let c = if share >= 1.0 { without } else { with_terms };
         let tree_w = match c.tree {

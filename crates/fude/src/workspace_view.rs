@@ -965,7 +965,7 @@ impl Render for WorkspaceView {
         } else {
             let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
             let main_w = window.viewport_size().width - crate::theme::size::RAIL_W - px(self.route_map_width(now));
-            let (tree, editor) = self.render_columns(main_w, now, cx);
+            let (tree, editor) = self.render_columns(main_w, window.viewport_size().width, now, cx);
             let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
             let share = active_tab.map_or(1.0, |t| self.anims.split_share(t.id, now));
             render_main_area(active_tab, &terminals, share, tree, editor, cx)
