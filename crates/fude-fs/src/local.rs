@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fude_core::git_head::read_branch;
 use ignore::WalkBuilder;
 
-use crate::{DirEntry, FileMeta, ProjectFs, RelPath, WALK_MAX};
+use crate::{DirEntry, FileMeta, ProjectFs, RelPath, TrashTicket, WALK_MAX};
 
 /// 一時ファイルの名前を、同じプロセスの中の同時の書き込みで重ねないための通し番号。
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -152,6 +152,14 @@ impl ProjectFs for LocalFs {
         let path = self.non_root(rel)?;
         let meta = fs::symlink_metadata(&path)?;
         if meta.is_dir() { fs::remove_dir_all(path) } else { fs::remove_file(path) }
+    }
+
+    fn trash(&self, rel: &RelPath) -> io::Result<TrashTicket> {
+        crate::trash::move_to_trash(&self.non_root(rel)?)
+    }
+
+    fn restore(&self, ticket: &TrashTicket, rel: &RelPath) -> io::Result<()> {
+        crate::trash::restore_from_trash(ticket, &self.non_root(rel)?)
     }
 
     fn metadata(&self, rel: &RelPath) -> io::Result<FileMeta> {
@@ -332,5 +340,65 @@ mod tests {
         fs_.remove(&rel("c.txt")).unwrap();
         assert!(fs_.remove(&RelPath::root()).is_err());
         assert_eq!(fs_.metadata(&rel("none")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    // 以下は本物のゴミ箱を使う。作ったものは試験の中で戻して片付ける。
+
+    #[test]
+    fn trash_and_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs_ = LocalFs::new(dir.path().to_path_buf());
+        fs::write(dir.path().join("t.txt"), "one").unwrap();
+        let ticket = fs_.trash(&rel("t.txt")).unwrap();
+        assert!(!dir.path().join("t.txt").exists());
+        fs_.restore(&ticket, &rel("t.txt")).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("t.txt")).unwrap(), "one");
+    }
+
+    #[test]
+    fn same_name_twice_restores_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs_ = LocalFs::new(dir.path().to_path_buf());
+        let p = dir.path().join("s.txt");
+        fs::write(&p, "first").unwrap();
+        let t1 = fs_.trash(&rel("s.txt")).unwrap();
+        fs::write(&p, "second").unwrap();
+        let t2 = fs_.trash(&rel("s.txt")).unwrap();
+        assert_ne!(t1, t2);
+        fs_.restore(&t2, &rel("s.txt")).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "second");
+        fs::remove_file(&p).unwrap();
+        fs_.restore(&t1, &rel("s.txt")).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "first");
+    }
+
+    #[test]
+    fn restore_onto_existing_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs_ = LocalFs::new(dir.path().to_path_buf());
+        let p = dir.path().join("c.txt");
+        fs::write(&p, "old").unwrap();
+        let t = fs_.trash(&rel("c.txt")).unwrap();
+        fs::write(&p, "new").unwrap();
+        assert_eq!(fs_.restore(&t, &rel("c.txt")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&p).unwrap(), "new");
+        fs::remove_file(&p).unwrap();
+        fs_.restore(&t, &rel("c.txt")).unwrap();
+    }
+
+    #[test]
+    fn trash_folder_and_root_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs_ = LocalFs::new(dir.path().to_path_buf());
+        fs::create_dir_all(dir.path().join("d/e")).unwrap();
+        fs::write(dir.path().join("d/e/f.txt"), "x").unwrap();
+        let t = fs_.trash(&rel("d")).unwrap();
+        assert!(!dir.path().join("d").exists());
+        fs_.restore(&t, &rel("d")).unwrap();
+        assert!(dir.path().join("d/e/f.txt").exists());
+        assert!(fs_.trash(&RelPath::root()).is_err());
+        assert_eq!(fs_.trash(&rel("none")).unwrap_err().kind(), io::ErrorKind::NotFound);
+        let missing = crate::TrashTicket { id: "no-such".into() };
+        assert_eq!(fs_.restore(&missing, &rel("z")).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 }

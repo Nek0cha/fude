@@ -218,6 +218,14 @@ impl ProjectFs for RemoteFs {
         self.done(Request::Remove { root: self.root.clone(), path: rel.clone() })
     }
 
+    fn trash(&self, _rel: &RelPath) -> io::Result<crate::TrashTicket> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "WSL のゴミ箱はまだ使えない"))
+    }
+
+    fn restore(&self, _ticket: &crate::TrashTicket, _rel: &RelPath) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "WSL のゴミ箱はまだ使えない"))
+    }
+
     fn git_status(&self) -> io::Result<Option<crate::git::GitStatus>> {
         match self.call(Request::GitStatus { root: self.root.clone() }, &[])? {
             (Response::Status, json) => serde_json::from_slice(&json)

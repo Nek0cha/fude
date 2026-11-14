@@ -12,6 +12,7 @@ pub mod procs;
 mod remote;
 pub mod search;
 pub mod serve;
+mod trash;
 pub mod watch;
 pub mod wire;
 #[cfg(windows)]
@@ -106,6 +107,12 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
+/// ゴミ箱から戻すための札。id が空なら、ゴミ箱には入ったが戻す手がかりが取れなかった（取り消しには使えない）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashTicket {
+    pub id: String,
+}
+
 /// ファイルの大きさと更新日時。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileMeta {
@@ -136,6 +143,10 @@ pub trait ProjectFs: Send + Sync {
     fn rename(&self, from: &RelPath, to: &RelPath) -> io::Result<()>;
     /// 消す。フォルダは中身ごと。ルートは拒む。
     fn remove(&self, rel: &RelPath) -> io::Result<()>;
+    /// OS のゴミ箱に送る。フォルダは中身ごと。ルートは拒み、無ければ NotFound。
+    fn trash(&self, rel: &RelPath) -> io::Result<TrashTicket>;
+    /// ゴミ箱から rel（送ったときの場所）へ戻す。埋まっていれば AlreadyExists、ゴミ箱に無ければ NotFound。
+    fn restore(&self, ticket: &TrashTicket, rel: &RelPath) -> io::Result<()>;
     fn metadata(&self, rel: &RelPath) -> io::Result<FileMeta>;
     /// Git の状態。リポジトリでない、git が無い → Ok(None)。
     fn git_status(&self) -> io::Result<Option<git::GitStatus>>;
