@@ -76,6 +76,8 @@ pub fn image_link(md_rel: &str, target: &LinkTarget) -> String {
         LinkTarget::Project(rel) => relative_from_md(md_rel, rel),
         LinkTarget::Outside(abs) => abs.clone(),
     };
+    // URL として読まれる `%`、`#`、`?` は符号化する（読むときは resolve_image が戻す）。
+    let dest = dest.replace('%', "%25").replace('#', "%23").replace('?', "%3F");
     if dest.chars().any(|c| c.is_whitespace() || "()<>".contains(c)) { format!("![](<{dest}>)") } else { format!("![]({dest})") }
 }
 
@@ -341,5 +343,16 @@ mod tests {
         assert_eq!(proportional(0.25, 8), (2, 0.0));
         assert_eq!(proportional(1.0, 8), (7, 1.0));
         assert_eq!(proportional(0.5, 0), (0, 0.0));
+    }
+
+    /// `#`、`?`、`%` を含む名前も、書いたリンクから同じファイルに戻る。
+    #[test]
+    fn link_escapes_url_specials() {
+        assert_eq!(image_link("a.md", &LinkTarget::Project("issue#12.png".into())), "![](issue%2312.png)");
+        for target in ["issue#12.png", "q?.png", "a%20b.png", "d/50% off #1.png"] {
+            let link = image_link("a.md", &LinkTarget::Project(target.into()));
+            let url = link.trim_start_matches("![](").trim_end_matches(')').trim_start_matches('<').trim_end_matches('>');
+            assert_eq!(resolve_image("a.md", url), Some(ImageRef::ProjectRel(target.into())), "{link}");
+        }
     }
 }
