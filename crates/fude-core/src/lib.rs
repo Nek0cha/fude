@@ -1,3 +1,4 @@
+pub mod claude;
 pub mod close;
 pub mod editor_tabs;
 pub mod fuzzy;
