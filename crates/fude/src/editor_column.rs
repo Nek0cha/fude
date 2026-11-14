@@ -307,10 +307,30 @@ impl WorkspaceView {
             return;
         };
         if !self.searches.contains_key(&project) {
-            let view = cx.new(crate::search_view::SearchView::new);
+            let view = cx.new(|cx| crate::search_view::SearchView::new(window, cx));
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &crate::search_view::SearchViewEvent, window, cx| match ev {
                 crate::search_view::SearchViewEvent::Open { rel, line, col } => {
                     this.open_in_editor(project, rel.clone(), Some(FileMode::Full), Some((*line, Some(*col))), window, cx)
+                }
+                crate::search_view::SearchViewEvent::ReplaceFiles { rels, replacement, confirm } => {
+                    let (rels, replacement) = (rels.clone(), replacement.clone());
+                    if !*confirm {
+                        return this.replace_files(project, rels, replacement, window, cx);
+                    }
+                    let count = this.searches.get(&project).map_or(0, |(v, _)| v.read(cx).match_count(&rels));
+                    let dialog = Dialog {
+                        message: format!("{count} 件（{} ファイル）を置換します", rels.len()),
+                        buttons: vec![
+                            DialogButton { label: "置換", role: ButtonRole::Primary },
+                            DialogButton { label: "キャンセル", role: ButtonRole::Cancel },
+                        ],
+                        on_choose: Box::new(move |i, this, window, cx| {
+                            if i == 0 {
+                                this.replace_files(project, rels, replacement, window, cx);
+                            }
+                        }),
+                    };
+                    this.show_dialog(dialog, window, cx);
                 }
             });
             self.searches.insert(project, (view, sub));
@@ -322,6 +342,63 @@ impl WorkspaceView {
         }
         window.focus(&view.read(cx).focus_handle(), cx);
         cx.notify();
+    }
+
+    /// 全体検索の結果の rels を、いまの検索の条件で replacement に置換する。未保存のタブがあるファイルは
+    /// 飛ばす。適用は裏で順に行い（そのときファイルを読み直す）、終わったら検索し直す。
+    pub(crate) fn replace_files(
+        &mut self,
+        project: ProjectId,
+        rels: Vec<String>,
+        replacement: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.searches.get(&project).map(|(v, _)| v.clone()) else { return };
+        let Some(query) = view.read(cx).query.clone() else { return };
+        let Some(fs) = self.live_fs(project) else { return };
+        let dirty: Vec<String> =
+            self.project_views(project).iter().map(|v| v.read(cx)).filter(|v| v.is_dirty()).map(|v| v.rel.clone()).collect();
+        let (go, skipped) = crate::search_view::plan_replace(&rels, &dirty);
+        let task_fs = fs.clone();
+        let task_query = query.clone();
+        let task_go = go.clone();
+        let task = cx.background_spawn(async move {
+            let mut failed = Vec::new();
+            for rel in &task_go {
+                let result = fude_fs::RelPath::new(rel)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))
+                    .and_then(|r| fude_fs::search::replace_in_file(task_fs.as_ref(), &r, &task_query, &replacement));
+                if let Err(e) = result {
+                    failed.push(format!("{rel}: {e}"));
+                }
+            }
+            failed
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let failed = task.await;
+            this.update_in(cx, |this, window, cx| {
+                // 開いているタブ（未保存でない）を読み直す。監視の知らせを待たない。
+                for v in this.project_views(project) {
+                    if go.contains(&v.read(cx).rel) {
+                        v.update(cx, |v, cx| v.on_external_change(cx));
+                    }
+                }
+                view.update(cx, |v, cx| v.run(fs, query, cx));
+                let mut notes = Vec::new();
+                if !skipped.is_empty() {
+                    notes.push(format!("未保存の変更があるため置換しなかったファイル:\n{}", skipped.join("\n")));
+                }
+                if !failed.is_empty() {
+                    notes.push(format!("置換できなかったファイル:\n{}", failed.join("\n")));
+                }
+                if !notes.is_empty() {
+                    this.show_error(notes.join("\n\n"), window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// project で作った FileView の全部（選んでいないタブのものも含む）。

@@ -29,6 +29,7 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     FolderPlus,
     Pencil,
     Trash,
+    Replace,
 ]);
 
 mod embedded {

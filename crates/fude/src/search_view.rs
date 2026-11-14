@@ -5,8 +5,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use fude_fs::ProjectFs;
-use fude_fs::search::{SearchQuery, SearchResults};
+use fude_fs::search::{LineMatch, SearchQuery, SearchResults};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::input::{InputEvent, InputState};
+use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -63,10 +65,61 @@ pub(crate) fn tab_title(pattern: &str) -> String {
     format!("検索: {title}")
 }
 
+/// 置換する rel と、未保存のため飛ばす rel に分ける。
+pub(crate) fn plan_replace(targets: &[String], dirty: &[String]) -> (Vec<String>, Vec<String>) {
+    targets.iter().cloned().partition(|rel| !dirty.contains(rel))
+}
+
+/// 置換のプレビューの 1 片。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Span {
+    Same(String),
+    /// 置き換えられる元の部分（取り消し線）。
+    Old(String),
+    /// 置き換えたあとの部分。
+    New(String),
+}
+
+/// プレビュー: 1 行の表示用の本文を、元の部分と新しい部分の並びにする。正規表現のときは一致ごとに $1 などを展開する。
+pub(crate) fn preview_spans(m: &LineMatch, q: &SearchQuery, replacement: &str) -> Vec<Span> {
+    let re = if q.regex { fude_fs::search::compile_query(q).ok() } else { None };
+    let text = m.text.as_str();
+    let mut out = Vec::new();
+    let mut at = 0;
+    for &(s, e) in &m.ranges {
+        let (s, e) = (s as usize, e as usize);
+        if s < at || e > text.len() || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
+            continue;
+        }
+        if s > at {
+            out.push(Span::Same(text[at..s].to_string()));
+        }
+        out.push(Span::Old(text[s..e].to_string()));
+        let new = re
+            .as_ref()
+            .and_then(|re| re.captures_at(text, s))
+            .filter(|c| c.get(0).is_some_and(|g| g.start() == s))
+            .map(|c| {
+                let mut dst = String::new();
+                c.expand(replacement, &mut dst);
+                dst
+            })
+            .unwrap_or_else(|| replacement.to_string());
+        out.push(Span::New(new));
+        at = e;
+    }
+    if at < text.len() {
+        out.push(Span::Same(text[at..].to_string()));
+    }
+    out
+}
+
 /// 持ち主へ知らせること。
 pub(crate) enum SearchViewEvent {
     /// rel の line 行 col 桁（1 始まり）を開く。
     Open { rel: String, line: u32, col: u32 },
+    /// rels の一致を replacement で置換する。confirm なら先に確かめる。
+    ReplaceFiles { rels: Vec<String>, replacement: String, confirm: bool },
 }
 
 pub(crate) struct SearchView {
@@ -81,13 +134,24 @@ pub(crate) struct SearchView {
     fs: Option<Arc<dyn ProjectFs>>,
     list: UniformListScrollHandle,
     focus: FocusHandle,
+    /// 置換の文字列の入力欄。
+    replace: Entity<InputState>,
+    _replace_sub: Subscription,
 }
 
 impl EventEmitter<SearchViewEvent> for SearchView {}
 
 impl SearchView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let replace = cx.new(|cx| InputState::new(window, cx).placeholder("置換"));
+        let _replace_sub = cx.subscribe(&replace, |_, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         SearchView {
+            replace,
+            _replace_sub,
             query: None,
             results: SearchResults::default(),
             generation: 0,
@@ -155,6 +219,31 @@ impl SearchView {
         cx.notify();
     }
 
+    /// rels の一致の数。
+    pub fn match_count(&self, rels: &[String]) -> usize {
+        self.results
+            .files
+            .iter()
+            .filter(|f| rels.iter().any(|r| r == f.rel.as_str()))
+            .flat_map(|f| &f.lines)
+            .map(|l| l.ranges.len())
+            .sum()
+    }
+
+    /// 置換の欄の文字列（空なら置換しない）。
+    fn replacement(&self, cx: &App) -> Option<String> {
+        let text = self.replace.read(cx).value().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn emit_replace(&mut self, rels: Vec<String>, confirm: bool, cx: &mut Context<Self>) {
+        let Some(replacement) = self.replacement(cx) else { return };
+        if rels.is_empty() || self.running {
+            return;
+        }
+        cx.emit(SearchViewEvent::ReplaceFiles { rels, replacement, confirm });
+    }
+
     fn summary(&self) -> String {
         if self.running {
             return "検索中…".into();
@@ -186,12 +275,14 @@ impl SearchView {
     }
 
     fn render_row(&self, row: Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let replacement = self.replacement(cx);
         match row {
             Row::File(i) => {
                 let file = &self.results.files[i];
                 let rel = file.rel.as_str().to_string();
                 let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
                 let open = !self.collapsed.contains(&rel);
+                let rel_for_button = rel.clone();
                 let count: usize = file.lines.iter().map(|l| l.ranges.len()).sum();
                 div()
                     .id(ElementId::Name(format!("search-file-{i}").into()))
@@ -206,6 +297,17 @@ impl SearchView {
                     .child(file_icon(icon_for_file(&name)))
                     .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child(rel))
                     .child(div().flex_shrink_0().text_size(px(11.)).text_color(theme.fg_dim).child(count.to_string()))
+                    .child(div().flex_1())
+                    .when(replacement.is_some(), |d| {
+                        let rel = rel_for_button.clone();
+                        d.child(
+                            text_button(ElementId::Name(format!("search-replace-{i}").into()), "置換", theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.emit_replace(vec![rel.clone()], false, cx);
+                                })),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_collapsed(i, cx)))
                     .into_any_element()
             }
@@ -213,8 +315,14 @@ impl SearchView {
                 let file = &self.results.files[i];
                 let m = &file.lines[j];
                 let mark = HighlightStyle { background_color: Some(Rgba { a: 0.25, ..theme.warn }.into()), ..Default::default() };
-                let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> =
-                    m.ranges.iter().map(|&(s, e)| (s as usize..e as usize, mark)).collect();
+                let text: StyledText = match (&replacement, &self.query) {
+                    (Some(r), Some(q)) => preview_text(&preview_spans(m, q, r), theme),
+                    _ => {
+                        let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> =
+                            m.ranges.iter().map(|&(s, e)| (s as usize..e as usize, mark)).collect();
+                        StyledText::new(m.text.clone()).with_highlights(highlights)
+                    }
+                };
                 let rel = file.rel.as_str().to_string();
                 let (line, col) = (m.line, m.col);
                 div()
@@ -235,7 +343,7 @@ impl SearchView {
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(StyledText::new(m.text.clone()).with_highlights(highlights)),
+                            .child(text),
                     )
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(SearchViewEvent::Open { rel: rel.clone(), line, col })))
                     .into_any_element()
@@ -266,6 +374,26 @@ impl Render for SearchView {
             .child(self.render_toggle("search-case", "Aa", flags.case_sensitive, &theme, cx, |f| f.case_sensitive = !f.case_sensitive))
             .child(self.render_toggle("search-word", "ab", flags.whole_word, &theme, cx, |f| f.whole_word = !f.whole_word))
             .child(self.render_toggle("search-regex", ".*", flags.regex, &theme, cx, |f| f.regex = !f.regex));
+        let can_replace = self.replacement(cx).is_some() && !self.results.files.is_empty() && !self.running;
+        let replace_row = div()
+            .flex_shrink_0()
+            .px(px(10.))
+            .py(px(4.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .border_b_1()
+            .border_color(theme.border_subtle)
+            .child(div().flex_1().min_w_0().font(mono_font()).child(Input::new(&self.replace).appearance(false).prefix(icon(IconName::Replace, theme.fg_dim))))
+            .child(
+                text_button("search-replace-all", "すべて置換", &theme)
+                    .when(!can_replace, |d| d.opacity(0.4))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let rels = this.results.files.iter().map(|f| f.rel.as_str().to_string()).collect();
+                        this.emit_replace(rels, true, cx);
+                    })),
+            );
         let error = self.error.clone().map(|e| div().px(px(12.)).py(px(8.)).text_size(px(12.)).text_color(theme.danger).child(e));
         let list = uniform_list(
             "search-rows",
@@ -290,16 +418,73 @@ impl Render for SearchView {
             .text_color(theme.fg_default)
             .rounded(size::RADIUS_SM)
             .child(header)
+            .child(replace_row)
             .children(error)
             .child(list)
     }
 }
 
+/// 小さな文字のボタン（「置換」「すべて置換」）。
+fn text_button(id: impl Into<ElementId>, label: &'static str, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .h(px(20.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(theme.border_subtle)
+        .text_size(px(11.))
+        .text_color(theme.fg_default)
+        .hover(|s| s.bg(theme.bg_hover))
+        .child(label)
+}
+
+/// プレビューの片を 1 つの文字列にし、元の部分に取り消し線、新しい部分に diff_add の色を付ける。
+fn preview_text(spans: &[Span], theme: &Theme) -> StyledText {
+    let mut text = String::new();
+    let mut highlights = Vec::new();
+    for span in spans {
+        let start = text.len();
+        let style = match span {
+            Span::Same(s) => {
+                text.push_str(s);
+                None
+            }
+            Span::Old(s) => {
+                text.push_str(s);
+                Some(HighlightStyle {
+                    color: Some(theme.fg_dim.into()),
+                    background_color: Some(Rgba { a: 0.2, ..theme.diff_del }.into()),
+                    strikethrough: Some(StrikethroughStyle { color: Some(theme.fg_dim.into()), thickness: px(1.) }),
+                    ..Default::default()
+                })
+            }
+            Span::New(s) => {
+                text.push_str(s);
+                Some(HighlightStyle {
+                    color: Some(theme.diff_add.into()),
+                    background_color: Some(Rgba { a: 0.2, ..theme.diff_add }.into()),
+                    ..Default::default()
+                })
+            }
+        };
+        if let Some(style) = style
+            && text.len() > start
+        {
+            highlights.push((start..text.len(), style));
+        }
+    }
+    StyledText::new(text).with_highlights(highlights)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Row, accept_results, flatten, tab_title};
+    use super::{Row, Span, accept_results, flatten, plan_replace, preview_spans, tab_title};
     use fude_fs::RelPath;
-    use fude_fs::search::{FileMatches, LineMatch, SearchResults};
+    use fude_fs::search::{FileMatches, LineMatch, SearchQuery, SearchResults};
     use std::collections::HashSet;
 
     fn results(files: &[(&str, usize)]) -> SearchResults {
@@ -327,6 +512,35 @@ mod tests {
     fn stale_results_are_ignored() {
         assert!(accept_results(3, 3));
         assert!(!accept_results(3, 2));
+    }
+
+    #[test]
+    fn replace_skips_dirty_files() {
+        let (go, skip) = plan_replace(&["a.rs".into(), "b.rs".into()], &["b.rs".into()]);
+        assert_eq!(go, ["a.rs"]);
+        assert_eq!(skip, ["b.rs"]);
+    }
+
+    #[test]
+    fn preview_marks_old_and_new() {
+        let m = LineMatch { line: 1, col: 5, text: "let foo = foo;".into(), ranges: vec![(4, 7), (10, 13)] };
+        let q = SearchQuery { pattern: "foo".into(), ..Default::default() };
+        assert_eq!(
+            preview_spans(&m, &q, "bar"),
+            [
+                Span::Same("let ".into()),
+                Span::Old("foo".into()),
+                Span::New("bar".into()),
+                Span::Same(" = ".into()),
+                Span::Old("foo".into()),
+                Span::New("bar".into()),
+                Span::Same(";".into()),
+            ]
+        );
+        // 正規表現のときは、一致ごとに $1 を展開した文字列を出す。
+        let re = SearchQuery { pattern: r"(\w)oo".into(), regex: true, ..Default::default() };
+        let m = LineMatch { line: 1, col: 1, text: "foo".into(), ranges: vec![(0, 3)] };
+        assert_eq!(preview_spans(&m, &re, "${1}X"), [Span::Old("foo".into()), Span::New("fX".into())]);
     }
 
     #[test]

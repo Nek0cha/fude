@@ -65,6 +65,11 @@ pub fn build_pattern(q: &SearchQuery) -> Result<String, String> {
     Ok(pattern)
 }
 
+/// 検索の条件の正規表現（置換のプレビューで $1 を展開するのに使う）。
+pub fn compile_query(q: &SearchQuery) -> Result<regex::Regex, String> {
+    compile(&build_pattern(q)?, q)
+}
+
 fn compile(pattern: &str, q: &SearchQuery) -> Result<regex::Regex, String> {
     regex::RegexBuilder::new(pattern).case_insensitive(!q.case_sensitive).build().map_err(|e| e.to_string())
 }
