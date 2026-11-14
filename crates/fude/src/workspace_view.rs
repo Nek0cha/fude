@@ -433,6 +433,14 @@ impl WorkspaceView {
         }
     }
 
+    /// 選択中のペインのターミナルに検索の欄を出す。
+    fn find_in_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.workspace.active_project().and_then(|p| p.active_tab()).map(|t| t.panes[t.focused].id) else { return };
+        let Some((view, _)) = self.terminals.get(&id) else { return };
+        self.focused_pane = Some(id);
+        view.update(cx, |v, cx| v.open_search(window, cx));
+    }
+
     /// 次の描画で、選択中のペインへフォーカスを当て直す。
     pub(crate) fn refocus_pane(&mut self) {
         self.focused_pane = None;
@@ -804,6 +812,7 @@ impl Render for WorkspaceView {
                 this.open_palette(fude_core::palette::Scope::Files, "", window, cx)
             }))
             .on_action(cx.listener(|this, _: &FindInFiles, window, cx| this.open_find_in_files(window, cx)))
+            .on_action(cx.listener(|this, _: &FindInTerminal, window, cx| this.find_in_terminal(window, cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.new_default_tab();
                 cx.notify();

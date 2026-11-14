@@ -29,6 +29,9 @@ pub struct Theme {
     /// 差分とツリーの状態の記号だけに使う「中身の色」（設計書 §6.1.1）。
     pub diff_add: Rgba,
     pub diff_del: Rgba,
+    /// ターミナル内の検索の一致（warn の 30%）と、選んだ一致（warn の 70%）。
+    pub search_match: Rgba,
+    pub search_current: Rgba,
 }
 
 impl Theme {
@@ -64,6 +67,8 @@ impl Theme {
             selection: rgba(0xb9a8ff4d),
             diff_add: rgb(0x5fe0b0),
             diff_del: rgb(0xff8a8a),
+            search_match: rgba(0xffd28a4d),
+            search_current: rgba(0xffd28ab3),
         }
     }
 }

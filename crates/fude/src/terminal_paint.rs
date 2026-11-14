@@ -117,6 +117,20 @@ pub fn paint_terminal(
     for (row, line) in snap.lines.iter().enumerate() {
         let y = origin.y + m.line_h * row as f32;
         paint_spans(line, |c| c.bg.map(|bg| color(bg, 1.0)), y, origin.x, m, window);
+        // 検索の一致は選択の塗りより先に塗る（選択が上に重なる）。
+        let (found, current): (Hsla, Hsla) = (theme.search_match.into(), theme.search_current.into());
+        paint_spans(
+            line,
+            |c| match (c.matched, c.current_match) {
+                (_, true) => Some(current),
+                (true, false) => Some(found),
+                _ => None,
+            },
+            y,
+            origin.x,
+            m,
+            window,
+        );
         let selection: Hsla = theme.selection.into();
         paint_spans(line, |c| c.selected.then_some(selection), y, origin.x, m, window);
 

@@ -26,6 +26,7 @@ mod rail;
 mod search_view;
 mod reduced_motion;
 mod shell_menu;
+mod term_search;
 mod terminal_paint;
 mod terminal_view;
 mod theme;
@@ -130,6 +131,7 @@ fn main() {
         file_view::bind_file_view_keys(cx);
         tree_view::bind_tree_keys(cx);
         palette_view::bind_palette_keys(cx);
+        term_search::bind_term_search_keys(cx);
         // ウィンドウは 1 枚なので、閉じたらアプリも終える（macOS でアプリだけ残らないように）。
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
