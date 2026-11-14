@@ -9,7 +9,8 @@ use fude_core::keymap::{Command, Platform, context_bindings, default_bindings};
 use fude_core::recent::RecentList;
 use fude_core::session::{self, SessionData, WindowGeom};
 use fude_core::settings::{LastProjectClosed, Settings};
-use fude_core::workspace::{OpenMode, PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
+use fude_core::claude::{AgentState, Agents, HookSignal, parse_terminal_id};
+use fude_core::workspace::{OpenMode, PaneId, Project, ProjectId, ProjectRoot, ShellKind, Tab, Workspace};
 use fude_core::motion::Fade;
 use fude_ipc::Message;
 use gpui_kit::*;
@@ -188,6 +189,8 @@ pub(crate) fn geom_from_bounds(bounds: WindowBounds) -> WindowGeom {
 
 pub struct WorkspaceView {
     pub(crate) workspace: Workspace,
+    /// ペインごとの Claude Code の状態（返事待ち、タスク）。hook の信号で変わる。
+    pub(crate) agents: Agents,
     /// ピル用のブランチ名。開いたときと、ウィンドウが前面に来たときに読み直す。
     pub(crate) branches: HashMap<ProjectId, Option<String>>,
     pub(crate) hover: HoverFades,
@@ -301,6 +304,7 @@ impl WorkspaceView {
         window.focus(&focus, cx);
         let mut this = Self {
             workspace,
+            agents: Agents::default(),
             branches: HashMap::new(),
             hover: HoverFades::default(),
             should_move: false,
@@ -433,6 +437,24 @@ impl WorkspaceView {
         }
     }
 
+    /// Claude Code の hook の信号をペインに当てる。新しく返事待ちになったら true。知らないペインは無視する。
+    pub(crate) fn on_hook(&mut self, terminal: &str, signal: HookSignal, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        let Some((_, pane)) = parse_terminal_id(terminal).and_then(|raw| self.workspace.pane_by_raw(raw)) else { return false };
+        self.agents.apply(pane.raw(), signal)
+    }
+
+    pub(crate) fn pane_waiting(&self, pane: PaneId) -> bool {
+        self.agents.state(pane.raw()) == AgentState::Waiting
+    }
+
+    pub(crate) fn tab_waiting(&self, tab: &Tab) -> bool {
+        tab.panes.iter().any(|p| self.pane_waiting(p.id))
+    }
+
+    pub(crate) fn project_waiting(&self, project: &Project) -> bool {
+        project.tabs.iter().any(|t| self.tab_waiting(t))
+    }
+
     /// 選択中のペインのターミナルに検索の欄を出す。
     fn find_in_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.workspace.active_project().and_then(|p| p.active_tab()).map(|t| t.panes[t.focused].id) else { return };
@@ -459,8 +481,12 @@ impl WorkspaceView {
             Message::Open { root, shell } => self.open_project(root, shell, cx),
             Message::OpenFile { file, root_hint } => self.open_file(file, root_hint, None, window, cx),
             Message::Activate => {}
-            // hook の信号は前面に出さない（受けるのは計画7の Task 6）。
-            Message::Hook { .. } => return,
+            // hook の信号は前面に出さない。
+            Message::Hook { terminal, signal } => {
+                self.on_hook(&terminal, signal, window, cx);
+                cx.notify();
+                return;
+            }
         }
         window.activate_window();
         cx.activate(true);
@@ -603,6 +629,7 @@ impl WorkspaceView {
         let alive: std::collections::HashSet<PaneId> =
             self.workspace.projects().iter().flat_map(|p| &p.tabs).flat_map(|t| &t.panes).map(|p| p.id).collect();
         self.terminals.retain(|id, _| alive.contains(id));
+        self.agents.retain(|raw| alive.iter().any(|p| p.raw() == raw));
 
         // フォーカスしていたビューが無くなった（タブやペインを閉じた）か。
         let lost = window.focused(cx).is_none();
@@ -646,6 +673,9 @@ impl WorkspaceView {
                         this.workspace.close_pane(id);
                     }
                     TerminalEvent::Exited { success: false } => {}
+                    TerminalEvent::Input => {
+                        this.agents.typed(id.raw());
+                    }
                     TerminalEvent::Focused => {
                         this.workspace.focus_pane(id);
                         this.focused_pane = Some(id);

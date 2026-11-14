@@ -40,6 +40,8 @@ pub enum TerminalEvent {
     Exited { success: bool },
     /// クリックでこのペインにフォーカスした。
     Focused,
+    /// キー入力、IME の確定、貼り付けで PTY に書いた（返事待ちを消す）。
+    Input,
 }
 
 pub struct TerminalView {
@@ -256,6 +258,7 @@ impl TerminalView {
             let modes = session.with_state(|st| st.modes());
             if let Some(bytes) = encode_key(&input, modes, &self.overrides) {
                 session.write(bytes);
+                cx.emit(TerminalEvent::Input);
             }
             cx.stop_propagation();
         }
@@ -375,6 +378,7 @@ impl TerminalView {
         };
         let bracketed = session.with_state(|st| st.bracketed_paste());
         session.write(paste_bytes(&text, bracketed));
+        cx.emit(TerminalEvent::Input);
     }
 
     /// 上へ遡っているときだけ出す「最新へ」のボタン。
@@ -509,6 +513,7 @@ impl EntityInputHandler for TerminalView {
         self.marked = None;
         if !text.is_empty() {
             self.write(text.as_bytes().to_vec());
+            cx.emit(TerminalEvent::Input);
         }
         cx.notify();
     }

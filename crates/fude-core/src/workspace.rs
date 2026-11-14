@@ -280,6 +280,13 @@ impl Workspace {
     }
 
     /// ペインを含むタブの focused をそのペインにする。
+    /// ペインの番号（FUDE_TERMINAL_ID の数字）から、そのペインとプロジェクトを探す。
+    pub fn pane_by_raw(&self, raw: u64) -> Option<(ProjectId, PaneId)> {
+        self.projects
+            .iter()
+            .find_map(|p| p.tabs.iter().flat_map(|t| &t.panes).find(|pane| pane.id.0 == raw).map(|pane| (p.id, pane.id)))
+    }
+
     pub fn focus_pane(&mut self, pane: PaneId) {
         if let Some((p, ti, pi)) = self.find_pane_mut(pane) {
             p.tabs[ti].focused = pi;
@@ -376,6 +383,15 @@ mod tests {
     use crate::location::FileLocation;
     use crate::panel::FileMode;
     use std::path::PathBuf;
+
+    #[test]
+    fn pane_by_raw_finds_pane() {
+        let mut ws = Workspace::default();
+        let a = ws.open_project(ProjectRoot::Local(PathBuf::from("C:/a")));
+        let pane = ws.active_project().unwrap().active_tab().unwrap().panes[0].id;
+        assert_eq!(ws.pane_by_raw(pane.raw()), Some((a, pane)));
+        assert_eq!(ws.pane_by_raw(pane.raw() + 100), None);
+    }
 
     fn ws_with(roots: &[&str]) -> Workspace {
         let mut ws = Workspace::default();
