@@ -198,6 +198,7 @@ impl WorkspaceView {
                 1 => then(this, window, cx),
                 _ => {}
             }),
+            refocus: None,
         };
         self.show_dialog(dialog, window, cx);
     }
@@ -270,6 +271,7 @@ impl WorkspaceView {
                                 then(this, window, cx);
                             }
                         }),
+                        refocus: None,
                     };
                     this.show_dialog(dialog, window, cx);
                 })

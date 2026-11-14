@@ -44,6 +44,8 @@ pub(crate) struct TreeState {
     pub menu: Option<(Option<TreeRow>, crate::popup::Popup)>,
     /// 新規や名前の変更で、名前を入れている途中。
     pub edit: Option<crate::tree_menu::TreeEdit>,
+    /// プロジェクトごとの取り消しとやり直しの履歴（メモリだけ）。
+    pub history: HashMap<ProjectId, fude_core::tree_history::TreeHistory<fude_fs::TrashTicket>>,
     _filter_sub: Option<Subscription>,
 }
 
@@ -58,6 +60,7 @@ impl TreeState {
             selected: None,
             menu: None,
             edit: None,
+            history: HashMap::new(),
             _filter_sub: None,
         }
     }

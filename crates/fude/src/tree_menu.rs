@@ -1,13 +1,14 @@
 //! ツリーの右クリックメニュー（設計書 §4.3。「Claude に渡す」は計画7）。
-//! 新規と名前の変更は、ツリーの上部に 1 行の入力欄を出し、Enter で確定、Esc で取り消す。
+//! 新規と名前の変更は、ツリーの上部に 1 行の入力欄を出し、Enter で確定、Esc で取り消す。削除はゴミ箱に送る（計画8b）。
 
 use std::path::Path;
 use std::time::Instant;
 
 use fude_core::claude::mention;
 use fude_core::keymap::Platform;
+use fude_core::tree_history::{TreeHistory, TreeOp};
 use fude_core::workspace::ProjectId;
-use fude_fs::RelPath;
+use fude_fs::{RelPath, TrashTicket};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::*;
@@ -126,6 +127,17 @@ pub(crate) struct TreeEdit {
 const MENU_HOVER: usize = 400;
 
 impl WorkspaceView {
+    /// プロジェクトのツリーの操作の履歴。
+    pub(crate) fn tree_history(&mut self, project: ProjectId) -> &mut TreeHistory<TrashTicket> {
+        self.tree.history.entry(project).or_default()
+    }
+
+    /// ツリーの操作の失敗を知らせ、閉じたらツリーへフォーカスを返す。
+    pub(crate) fn show_tree_error(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self.tree.focus.clone();
+        self.show_error_to(message, Some(focus), window, cx);
+    }
+
     pub(crate) fn open_tree_menu(&mut self, row: Option<TreeRow>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.tree.menu = Some((row, Popup::open(position, window, cx)));
         cx.notify();
@@ -259,12 +271,17 @@ impl WorkspaceView {
                             EditKind::NewFolder => "フォルダを作れません",
                             EditKind::Rename => "名前を変えられません",
                         };
-                        this.show_error(error_text(what, dest.as_str(), &e), window, cx);
+                        this.show_tree_error(error_text(what, dest.as_str(), &e), window, cx);
                         return;
                     }
-                    if kind == EditKind::Rename {
-                        this.editor_renamed(project, target.as_str(), dest.as_str(), cx);
-                    }
+                    let op = match kind {
+                        EditKind::Rename => {
+                            this.editor_renamed(project, target.as_str(), dest.as_str(), cx);
+                            TreeOp::Renamed { from: target.as_str().to_string(), to: dest.as_str().to_string() }
+                        }
+                        _ => TreeOp::Created { path: dest.as_str().to_string(), trashed: None },
+                    };
+                    this.tree_history(project).push(op);
                     // 作り先のフォルダを開いて読み直す（監視の通知を待たない）。
                     this.tree.models.entry(project).or_default().expand(&parent);
                     this.load_tree_dir(project, parent.clone(), cx);
@@ -282,11 +299,12 @@ impl WorkspaceView {
 
     fn confirm_tree_delete(&mut self, project: ProjectId, row: TreeRow, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = Dialog {
-            message: format!("{} を削除しますか？元に戻せません。", row.name),
+            message: format!("{} をゴミ箱に移しますか？", row.name),
             buttons: vec![
                 DialogButton { label: "キャンセル", role: ButtonRole::Cancel },
-                DialogButton { label: "削除", role: ButtonRole::Danger },
+                DialogButton { label: "ゴミ箱に移す", role: ButtonRole::Danger },
             ],
+            refocus: Some(self.tree.focus.clone()),
             on_choose: Box::new(move |i, this, window, cx| {
                 if i != 1 {
                     return;
@@ -294,15 +312,23 @@ impl WorkspaceView {
                 let window_handle = window.window_handle();
                 let Some(fs) = this.live_fs(project) else { return };
                 let rel = row.rel.clone();
-                let task = cx.background_spawn(async move { fs.remove(&rel) });
+                let task = cx.background_spawn(async move { fs.trash(&rel) });
                 let parent =
                     row.rel.as_str().rsplit_once('/').and_then(|(p, _)| RelPath::new(p).ok()).unwrap_or_else(RelPath::root);
                 cx.spawn(async move |this, cx| {
                     let result = task.await;
                     cx.update_window(window_handle, |_, window, cx| {
                         this.update(cx, |this, cx| match result {
-                            Ok(()) => this.load_tree_dir(project, parent, cx),
-                            Err(e) => this.show_error(error_text("削除できません", row.rel.as_str(), &e), window, cx),
+                            Ok(ticket) => {
+                                this.load_tree_dir(project, parent, cx);
+                                if ticket.id.is_empty() {
+                                    let message = format!("{} をゴミ箱に移しましたが、取り消しには使えません。", row.name);
+                                    this.show_tree_error(message, window, cx);
+                                } else {
+                                    this.tree_history(project).push(TreeOp::Deleted { path: row.rel.as_str().to_string(), ticket });
+                                }
+                            }
+                            Err(e) => this.show_tree_error(error_text("ゴミ箱に移せません", row.rel.as_str(), &e), window, cx),
                         })
                         .ok();
                     })

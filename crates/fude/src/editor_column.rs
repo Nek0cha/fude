@@ -387,6 +387,7 @@ impl WorkspaceView {
                                 this.replace_files(project, rels, replacement, window, cx);
                             }
                         }),
+                        refocus: None,
                     };
                     this.show_dialog(dialog, window, cx);
                 }
@@ -614,6 +615,7 @@ impl WorkspaceView {
                 1 => then(this, window, cx),
                 _ => {}
             }),
+            refocus: None,
         };
         self.show_dialog(dialog, window, cx);
     }
