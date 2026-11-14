@@ -46,10 +46,12 @@ pub enum PaletteCommand {
     NextTab,
     PrevTab,
     ToggleRouteMap,
+    LaunchClaude,
+    CopyHookConfig,
 }
 
 impl PaletteCommand {
-    pub const ALL: [PaletteCommand; 12] = [
+    pub const ALL: [PaletteCommand; 14] = [
         PaletteCommand::NewTerminal,
         PaletteCommand::SplitTerminal,
         PaletteCommand::ToggleTree,
@@ -62,6 +64,8 @@ impl PaletteCommand {
         PaletteCommand::NextTab,
         PaletteCommand::PrevTab,
         PaletteCommand::ToggleRouteMap,
+        PaletteCommand::LaunchClaude,
+        PaletteCommand::CopyHookConfig,
     ];
 
     /// 表示名。
@@ -79,6 +83,8 @@ impl PaletteCommand {
             PaletteCommand::NextTab => "次のタブ",
             PaletteCommand::PrevTab => "前のタブ",
             PaletteCommand::ToggleRouteMap => "路線図の表示切り替え",
+            PaletteCommand::LaunchClaude => "Claude Code を起動",
+            PaletteCommand::CopyHookConfig => "Claude Code の hook の設定をコピー",
         }
     }
 
@@ -97,6 +103,8 @@ impl PaletteCommand {
             PaletteCommand::NextTab => "next tab",
             PaletteCommand::PrevTab => "previous tab",
             PaletteCommand::ToggleRouteMap => "toggle route map plan tasks",
+            PaletteCommand::LaunchClaude => "launch start claude code",
+            PaletteCommand::CopyHookConfig => "copy claude code hook config settings",
         }
     }
 
@@ -119,7 +127,7 @@ impl PaletteCommand {
             PaletteCommand::GoToFile => Some(Command::GoToFile),
             PaletteCommand::FindInFiles => Some(Command::FindInFiles),
             PaletteCommand::FindInTerminal => Some(Command::FindInTerminal),
-            PaletteCommand::OpenFolder => None,
+            PaletteCommand::OpenFolder | PaletteCommand::LaunchClaude | PaletteCommand::CopyHookConfig => None,
         }
     }
 }
@@ -215,6 +223,18 @@ mod tests {
         assert!(PaletteCommand::ALL.contains(&PaletteCommand::ToggleRouteMap));
         assert_eq!(PaletteCommand::ToggleRouteMap.keymap_command(), Some(Command::ToggleRouteMap));
         assert_eq!(key_label("ctrl-\\", Platform::Windows), "Ctrl+\\");
+    }
+
+    #[test]
+    fn claude_commands() {
+        for c in [PaletteCommand::LaunchClaude, PaletteCommand::CopyHookConfig, PaletteCommand::ToggleRouteMap] {
+            assert!(PaletteCommand::ALL.contains(&c), "{c:?}");
+            assert!(c.needs_project(), "{c:?}");
+        }
+        assert_eq!(PaletteCommand::LaunchClaude.label(), "Claude Code を起動");
+        assert_eq!(PaletteCommand::CopyHookConfig.label(), "Claude Code の hook の設定をコピー");
+        assert_eq!(PaletteCommand::LaunchClaude.keymap_command(), None);
+        assert_eq!(PaletteCommand::CopyHookConfig.keymap_command(), None);
     }
 
     #[test]

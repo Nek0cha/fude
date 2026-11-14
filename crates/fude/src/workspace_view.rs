@@ -9,7 +9,7 @@ use fude_core::keymap::{Command, Platform, context_bindings, default_bindings};
 use fude_core::recent::RecentList;
 use fude_core::session::{self, SessionData, WindowGeom};
 use fude_core::settings::{LastProjectClosed, Settings};
-use fude_core::claude::{AgentState, Agents, HookSignal, parse_terminal_id};
+use fude_core::claude::{AgentState, Agents, HookCommand, HookSignal, hook_config, parse_terminal_id};
 use fude_core::workspace::{OpenMode, PaneId, Project, ProjectId, ProjectRoot, ShellKind, Tab, Workspace};
 use fude_core::motion::Fade;
 use fude_ipc::Message;
@@ -173,6 +173,18 @@ pub(crate) fn terminal_id(pane: PaneId) -> String {
     format!("p{}", pane.raw())
 }
 
+/// 「Claude Code を起動」で、新しいターミナルを作った直後に書く入力。
+pub const CLAUDE_LAUNCH_INPUT: &[u8] = b"claude\r";
+
+/// 作業中のプロジェクトに合う hook のコマンド。WSL は Shell(WSL 側の fude の置き場所)、それ以外は
+/// Exec(この fude の / 区切りの絶対パス)。
+pub(crate) fn hook_command_for(root: &ProjectRoot, exe: &std::path::Path, wsl_fude: &str) -> HookCommand {
+    match root {
+        ProjectRoot::Wsl { .. } => HookCommand::Shell(wsl_fude.to_string()),
+        ProjectRoot::Local(_) => HookCommand::Exec(exe.to_string_lossy().replace('\\', "/")),
+    }
+}
+
 /// 状態が変わってから保存するまでの待ち時間。続けて変わったら、最後の変化から数え直す。
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 
@@ -222,6 +234,8 @@ pub struct WorkspaceView {
     terminals: HashMap<PaneId, (Entity<TerminalView>, Subscription)>,
     /// 最後にフォーカスを当てたペイン。選択が変わったら、新しいペインへフォーカスを移す。
     focused_pane: Option<PaneId>,
+    /// ペインのターミナルを作った直後に書く入力（「Claude Code を起動」）。
+    pending_input: HashMap<PaneId, Vec<u8>>,
     /// ＋の右クリックメニュー。
     pub(crate) shell_menu: Option<Popup>,
     /// レールの右クリックメニューと、その対象のプロジェクト。
@@ -342,6 +356,7 @@ impl WorkspaceView {
             should_move: false,
             terminals: HashMap::new(),
             focused_pane: None,
+            pending_input: HashMap::new(),
             shell_menu: None,
             project_menu: None,
             distros: Vec::new(),
@@ -537,6 +552,39 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// 既定のシェルで新しいタブを開き、`claude` と Enter を入力する。
+    pub(crate) fn launch_claude(&mut self, cx: &mut Context<Self>) {
+        let Some(kind) = self.workspace.active_project().map(|p| p.default_shell()) else { return };
+        if self.workspace.new_tab(kind).is_none() {
+            return;
+        }
+        if let Some(pane) = self.workspace.active_project().and_then(|p| p.active_tab()).map(|t| t.panes[t.focused].id) {
+            self.pending_input.insert(pane, CLAUDE_LAUNCH_INPUT.to_vec());
+        }
+        cx.notify();
+    }
+
+    /// 作業中のプロジェクトに合う hook の設定を、settings.json に貼る形でクリップボードに書く。
+    pub(crate) fn copy_hook_config(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) else { return };
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => {
+                eprintln!("fude の場所が分からない: {e}");
+                return;
+            }
+        };
+        #[cfg(windows)]
+        let wsl_fude = self.wsl_hosts.bin().to_string();
+        #[cfg(not(windows))]
+        let wsl_fude = String::new();
+        let config = hook_config(&hook_command_for(&root, &exe, &wsl_fude));
+        match serde_json::to_string_pretty(&config) {
+            Ok(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Err(e) => eprintln!("hook の設定を書けない: {e}"),
+        }
+    }
+
     /// 選択中のペインのターミナルに検索の欄を出す。
     fn find_in_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.workspace.active_project().and_then(|p| p.active_tab()).map(|t| t.panes[t.focused].id) else { return };
@@ -711,6 +759,7 @@ impl WorkspaceView {
         let alive: std::collections::HashSet<PaneId> =
             self.workspace.projects().iter().flat_map(|p| &p.tabs).flat_map(|t| &t.panes).map(|p| p.id).collect();
         self.terminals.retain(|id, _| alive.contains(id));
+        self.pending_input.retain(|id, _| alive.contains(id));
         self.agents.retain(|raw| alive.iter().any(|p| p.raw() == raw));
 
         // フォーカスしていたビューが無くなった（タブやペインを閉じた）か。
@@ -765,6 +814,9 @@ impl WorkspaceView {
                 }
                 cx.notify();
             });
+            if let Some(input) = self.pending_input.remove(&id) {
+                view.read(cx).write(input);
+            }
             self.terminals.insert(id, (view, sub));
         }
         if self.focused_pane != Some(target)
@@ -987,6 +1039,24 @@ mod tests {
     use super::geom_from_bounds;
     use fude_core::session::WindowGeom;
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
+
+    #[test]
+    fn hook_command_per_root() {
+        use super::hook_command_for;
+        use fude_core::claude::HookCommand;
+        use fude_core::workspace::ProjectRoot;
+        use std::path::{Path, PathBuf};
+        let exe = Path::new(r"C:\Program Files\fude\fude.exe");
+        let local = hook_command_for(&ProjectRoot::Local(PathBuf::from(r"C:\w")), exe, "~/.local/bin/fude");
+        assert!(matches!(local, HookCommand::Exec(ref p) if p == "C:/Program Files/fude/fude.exe"));
+        let wsl = hook_command_for(&ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() }, exe, "~/.local/bin/fude");
+        assert!(matches!(wsl, HookCommand::Shell(ref s) if s == "~/.local/bin/fude"));
+    }
+
+    #[test]
+    fn claude_launch_input_runs_claude() {
+        assert_eq!(super::CLAUDE_LAUNCH_INPUT, b"claude\r");
+    }
 
     #[test]
     fn last_project_closed_rules() {
