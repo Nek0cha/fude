@@ -534,6 +534,9 @@ mod tests {
     #[test]
     fn selected_lines_out_of_range_is_clamped() {
         assert_eq!(selected_lines("a\nb", 2..99), Some((2, 2)));
-        assert_eq!(selected_lines("a\nb", 5..1), Some((1, 2)));
+        // 後ろから選んだ範囲（start > end）も、行の順に直す。
+        #[allow(clippy::reversed_empty_ranges)]
+        let reversed = 5..1;
+        assert_eq!(selected_lines("a\nb", reversed), Some((1, 2)));
     }
 }

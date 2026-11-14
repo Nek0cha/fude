@@ -96,15 +96,17 @@ mod win {
 
     fn dot_icon() -> windows::core::Result<HICON> {
         let pixels = super::dot_pixels(DOT, AMBER);
-        let mut info = BITMAPINFO::default();
-        info.bmiHeader = BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: DOT as i32,
-            // 負の高さで、上から下の並びにする。
-            biHeight: -(DOT as i32),
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: DOT as i32,
+                // 負の高さで、上から下の並びにする。
+                biHeight: -(DOT as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
             ..Default::default()
         };
         // SAFETY: bits は CreateDIBSection が確保した DOT×DOT×4 バイトを指し、その範囲だけに書く。
