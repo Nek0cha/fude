@@ -40,6 +40,8 @@ pub enum Command {
     FindInTerminal,
     /// 路線図の折りたたみの切り替え。
     ToggleRouteMap,
+    /// 開いているファイル（選んでいれば行の範囲）を、最後に使ったターミナルに `@` で入力する。ファイルの中だけで効く。
+    SendToClaude,
 }
 
 /// ターミナル以外にフォーカスがあるときだけ効かせる文脈。
@@ -107,6 +109,7 @@ pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'sta
     match platform {
         Platform::MacOs => vec![
             ("cmd-s", Command::Save, FILE_VIEW),
+            ("cmd-shift-l", Command::SendToClaude, FILE_VIEW),
             ("cmd-f", Command::FindInTerminal, TERMINAL),
             // gpui-kit の入力欄は ⌘⇧F を置換に割り当てているため、全体検索を優先させる（置換は ⌘⌥F）。
             ("cmd-shift-f", Command::FindInFiles, INPUT),
@@ -115,6 +118,7 @@ pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'sta
             ("ctrl-w", Command::Close, NOT_TERMINAL),
             ("ctrl-b", Command::ToggleTree, NOT_TERMINAL),
             ("ctrl-s", Command::Save, FILE_VIEW),
+            ("ctrl-shift-l", Command::SendToClaude, FILE_VIEW),
             ("ctrl-k", Command::OpenPalette, NOT_TERMINAL),
             ("ctrl-p", Command::GoToFile, NOT_TERMINAL),
             // Ctrl+F はシェル（1 文字進む、fish の補完の確定）に、Ctrl+Shift+F は全体検索に使う。
@@ -212,15 +216,21 @@ mod tests {
     }
 
     #[test]
-    fn file_view_has_only_save() {
-        // 計画5の右パネルの履歴のキー（戻る／進む）は無くした。ファイルの中で効くのは保存だけ。
+    fn file_view_has_only_save_and_send() {
+        // 計画5の右パネルの履歴のキー（戻る／進む）は無くした。ファイルの中で効くのは保存と「Claude に渡す」だけ。
         for platform in BOTH {
             for (key, command, context) in context_bindings(platform) {
                 if context == FILE_VIEW {
-                    assert_eq!(command, Command::Save, "{key}");
+                    assert!(matches!(command, Command::Save | Command::SendToClaude), "{key}");
                 }
             }
         }
+    }
+
+    #[test]
+    fn send_to_claude_key() {
+        assert!(context_bindings(Platform::MacOs).contains(&("cmd-shift-l", Command::SendToClaude, FILE_VIEW)));
+        assert!(context_bindings(Platform::Windows).contains(&("ctrl-shift-l", Command::SendToClaude, FILE_VIEW)));
     }
 
     #[test]

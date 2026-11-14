@@ -4,6 +4,7 @@
 use std::path::Path;
 use std::time::Instant;
 
+use fude_core::claude::mention;
 use fude_core::keymap::Platform;
 use fude_core::workspace::ProjectId;
 use fude_fs::RelPath;
@@ -26,12 +27,20 @@ pub(crate) enum TreeAction {
     Rename,
     Delete,
     CopyPath,
+    SendToClaude,
     Reveal,
 }
 
-/// 設計書 §4.3 の並び（「Claude に渡す」を除く）。
-const ACTIONS: [TreeAction; 6] =
-    [TreeAction::NewFile, TreeAction::NewFolder, TreeAction::Rename, TreeAction::Delete, TreeAction::CopyPath, TreeAction::Reveal];
+/// 設計書 §4.3 の並び。
+const ACTIONS: [TreeAction; 7] = [
+    TreeAction::NewFile,
+    TreeAction::NewFolder,
+    TreeAction::Rename,
+    TreeAction::Delete,
+    TreeAction::CopyPath,
+    TreeAction::SendToClaude,
+    TreeAction::Reveal,
+];
 
 fn label(action: TreeAction, os: Platform) -> &'static str {
     match (action, os) {
@@ -40,6 +49,7 @@ fn label(action: TreeAction, os: Platform) -> &'static str {
         (TreeAction::Rename, _) => "名前の変更",
         (TreeAction::Delete, _) => "削除",
         (TreeAction::CopyPath, _) => "パスをコピー",
+        (TreeAction::SendToClaude, _) => "Claude に渡す",
         (TreeAction::Reveal, Platform::Windows) => "エクスプローラーで表示",
         (TreeAction::Reveal, Platform::MacOs) => "Finder で表示",
     }
@@ -52,6 +62,7 @@ fn action_icon(action: TreeAction) -> IconName {
         TreeAction::Rename => IconName::Pencil,
         TreeAction::Delete => IconName::Trash,
         TreeAction::CopyPath => IconName::Copy,
+        TreeAction::SendToClaude => IconName::Send,
         TreeAction::Reveal => IconName::FolderOpen,
     }
 }
@@ -78,6 +89,12 @@ pub(crate) fn new_item_parent(row: Option<&TreeRow>) -> RelPath {
         Some(r) => r.rel.as_str().rsplit_once('/').and_then(|(p, _)| RelPath::new(p).ok()).unwrap_or_else(RelPath::root),
         None => RelPath::root(),
     }
+}
+
+/// ツリーの行を Claude に渡す文字列。フォルダは末尾に `/` を付ける。
+fn tree_mention(row: &TreeRow) -> String {
+    let rel = row.rel.as_str();
+    if row.is_dir { mention(&format!("{rel}/"), None) } else { mention(rel, None) }
 }
 
 /// ファイルをエクスプローラー／Finder で選んだ状態で開くコマンド。
@@ -140,6 +157,11 @@ impl WorkspaceView {
             TreeAction::CopyPath => {
                 if let Some(row) = row {
                     cx.write_to_clipboard(ClipboardItem::new_string(row.rel.as_str().to_string()));
+                }
+            }
+            TreeAction::SendToClaude => {
+                if let Some(row) = row {
+                    self.send_to_claude(project, tree_mention(&row), cx);
                 }
             }
             TreeAction::Reveal => {
@@ -350,7 +372,7 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{new_item_parent, validate_name};
+    use super::{new_item_parent, tree_mention, validate_name};
     use crate::tree_model::TreeRow;
     use fude_fs::RelPath;
 
@@ -374,5 +396,11 @@ mod tests {
         assert_eq!(new_item_parent(Some(&row("src/main.rs", false))), RelPath::new("src").unwrap());
         assert_eq!(new_item_parent(Some(&row("a.md", false))), RelPath::root());
         assert_eq!(new_item_parent(None), RelPath::root());
+    }
+
+    #[test]
+    fn tree_mention_marks_folders() {
+        assert_eq!(tree_mention(&row("src/main.rs", false)), "@src/main.rs ");
+        assert_eq!(tree_mention(&row("src/ui", true)), "@src/ui/ ");
     }
 }

@@ -52,12 +52,13 @@ gpui_kit::actions!(
 
 /// Command と文脈を GPUI のキーバインドにする。
 fn binding(key: &'static str, command: Command, context: Option<&'static str>) -> KeyBinding {
-    use crate::file_view::SaveFile;
+    use crate::file_view::{SaveFile, SendToClaude};
     use crate::tree_view::ToggleTree;
     match command {
         Command::Close => KeyBinding::new(key, CloseItem, context),
         Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
         Command::Save => KeyBinding::new(key, SaveFile, context),
+        Command::SendToClaude => KeyBinding::new(key, SendToClaude, context),
         Command::OpenPalette => KeyBinding::new(key, OpenPalette, context),
         Command::GoToFile => KeyBinding::new(key, GoToFile, context),
         Command::FindInFiles => KeyBinding::new(key, FindInFiles, context),
@@ -99,6 +100,7 @@ fn default_binding(key: &'static str, command: Command) -> KeyBinding {
         Command::Close
         | Command::ToggleTree
         | Command::Save
+        | Command::SendToClaude
         | Command::OpenPalette
         | Command::GoToFile
         | Command::FindInFiles
@@ -519,6 +521,20 @@ impl WorkspaceView {
 
     pub(crate) fn project_waiting(&self, project: &Project) -> bool {
         project.tabs.iter().any(|t| self.tab_waiting(t))
+    }
+
+    /// そのプロジェクトの選択中のタブの、フォーカス中のペインに text を書き、そこへフォーカスを移す。ペインが無ければ何もしない。
+    /// Enter は送らない。入力したので、そのペインの返事待ちを消す。
+    pub(crate) fn send_to_claude(&mut self, project: ProjectId, text: String, cx: &mut Context<Self>) {
+        let Some(p) = self.workspace.projects().iter().find(|p| p.id == project) else { return };
+        let Some(pane) = p.active_tab().map(|t| t.panes[t.focused].id) else { return };
+        let Some((view, _)) = self.terminals.get(&pane) else { return };
+        view.read(cx).write(text.into_bytes());
+        self.agents.typed(pane.raw());
+        self.workspace.focus_pane(pane);
+        // 次の描画の sync_terminals がそのペインへフォーカスを当てる。
+        self.refocus_pane();
+        cx.notify();
     }
 
     /// 選択中のペインのターミナルに検索の欄を出す。

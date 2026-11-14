@@ -286,10 +286,32 @@ pub fn hook_config(cmd: &HookCommand) -> Value {
     })
 }
 
+/// 「Claude に渡す」で入力する文字列。lines は 1 始まりの（最初, 最後）。末尾に空白を 1 つ付ける。
+/// 空白を含むパスは `@"rel#L2-3"` のように範囲ごと引用符で囲む（Claude Code 2.1.325 は `@"rel"#L2` の範囲を読まない）。
+pub fn mention(rel: &str, lines: Option<(u32, u32)>) -> String {
+    let range = match lines {
+        Some((a, b)) if a == b => format!("#L{a}"),
+        Some((a, b)) => format!("#L{a}-{b}"),
+        None => String::new(),
+    };
+    if rel.chars().any(char::is_whitespace) { format!("@\"{rel}{range}\" ") } else { format!("@{rel}{range} ") }
+}
+
+/// text の中の選択（バイト範囲）が掛かる行。空の選択は None。最後が行頭ちょうどなら、その行は含めない。
+pub fn selected_lines(text: &str, range: std::ops::Range<usize>) -> Option<(u32, u32)> {
+    let bytes = text.as_bytes();
+    let (start, end) = (range.start.min(range.end).min(bytes.len()), range.start.max(range.end).min(bytes.len()));
+    if start == end {
+        return None;
+    }
+    let line_of = |at: usize| bytes[..at].iter().filter(|&&b| b == b'\n').count() as u32 + 1;
+    Some((line_of(start), line_of(end - 1)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AgentState, Agents, HookCommand, HookSignal, SUBJECT_MAX_CHARS, TodoChange, TodoItem, TodoStatus};
-    use super::{hook_config, parse_terminal_id, signal_from_hook};
+    use super::{hook_config, mention, parse_terminal_id, selected_lines, signal_from_hook};
     use serde_json::json;
 
     #[test]
@@ -481,5 +503,37 @@ mod tests {
         let s = hook_config(&HookCommand::Shell("~/.local/bin/fude".into()));
         assert_eq!(s["hooks"]["Stop"][0]["hooks"][0]["command"], "~/.local/bin/fude hook");
         assert!(s["hooks"]["Stop"][0]["hooks"][0].get("args").is_none());
+    }
+
+    #[test]
+    fn mention_formats() {
+        assert_eq!(mention("src/a.rs", None), "@src/a.rs ");
+        assert_eq!(mention("src/a.rs", Some((42, 48))), "@src/a.rs#L42-48 ");
+        assert_eq!(mention("src/a.rs", Some((7, 7))), "@src/a.rs#L7 ");
+    }
+
+    /// 空白を含むパスは引用符で囲み、行の範囲も引用符の中に入れる（Claude Code 2.1.325 で確認）。
+    #[test]
+    fn mention_quotes_paths_with_spaces() {
+        assert_eq!(mention("a b/c.md", None), "@\"a b/c.md\" ");
+        assert_eq!(mention("a b/c.md", Some((2, 3))), "@\"a b/c.md#L2-3\" ");
+        assert_eq!(mention("a b/", None), "@\"a b/\" ");
+    }
+
+    #[test]
+    fn selected_lines_rules() {
+        let text = "a\nbb\nccc\n";
+        assert_eq!(selected_lines(text, 0..0), None);
+        assert_eq!(selected_lines(text, 0..1), Some((1, 1)));
+        assert_eq!(selected_lines(text, 2..7), Some((2, 3)));
+        // 最後が 3 行目の行頭ちょうどなら、3 行目は含めない。
+        assert_eq!(selected_lines(text, 2..5), Some((2, 2)));
+        assert_eq!(selected_lines("a\r\nb", 0..4), Some((1, 2)));
+    }
+
+    #[test]
+    fn selected_lines_out_of_range_is_clamped() {
+        assert_eq!(selected_lines("a\nb", 2..99), Some((2, 2)));
+        assert_eq!(selected_lines("a\nb", 5..1), Some((1, 2)));
     }
 }

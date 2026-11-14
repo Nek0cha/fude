@@ -33,6 +33,7 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     Bell,
     Check,
     ListTodo,
+    Send,
 ]);
 
 mod embedded {
