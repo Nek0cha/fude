@@ -19,6 +19,7 @@ mod instance;
 mod language;
 mod layout_anim;
 mod main_area;
+mod md_preview;
 mod open_file;
 mod palette_view;
 mod popup;

@@ -7,10 +7,12 @@ use std::io;
 use std::sync::Arc;
 
 use fude_core::claude::selected_lines;
+use fude_core::markdown::{is_markdown, split_preview};
 use fude_core::panel::{ExternalAction, FileMode, ReadOutcome, external_change};
 use fude_core::text::{OpenError, TextDoc, decode_text, encode_text};
 use fude_fs::git::{GitMark, LineMark, line_marks};
 use fude_fs::{ProjectFs, RelPath};
+use fude_core::workspace::ProjectRoot;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{EditorState, GutterDecoration, GutterDecorationCollection, InputEvent, Position};
 use gpui_kit::component::diff::{Diff, DiffFile, DiffState};
@@ -20,7 +22,8 @@ use gpui_kit::*;
 
 use crate::dialog::error_text;
 use crate::language::language_for;
-use crate::theme::{Theme, mono_font, popup_shadow, size};
+use crate::md_preview::MdPreview;
+use crate::theme::{Theme, mono_font, popup_shadow, size, ui_font};
 use crate::title_row::icon;
 
 gpui_kit::actions!(file_view, [SaveFile, LeaveEditor, SendToClaude, ToggleMarkdownMode]);
@@ -51,6 +54,34 @@ pub(crate) fn dirty_after_save(current: &str, saved: &str) -> bool {
     current != saved
 }
 
+/// Markdown の表示モード（ソースとプレビュー）とソースモード（設計書 §5.4）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MdMode {
+    Preview,
+    Source,
+}
+
+/// 本文の出し方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MdBody {
+    Diff,
+    Editor,
+    /// ソースとプレビューを左右に並べる。
+    Split,
+    /// エディタ列が狭いので、プレビューだけ。
+    PreviewOnly,
+}
+
+/// mode は、差分があって差分の表示中なら Diff、それ以外は Full を渡す。column_w はエディタ列の幅。
+pub(crate) fn md_body(is_md: bool, mode: FileMode, md: MdMode, column_w: f32) -> MdBody {
+    match (mode, is_md, md) {
+        (FileMode::Diff, _, _) => MdBody::Diff,
+        (_, true, MdMode::Preview) if split_preview(column_w) => MdBody::Split,
+        (_, true, MdMode::Preview) => MdBody::PreviewOnly,
+        _ => MdBody::Editor,
+    }
+}
+
 pub(crate) fn open_error_text(e: OpenError) -> String {
     match e {
         OpenError::Binary => "バイナリのため開けない".into(),
@@ -70,6 +101,8 @@ pub enum FileViewEvent {
     SaveFailed(String),
     /// このファイル（lines は選んだ行の範囲）を、最後に使ったターミナルの Claude Code に渡す。
     SendToClaude { rel: String, lines: Option<(u32, u32)> },
+    /// プレビューのリンクから、プロジェクトの中のファイル（ルートからの相対パス）を開く。
+    OpenRel(String),
 }
 
 /// 上部の帯。
@@ -89,6 +122,7 @@ enum Body {
 
 pub struct FileView {
     fs: Arc<dyn ProjectFs>,
+    root: ProjectRoot,
     pub(crate) rel: String,
     mode: FileMode,
     mark: Option<GitMark>,
@@ -107,6 +141,12 @@ pub struct FileView {
     auto_mode: bool,
     /// 読み込んで、まだエディタに入れていない中身。
     pending_doc: Option<TextDoc>,
+    /// Markdown の表示モードかソースモードか。開くたびに表示モードから始める。
+    pub(crate) md_mode: MdMode,
+    /// Markdown のプレビュー。Markdown を読み込んだら作る。
+    preview: Option<MdPreview>,
+    /// エディタ列の幅（論理ピクセル）。表示モードで並べるかを決める。
+    column_w: f32,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -114,9 +154,10 @@ pub struct FileView {
 impl EventEmitter<FileViewEvent> for FileView {}
 
 impl FileView {
-    pub fn new(fs: Arc<dyn ProjectFs>, rel: String, mode: FileMode, mark: Option<GitMark>, cx: &mut Context<Self>) -> Self {
+    pub fn new(fs: Arc<dyn ProjectFs>, root: ProjectRoot, rel: String, mode: FileMode, mark: Option<GitMark>, cx: &mut Context<Self>) -> Self {
         let mut this = FileView {
             fs,
+            root,
             rel,
             mode,
             mark,
@@ -129,6 +170,9 @@ impl FileView {
             pending_cursor: None,
             pending_doc: None,
             auto_mode: false,
+            md_mode: MdMode::Preview,
+            preview: None,
+            column_w: 1000.0,
             focus: cx.focus_handle(),
             _subs: Vec::new(),
         };
@@ -181,6 +225,9 @@ impl FileView {
 
     /// ツリーで名前が変わった。新しいパスで読み直しの要否を確かめる（見つからないの帯を消すため）。
     pub fn set_rel(&mut self, rel: String, cx: &mut Context<Self>) {
+        if let Some(p) = &mut self.preview {
+            p.set_md_rel(rel.clone());
+        }
         self.rel = rel;
         self.on_external_change(cx);
         cx.notify();
@@ -193,6 +240,61 @@ impl FileView {
         }
         self.mode = mode;
         cx.notify();
+    }
+
+    /// エディタ列の幅。描くたびに持ち主が渡す。
+    pub(crate) fn set_column_width(&mut self, w: Pixels) {
+        self.column_w = f32::from(w);
+    }
+
+    fn is_md(&self) -> bool {
+        is_markdown(&self.rel)
+    }
+
+    /// 差分を出しているか（差分の表示中で、差分がある）。
+    fn showing_diff(&self) -> bool {
+        self.mode == FileMode::Diff && self.diff.is_some()
+    }
+
+    /// 表示モードかソースモードにする。差分の表示中なら、全体の表示に切り替えてから。
+    pub(crate) fn set_md_mode(&mut self, md: MdMode, cx: &mut Context<Self>) {
+        if self.mode == FileMode::Diff {
+            self.set_mode(FileMode::Full, cx);
+        }
+        self.md_mode = md;
+        cx.notify();
+    }
+
+    /// ⌘E / Ctrl+E。差分の表示中は全体の表示にするだけ（今のモードのまま）。Markdown でなければ何もしない。
+    pub(crate) fn toggle_md_mode(&mut self, cx: &mut Context<Self>) {
+        if !self.is_md() {
+            return;
+        }
+        if self.showing_diff() {
+            self.set_mode(FileMode::Full, cx);
+            return;
+        }
+        let next = if self.md_mode == MdMode::Preview { MdMode::Source } else { MdMode::Preview };
+        self.set_md_mode(next, cx);
+    }
+
+    /// 本文の出し方。
+    fn layout(&self) -> MdBody {
+        let mode = if self.showing_diff() { FileMode::Diff } else { FileMode::Full };
+        md_body(self.is_md() && self.preview.is_some(), mode, self.md_mode, self.column_w)
+    }
+
+    /// Markdown のテキストを読み込んだら、プレビューを作るか中身を替える。
+    fn sync_preview(&mut self, cx: &mut Context<Self>) {
+        let Body::Text { editor, .. } = &self.body else { return };
+        if !self.is_md() {
+            return;
+        }
+        let text = editor.read(cx).value().to_string();
+        match &self.preview {
+            Some(p) => p.set_text(&text, cx),
+            None => self.preview = Some(MdPreview::new(&text, self.root.clone(), self.rel.clone(), cx)),
+        }
     }
 
     fn rel_path(&self) -> io::Result<RelPath> {
@@ -342,6 +444,7 @@ impl FileView {
                         this.dirty = dirty;
                         cx.emit(FileViewEvent::Dirty);
                     }
+                    this.sync_preview(cx);
                     cx.notify();
                 }
             });
@@ -354,6 +457,7 @@ impl FileView {
         }
         self.dirty = false;
         self.banner = None;
+        self.sync_preview(cx);
         self.load_diff(cx);
         cx.notify();
     }
@@ -410,7 +514,7 @@ impl FileView {
     /// 選択の右上に重ねる小さなボタン。選択が空か、見えていないときは出さない。
     fn render_selection_button(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let Body::Text { editor, .. } = &self.body else { return None };
-        if self.mode == FileMode::Diff && self.diff.is_some() {
+        if matches!(self.layout(), MdBody::Diff | MdBody::PreviewOnly) {
             return None;
         }
         let e = editor.read(cx);
@@ -528,8 +632,7 @@ impl FileView {
                     .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(rel.clone()))),
             )
             .child(div().flex_1());
-        if has_diff(self.mark) {
-            let seg = |id: &'static str, label: &'static str, on: bool| {
+        let seg = |id: &'static str, label: &'static str, on: bool| {
                 div()
                     .id(id)
                     .h(px(22.))
@@ -541,19 +644,16 @@ impl FileView {
                     .when(on, |d| d.bg(theme.bg_hover).text_color(theme.fg_default))
                     .when(!on, |d| d.text_color(theme.fg_dim))
                     .child(label)
-            };
+        };
+        let segments = |a: Stateful<Div>, b: Stateful<Div>| {
+            div().flex().flex_row().p(px(2.)).rounded(size::RADIUS_SM).border_1().border_color(theme.border_subtle).child(a).child(b)
+        };
+        if has_diff(self.mark) {
             let diff_on = self.mode == FileMode::Diff;
-            row = row.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .p(px(2.))
-                    .rounded(size::RADIUS_SM)
-                    .border_1()
-                    .border_color(theme.border_subtle)
-                    .child(seg("fv-diff", "差分", diff_on).on_click(cx.listener(|this, _, _, cx| this.set_mode(FileMode::Diff, cx))))
-                    .child(seg("fv-full", "全体", !diff_on).on_click(cx.listener(|this, _, _, cx| this.set_mode(FileMode::Full, cx)))),
-            );
+            row = row.child(segments(
+                seg("fv-diff", "差分", diff_on).on_click(cx.listener(|this, _, _, cx| this.set_mode(FileMode::Diff, cx))),
+                seg("fv-full", "全体", !diff_on).on_click(cx.listener(|this, _, _, cx| this.set_mode(FileMode::Full, cx))),
+            ));
             if diff_on && let Some(state) = self.diff.clone() {
                 let prev = state.clone();
                 row = row
@@ -565,10 +665,37 @@ impl FileView {
                     })));
             }
         }
+        if self.is_md() {
+            // 差分の表示中は、どちらも選んでいない見た目にする。
+            let shown = !self.showing_diff();
+            let preview_on = shown && self.md_mode == MdMode::Preview;
+            let source_on = shown && self.md_mode == MdMode::Source;
+            row = row.child(segments(
+                seg("fv-md-preview", "表示", preview_on)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_md_mode(MdMode::Preview, cx))),
+                seg("fv-md-source", "ソース", source_on)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_md_mode(MdMode::Source, cx))),
+            ));
+        }
         row.child(
             button("fv-send", IconName::Send, true)
                 .on_click(cx.listener(|this, _, _, cx| this.send_to_claude(cx))),
         )
+    }
+
+    /// プレビューの要素（文字は UI のフォント）。プレビューが無ければ None。
+    fn render_preview(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let preview = self.preview.as_ref()?;
+        let this = cx.entity().downgrade();
+        let link = cx.global::<Theme>().accent.into();
+        let view = preview.element(
+            link,
+            move |rel, _, cx| {
+                this.update(cx, |_, cx| cx.emit(FileViewEvent::OpenRel(rel))).ok();
+            },
+            cx,
+        );
+        Some(div().size_full().pl(px(16.)).pr(px(8.)).pt(px(8.)).font(ui_font()).text_size(px(14.)).child(view))
     }
 
     fn render_banner(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
@@ -619,10 +746,24 @@ impl Render for FileView {
         let header = self.render_header(&theme, cx);
         let banner = self.render_banner(&theme, cx);
         let send = self.render_selection_button(&theme, cx);
-        let body: AnyElement = match (&self.mode, &self.diff, &self.body) {
-            (FileMode::Diff, Some(state), _) => Diff::new(state).into_any_element(),
+        let layout = self.layout();
+        let body: AnyElement = match (layout, &self.diff, &self.body) {
+            (MdBody::Diff, Some(state), _) => Diff::new(state).into_any_element(),
             (_, _, Body::Text { editor, .. }) => {
-                Editor::new(editor).bordered(false).appearance(false).h_full().into_any_element()
+                let source = || Editor::new(editor).bordered(false).appearance(false).h_full();
+                let preview = self.render_preview(cx);
+                match (layout, preview) {
+                    (MdBody::Split, Some(preview)) => div()
+                        .size_full()
+                        .flex()
+                        .flex_row()
+                        .child(div().flex_1().min_w_0().h_full().child(source()))
+                        .child(div().w(px(1.)).h_full().flex_shrink_0().bg(theme.border_subtle))
+                        .child(div().flex_1().min_w_0().h_full().child(preview))
+                        .into_any_element(),
+                    (MdBody::PreviewOnly, Some(preview)) => preview.into_any_element(),
+                    _ => source().into_any_element(),
+                }
             }
             (_, _, Body::Error(msg)) => div()
                 .size_full()
@@ -641,6 +782,7 @@ impl Render for FileView {
             .on_drop(|_: &ExternalPaths, _, cx| cx.stop_propagation())
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_from_key(cx)))
             .on_action(cx.listener(|this, _: &SendToClaude, _, cx| this.send_to_claude(cx)))
+            .on_action(cx.listener(|this, _: &ToggleMarkdownMode, _, cx| this.toggle_md_mode(cx)))
             // エディタは、閉じる検索欄や選択が無いときに Esc を親へ回す。そのときだけターミナルへ戻る。
             .on_action(cx.listener(|_, _: &gpui_kit::base::input::Escape, _, cx| cx.emit(FileViewEvent::LeaveEditor)))
             .on_action(cx.listener(|_, _: &LeaveEditor, _, cx| cx.emit(FileViewEvent::LeaveEditor)))
@@ -657,7 +799,7 @@ impl Render for FileView {
 
 #[cfg(test)]
 mod tests {
-    use super::{dirty_after_save, has_diff, initial_mode, open_error_text};
+    use super::{MdBody, MdMode, dirty_after_save, has_diff, initial_mode, md_body, open_error_text};
     use fude_core::panel::FileMode;
     use fude_core::text::OpenError;
     use fude_fs::git::GitMark;
@@ -690,5 +832,15 @@ mod tests {
         assert_eq!(open_error_text(OpenError::Binary), "バイナリのため開けない");
         assert_eq!(open_error_text(OpenError::NotUtf8), "UTF-8 ではないため開けない");
         assert_eq!(open_error_text(OpenError::TooLarge(9 * 1024 * 1024)), "大きすぎるため開けない（9.0 MB）");
+    }
+
+    #[test]
+    fn markdown_body_layout() {
+        assert_eq!(md_body(false, FileMode::Full, MdMode::Preview, 800.0), MdBody::Editor);
+        assert_eq!(md_body(true, FileMode::Full, MdMode::Preview, 800.0), MdBody::Split);
+        assert_eq!(md_body(true, FileMode::Full, MdMode::Preview, 500.0), MdBody::PreviewOnly);
+        assert_eq!(md_body(true, FileMode::Full, MdMode::Source, 800.0), MdBody::Editor);
+        assert_eq!(md_body(true, FileMode::Diff, MdMode::Preview, 800.0), MdBody::Diff);
+        assert_eq!(md_body(false, FileMode::Diff, MdMode::Preview, 800.0), MdBody::Diff);
     }
 }

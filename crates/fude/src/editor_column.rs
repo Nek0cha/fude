@@ -255,7 +255,11 @@ impl WorkspaceView {
         let view: Option<AnyView> = if search_active {
             self.searches.get(&project).map(|(v, _)| v.clone().into())
         } else {
-            self.active_editor_view().or_else(|| self.editor_anim.closing.clone()).map(Into::into)
+            let view = self.active_editor_view().or_else(|| self.editor_anim.closing.clone());
+            if let Some(v) = &view {
+                v.update(cx, |v, _| v.set_column_width(w));
+            }
+            view.map(Into::into)
         };
         div()
             .w(w)
@@ -635,7 +639,7 @@ impl WorkspaceView {
             p.editor.active().is_some_and(|a| a.rel == rel) && self.workspace.active_project().map(|a| a.id) == Some(project);
         let mark = self.git_mark(project, &rel);
         let view = cx.new(|cx| {
-            let mut v = FileView::new(fs, rel.clone(), item.mode, mark, cx);
+            let mut v = FileView::new(fs, p.root.clone(), rel.clone(), item.mode, mark, cx);
             v.set_auto_mode(auto);
             v
         });
@@ -650,6 +654,7 @@ impl WorkspaceView {
             FileViewEvent::SendToClaude { rel, lines } => {
                 this.send_to_claude(project, fude_core::claude::mention(rel, *lines), cx);
             }
+            FileViewEvent::OpenRel(rel) => this.open_in_editor(project, rel.clone(), None, None, window, cx),
         });
         if let Some((line, col)) = goto {
             view.update(cx, |v, cx| v.goto(line, col, window, cx));

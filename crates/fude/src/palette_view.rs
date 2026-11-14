@@ -532,7 +532,12 @@ impl WorkspaceView {
             PaletteCommand::LaunchClaude => return self.launch_claude(cx),
             PaletteCommand::CopyHookConfig => return self.copy_hook_config(window, cx),
             // 中身は計画8 の後のタスクで入れる。
-            PaletteCommand::ToggleMarkdownMode | PaletteCommand::TogglePin | PaletteCommand::ToggleVerticalTabs => return,
+            PaletteCommand::ToggleMarkdownMode => {
+                let Some(view) = self.active_editor_view() else { return };
+                window.focus(&view.read(cx).focus_handle(), cx);
+                Box::new(crate::file_view::ToggleMarkdownMode)
+            }
+            PaletteCommand::TogglePin | PaletteCommand::ToggleVerticalTabs => return,
         };
         window.dispatch_action(action, cx);
     }
