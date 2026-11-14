@@ -70,6 +70,13 @@ pub(crate) fn next_op(op: TreeOp<TrashTicket>, new_ticket: Option<TrashTicket>) 
     }
 }
 
+/// 失敗したときに、その 1 件を履歴から捨てるか。もう戻せないと分かった（ゴミ箱に無い、戻す先が埋まっている、
+/// 場所が正しくない）ときだけ捨てる。時間切れや接続切れなどは、もう一度試せるよう残す。
+pub(crate) fn drops_on_error(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind;
+    matches!(kind, ErrorKind::NotFound | ErrorKind::AlreadyExists | ErrorKind::InvalidInput)
+}
+
 fn parent_of(rel: &RelPath) -> RelPath {
     rel.as_str().rsplit_once('/').and_then(|(p, _)| RelPath::new(p).ok()).unwrap_or_else(RelPath::root)
 }
@@ -92,9 +99,6 @@ impl WorkspaceView {
     }
 
     fn run_tree_history(&mut self, direction: Direction, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tree.undo_running {
-            return;
-        }
         let Some(project) = self.workspace.active_project().map(|p| p.id) else { return };
         let Some(fs) = self.live_fs(project) else { return };
         let history = self.tree_history(project);
@@ -102,6 +106,7 @@ impl WorkspaceView {
             Direction::Undo => history.take_undo(),
             Direction::Redo => history.take_redo(),
         };
+        // 裏の操作（消している途中など）が進んでいる間は None が返る。
         let Some(op) = taken else { return };
         let Some(step) = plan_step(&op, direction) else { return };
 
@@ -123,7 +128,7 @@ impl WorkspaceView {
             self.close_clean_tabs(project, path, window, cx);
         }
 
-        self.tree.undo_running = true;
+        self.tree_history(project).begin_op();
         let task = cx.background_spawn({
             let step = step.clone();
             async move {
@@ -139,7 +144,7 @@ impl WorkspaceView {
             let result = task.await;
             cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |this, cx| {
-                    this.tree.undo_running = false;
+                    this.tree_history(project).end_op();
                     this.finish_tree_history(project, op, direction, step, result, window, cx);
                 })
                 .ok();
@@ -172,12 +177,19 @@ impl WorkspaceView {
         let new_ticket = match result {
             Ok(ticket) => ticket,
             Err(e) => {
-                // 失敗した 1 件は捨てる（その先の履歴は残す）。
                 let what = match direction {
                     Direction::Undo => "元に戻せません",
                     Direction::Redo => "やり直せません",
                 };
-                self.show_tree_error(error_text(what, step.subject().as_str(), &e), window, cx);
+                let mut message = error_text(what, step.subject().as_str(), &e);
+                if drops_on_error(e.kind()) {
+                    // もう戻せない 1 件だけ捨てる（その先の履歴は残す）。
+                } else {
+                    self.put_back(project, op, direction);
+                    message.push_str("
+もう一度試せます。");
+                }
+                self.show_tree_error(message, window, cx);
                 return;
             }
         };
@@ -230,7 +242,7 @@ mod tests {
     use fude_core::tree_history::TreeOp;
     use fude_fs::{RelPath, TrashTicket};
 
-    use super::{Direction, Step, next_op, plan_step, trash_blocked};
+    use super::{Direction, Step, drops_on_error, next_op, plan_step, trash_blocked};
 
     fn rel(p: &str) -> RelPath {
         RelPath::new(p).unwrap()
@@ -246,6 +258,18 @@ mod tests {
         assert_eq!(trash_blocked("d", &["d/a.rs"]), Some("d/a.rs".to_string()));
         assert_eq!(trash_blocked("d", &["dd/a.rs"]), None);
         assert_eq!(trash_blocked("d", &[]), None);
+    }
+
+    /// 捨てるのは、もう戻せないと分かったときだけ。時間切れや接続切れは履歴に残す。
+    #[test]
+    fn transient_errors_keep_op() {
+        use std::io::ErrorKind;
+        for kind in [ErrorKind::NotFound, ErrorKind::AlreadyExists, ErrorKind::InvalidInput] {
+            assert!(drops_on_error(kind), "{kind:?}");
+        }
+        for kind in [ErrorKind::TimedOut, ErrorKind::BrokenPipe, ErrorKind::Other, ErrorKind::PermissionDenied] {
+            assert!(!drops_on_error(kind), "{kind:?}");
+        }
     }
 
     #[test]

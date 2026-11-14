@@ -20,6 +20,8 @@ pub enum TreeOp<T> {
 pub struct TreeHistory<T> {
     undo: Vec<TreeOp<T>>,
     redo: Vec<TreeOp<T>>,
+    /// 裏で進んでいる操作の数。0 でない間は取り出さない。
+    busy: usize,
 }
 
 impl<T> Default for TreeHistory<T> {
@@ -30,7 +32,21 @@ impl<T> Default for TreeHistory<T> {
 
 impl<T> TreeHistory<T> {
     pub fn new() -> Self {
-        Self { undo: Vec::new(), redo: Vec::new() }
+        Self { undo: Vec::new(), redo: Vec::new(), busy: 0 }
+    }
+
+    /// ツリーの操作（新規、名前の変更、削除、取り消し、やり直し）を裏で始めた。
+    pub fn begin_op(&mut self) {
+        self.busy += 1;
+    }
+
+    /// 裏の操作が終わった（成功でも失敗でも）。
+    pub fn end_op(&mut self) {
+        self.busy = self.busy.saturating_sub(1);
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy > 0
     }
 
     /// 新しい操作を積む。やり直しの履歴は捨てる。
@@ -46,12 +62,14 @@ impl<T> TreeHistory<T> {
         }
     }
 
+    /// 次に取り消す op。裏の操作が進んでいる間は None。
     pub fn take_undo(&mut self) -> Option<TreeOp<T>> {
-        self.undo.pop()
+        if self.is_busy() { None } else { self.undo.pop() }
     }
 
+    /// 次にやり直す op。裏の操作が進んでいる間は None。
     pub fn take_redo(&mut self) -> Option<TreeOp<T>> {
-        self.redo.pop()
+        if self.is_busy() { None } else { self.redo.pop() }
     }
 
     /// 取り消しが成功した結果を、やり直しへ積む。
@@ -158,6 +176,22 @@ mod tests {
         let op = h.take_redo().unwrap();
         h.restore_redo(op);
         assert!(h.can_redo());
+    }
+
+    /// 操作が裏で進んでいる間は取り出せない（消した直後の Ctrl+Z で前の操作を取り消さない）。
+    #[test]
+    fn busy_history_refuses_take() {
+        let mut h = TreeHistory::<u32>::new();
+        h.push(TreeOp::Renamed { from: "a".into(), to: "b".into() });
+        h.begin_op();
+        assert!(h.is_busy());
+        assert_eq!(h.take_undo(), None);
+        h.end_op();
+        assert!(!h.is_busy());
+        assert!(h.take_undo().is_some());
+        // 開いていないのに閉じても負にならない。
+        h.end_op();
+        assert!(!h.is_busy());
     }
 
     #[test]

@@ -217,12 +217,9 @@ impl WorkspaceView {
                     filter.update(cx, |s, cx| s.set_value("", window, cx));
                 }
             }
-            if !target.is_root() {
-                let model = self.tree.models.entry(project).or_default();
-                model.expand(&target);
-                if model.needs_load(&target) {
-                    self.load_tree_dir(project, target.clone(), cx);
-                }
+            // 作り先の祖先もすべて開く（絞り込みで見えていたフォルダは、ふつうの表示では閉じていることがある）。
+            for dir in self.tree.models.entry(project).or_default().reveal(&target) {
+                self.load_tree_dir(project, dir, cx);
             }
         }
         let initial = initial.to_string();
@@ -286,6 +283,8 @@ impl WorkspaceView {
         }
         self.tree.edit = None;
         window.focus(&self.tree.focus, cx);
+        // 終わるまで取り消しを受け付けない（終わる前の Ctrl+Z で、前の操作を取り消さないため）。
+        self.tree_history(project).begin_op();
         let task = cx.background_spawn({
             let dest = dest.clone();
             let target = target.clone();
@@ -302,6 +301,7 @@ impl WorkspaceView {
             let result = task.await;
             cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |this, cx| {
+                    this.tree_history(project).end_op();
                     if let Err(e) = result {
                         let what = match kind {
                             EditKind::NewFile => "ファイルを作れません",
@@ -349,23 +349,28 @@ impl WorkspaceView {
                 let window_handle = window.window_handle();
                 let Some(fs) = this.live_fs(project) else { return };
                 let rel = row.rel.clone();
+                this.tree_history(project).begin_op();
                 let task = cx.background_spawn(async move { fs.trash(&rel) });
                 let parent =
                     row.rel.as_str().rsplit_once('/').and_then(|(p, _)| RelPath::new(p).ok()).unwrap_or_else(RelPath::root);
                 cx.spawn(async move |this, cx| {
                     let result = task.await;
                     cx.update_window(window_handle, |_, window, cx| {
-                        this.update(cx, |this, cx| match result {
-                            Ok(ticket) => {
-                                this.load_tree_dir(project, parent, cx);
-                                if ticket.id.is_empty() {
-                                    let message = format!("{} をゴミ箱に移しましたが、取り消しには使えません。", row.name);
-                                    this.show_tree_error(message, window, cx);
-                                } else {
-                                    this.tree_history(project).push(TreeOp::Deleted { path: row.rel.as_str().to_string(), ticket });
+                        this.update(cx, |this, cx| {
+                            this.tree_history(project).end_op();
+                            match result {
+                                Ok(ticket) => {
+                                    this.load_tree_dir(project, parent, cx);
+                                    if ticket.id.is_empty() {
+                                        let message = format!("{} をゴミ箱に移しましたが、取り消しには使えません。", row.name);
+                                        this.show_tree_error(message, window, cx);
+                                    } else {
+                                        let op = TreeOp::Deleted { path: row.rel.as_str().to_string(), ticket };
+                                        this.tree_history(project).push(op);
+                                    }
                                 }
+                                Err(e) => this.show_tree_error(error_text("ゴミ箱に移せません", row.rel.as_str(), &e), window, cx),
                             }
-                            Err(e) => this.show_tree_error(error_text("ゴミ箱に移せません", row.rel.as_str(), &e), window, cx),
                         })
                         .ok();
                     })

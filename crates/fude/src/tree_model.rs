@@ -133,6 +133,24 @@ impl TreeModel {
         }
     }
 
+    /// dir と、その祖先をすべて開く。読む必要のあるフォルダ（浅い順）を返す。
+    pub fn reveal(&mut self, dir: &RelPath) -> Vec<RelPath> {
+        let mut need = Vec::new();
+        let mut path = String::new();
+        for part in dir.as_str().split('/').filter(|p| !p.is_empty()) {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(part);
+            let Ok(rel) = RelPath::new(&path) else { break };
+            self.expand(&rel);
+            if self.needs_load(&rel) {
+                need.push(rel);
+            }
+        }
+        need
+    }
+
     /// ファイル名で絞り込む（大文字小文字を区別しない部分一致）。all_files は全ファイルの一覧（無ければ、届くまで何も出さない）。
     pub fn set_filter(&mut self, query: &str, all_files: Option<&[RelPath]>) {
         self.filter = query.trim().to_lowercase();
@@ -309,6 +327,21 @@ mod tests {
     fn slot_row(p: &str, depth: usize, is_dir: bool) -> TreeRow {
         let rel = rel(p);
         TreeRow { name: p.rsplit('/').next().unwrap().into(), rel, depth, is_dir, expanded: is_dir, mark: None }
+    }
+
+    /// 作り先のフォルダと祖先をすべて開き、読む必要のあるものを返す（絞り込みからの新規、計画8b）。
+    #[test]
+    fn reveal_opens_ancestors() {
+        let mut m = TreeModel::default();
+        m.set_children(&RelPath::root(), vec![entry("src", true)]);
+        let need = m.reveal(&rel("src/deep"));
+        assert_eq!(need, vec![rel("src"), rel("src/deep")]);
+        m.set_children(&rel("src"), vec![entry("deep", true)]);
+        m.set_children(&rel("src/deep"), vec![]);
+        let rows = m.rows(None);
+        assert!(rows.iter().any(|r| r.rel == rel("src/deep") && r.expanded));
+        assert!(m.reveal(&rel("src/deep")).is_empty());
+        assert!(m.reveal(&RelPath::root()).is_empty());
     }
 
     #[test]

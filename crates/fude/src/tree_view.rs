@@ -61,8 +61,6 @@ pub(crate) struct TreeState {
     pub edit: Option<crate::tree_menu::TreeEdit>,
     /// プロジェクトごとの取り消しとやり直しの履歴（メモリだけ）。
     pub history: HashMap<ProjectId, fude_core::tree_history::TreeHistory<fude_fs::TrashTicket>>,
-    /// 取り消しかやり直しの途中（終わるまで次のキーは無視する）。
-    pub undo_running: bool,
     _filter_sub: Option<Subscription>,
 }
 
@@ -80,7 +78,6 @@ impl TreeState {
             menu: None,
             edit: None,
             history: HashMap::new(),
-            undo_running: false,
             _filter_sub: None,
         }
     }

@@ -129,7 +129,12 @@ impl ProjectFs for LocalFs {
     }
 
     fn create_dir(&self, rel: &RelPath) -> io::Result<()> {
-        fs::create_dir_all(self.non_root(rel)?)
+        let path = self.non_root(rel)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        // 最後の段は create_dir で作り、既にあれば AlreadyExists にする。
+        fs::create_dir(path)
     }
 
     fn rename(&self, from: &RelPath, to: &RelPath) -> io::Result<()> {
@@ -340,6 +345,16 @@ mod tests {
         fs_.remove(&rel("c.txt")).unwrap();
         assert!(fs_.remove(&RelPath::root()).is_err());
         assert_eq!(fs_.metadata(&rel("none")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    /// 既にあるフォルダの名前で作ると AlreadyExists（取り消しで既にあったものを動かさないため）。
+    #[test]
+    fn create_dir_existing_is_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs_ = LocalFs::new(dir.path().to_path_buf());
+        fs_.create_dir(&rel("a/b")).unwrap();
+        assert_eq!(fs_.create_dir(&rel("a/b")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs_.create_dir(&rel("a")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
     }
 
     // 以下は本物のゴミ箱を使う。作ったものは試験の中で戻して片付ける。

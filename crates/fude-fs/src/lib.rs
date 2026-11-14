@@ -137,7 +137,7 @@ pub trait ProjectFs: Send + Sync {
     fn walk_files(&self) -> io::Result<Vec<RelPath>>;
     /// 空のファイルを作る。あれば AlreadyExists。
     fn create_file(&self, rel: &RelPath) -> io::Result<()>;
-    /// フォルダを作る（途中のフォルダも）。
+    /// フォルダを作る（途中のフォルダも）。最後の段が既にあれば AlreadyExists。
     fn create_dir(&self, rel: &RelPath) -> io::Result<()>;
     /// 名前を変える。to があれば AlreadyExists。
     fn rename(&self, from: &RelPath, to: &RelPath) -> io::Result<()>;
