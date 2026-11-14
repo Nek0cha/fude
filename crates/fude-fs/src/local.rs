@@ -172,6 +172,10 @@ impl ProjectFs for LocalFs {
         crate::git::git_diff(&self.root, rel)
     }
 
+    fn plan_files(&self, known: Option<&crate::plans::PlanStamp>) -> io::Result<crate::plans::PlanFetch> {
+        crate::plans::plan_files(&self.root, known)
+    }
+
     fn search(&self, query: &crate::search::SearchQuery) -> io::Result<crate::search::SearchResults> {
         crate::search::search_dir(&self.root, query)
     }

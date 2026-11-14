@@ -6,6 +6,7 @@
 use std::io;
 use std::sync::Arc;
 
+use fude_core::claude::selected_lines;
 use fude_core::panel::{ExternalAction, FileMode, ReadOutcome, external_change};
 use fude_core::text::{OpenError, TextDoc, decode_text, encode_text};
 use fude_fs::git::{GitMark, LineMark, line_marks};
@@ -19,10 +20,10 @@ use gpui_kit::*;
 
 use crate::dialog::error_text;
 use crate::language::language_for;
-use crate::theme::{Theme, mono_font, size};
+use crate::theme::{Theme, mono_font, popup_shadow, size};
 use crate::title_row::icon;
 
-gpui_kit::actions!(file_view, [SaveFile, LeaveEditor]);
+gpui_kit::actions!(file_view, [SaveFile, LeaveEditor, SendToClaude]);
 
 /// Esc でターミナルへ戻る（FileView の文脈）。エディタ列は閉じない。
 pub fn bind_file_view_keys(cx: &mut App) {
@@ -67,6 +68,8 @@ pub enum FileViewEvent {
     Saved,
     /// キーでの保存に失敗した（知らせる文）。
     SaveFailed(String),
+    /// このファイル（lines は選んだ行の範囲）を、最後に使ったターミナルの Claude Code に渡す。
+    SendToClaude { rel: String, lines: Option<(u32, u32)> },
 }
 
 /// 上部の帯。
@@ -330,6 +333,8 @@ impl FileView {
                 state.set_value(text, window, cx);
                 state
             });
+            // 選択が変わったら、選択中の小さなボタンを描き直す。
+            self._subs.push(cx.observe(&editor, |_, _, cx| cx.notify()));
             let sub = cx.subscribe(&editor, |this, editor, ev: &InputEvent, cx| {
                 if matches!(ev, InputEvent::Change) {
                     let dirty = editor.read(cx).value() != this.saved_text;
@@ -384,6 +389,56 @@ impl FileView {
             }
             result
         })
+    }
+
+    /// 全体の表示で選んでいる行（1 始まり）。差分の表示や、選んでいないときは None。
+    fn selected_lines(&self, cx: &App) -> Option<(u32, u32)> {
+        let Body::Text { editor, .. } = &self.body else { return None };
+        if self.mode == FileMode::Diff && self.diff.is_some() {
+            return None;
+        }
+        let e = editor.read(cx);
+        selected_lines(&e.value(), e.selected_range())
+    }
+
+    /// 上部のボタン、選択中の小さなボタン、⌘⇧L / Ctrl+Shift+L から。
+    fn send_to_claude(&mut self, cx: &mut Context<Self>) {
+        let lines = self.selected_lines(cx);
+        cx.emit(FileViewEvent::SendToClaude { rel: self.rel.clone(), lines });
+    }
+
+    /// 選択の右上に重ねる小さなボタン。選択が空か、見えていないときは出さない。
+    fn render_selection_button(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let Body::Text { editor, .. } = &self.body else { return None };
+        if self.mode == FileMode::Diff && self.diff.is_some() {
+            return None;
+        }
+        let e = editor.read(cx);
+        let range = e.selected_range();
+        if range.is_empty() {
+            return None;
+        }
+        let bounds = e.range_to_bounds(&range)?;
+        let right = bounds.left().max(bounds.right());
+        let top = bounds.top().min(bounds.bottom());
+        let button = div()
+            .id("fv-send-selection")
+            .size(px(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(size::RADIUS_SM)
+            .bg(theme.bg_panel)
+            .border_1()
+            .border_color(theme.border_subtle)
+            .shadow(popup_shadow())
+            .hover(|s| s.bg(theme.bg_hover))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _, cx| this.send_to_claude(cx)))
+            .child(icon(IconName::Send, theme.fg_default));
+        let position = point(right + px(4.), top - px(22.));
+        Some(deferred(anchored().position(position).child(button)).with_priority(1))
     }
 
     /// キー（⌘S / Ctrl+S）での保存。失敗したら持ち主に知らせる。
@@ -510,7 +565,10 @@ impl FileView {
                     })));
             }
         }
-        row
+        row.child(
+            button("fv-send", IconName::Send, true)
+                .on_click(cx.listener(|this, _, _, cx| this.send_to_claude(cx))),
+        )
     }
 
     fn render_banner(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
@@ -560,6 +618,7 @@ impl Render for FileView {
         let theme = *cx.global::<Theme>();
         let header = self.render_header(&theme, cx);
         let banner = self.render_banner(&theme, cx);
+        let send = self.render_selection_button(&theme, cx);
         let body: AnyElement = match (&self.mode, &self.diff, &self.body) {
             (FileMode::Diff, Some(state), _) => Diff::new(state).into_any_element(),
             (_, _, Body::Text { editor, .. }) => {
@@ -581,6 +640,7 @@ impl Render for FileView {
             .key_context("FileView")
             .on_drop(|_: &ExternalPaths, _, cx| cx.stop_propagation())
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_from_key(cx)))
+            .on_action(cx.listener(|this, _: &SendToClaude, _, cx| this.send_to_claude(cx)))
             // エディタは、閉じる検索欄や選択が無いときに Esc を親へ回す。そのときだけターミナルへ戻る。
             .on_action(cx.listener(|_, _: &gpui_kit::base::input::Escape, _, cx| cx.emit(FileViewEvent::LeaveEditor)))
             .on_action(cx.listener(|_, _: &LeaveEditor, _, cx| cx.emit(FileViewEvent::LeaveEditor)))
@@ -591,6 +651,7 @@ impl Render for FileView {
             .child(header)
             .children(banner)
             .child(div().flex_1().min_h_0().font(mono_font()).child(body))
+            .children(send)
     }
 }
 

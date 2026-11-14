@@ -38,6 +38,10 @@ pub enum Command {
     FindInFiles,
     /// ターミナル内の検索欄を開く。ターミナルの中だけで効く。
     FindInTerminal,
+    /// 路線図の折りたたみの切り替え。
+    ToggleRouteMap,
+    /// 開いているファイル（選んでいれば行の範囲）を、最後に使ったターミナルに `@` で入力する。ファイルの中だけで効く。
+    SendToClaude,
 }
 
 /// ターミナル以外にフォーカスがあるときだけ効かせる文脈。
@@ -71,6 +75,7 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("cmd-k", Command::OpenPalette),
                 ("cmd-p", Command::GoToFile),
                 ("cmd-shift-f", Command::FindInFiles),
+                ("cmd-\\", Command::ToggleRouteMap),
             ],
             PROJECT_KEYS_MAC,
         ),
@@ -90,6 +95,8 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("ctrl-shift-k", Command::OpenPalette),
                 ("ctrl-shift-p", Command::GoToFile),
                 ("ctrl-shift-f", Command::FindInFiles),
+                // Ctrl+\ はシェルの SIGQUIT と重なるため、どこでも効くのは Shift 付きだけ（§10）。
+                ("ctrl-|", Command::ToggleRouteMap),
             ],
             PROJECT_KEYS_WIN,
         ),
@@ -103,6 +110,7 @@ pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'sta
     match platform {
         Platform::MacOs => vec![
             ("cmd-s", Command::Save, FILE_VIEW),
+            ("cmd-shift-l", Command::SendToClaude, FILE_VIEW),
             ("cmd-f", Command::FindInTerminal, TERMINAL),
             // gpui-kit の入力欄は ⌘⇧F を置換に割り当てているため、全体検索を優先させる（置換は ⌘⌥F）。
             ("cmd-shift-f", Command::FindInFiles, INPUT),
@@ -111,8 +119,10 @@ pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'sta
             ("ctrl-w", Command::Close, NOT_TERMINAL),
             ("ctrl-b", Command::ToggleTree, NOT_TERMINAL),
             ("ctrl-s", Command::Save, FILE_VIEW),
+            ("ctrl-shift-l", Command::SendToClaude, FILE_VIEW),
             ("ctrl-k", Command::OpenPalette, NOT_TERMINAL),
             ("ctrl-p", Command::GoToFile, NOT_TERMINAL),
+            ("ctrl-\\", Command::ToggleRouteMap, NOT_TERMINAL),
             // Ctrl+F はシェル（1 文字進む、fish の補完の確定）に、Ctrl+Shift+F は全体検索に使う。
             ("ctrl-alt-f", Command::FindInTerminal, TERMINAL),
         ],
@@ -125,6 +135,16 @@ mod tests {
     use std::collections::HashSet;
 
     const BOTH: [Platform; 2] = [Platform::MacOs, Platform::Windows];
+
+    #[test]
+    fn route_map_key() {
+        assert!(default_bindings(Platform::MacOs).contains(&("cmd-\\", Command::ToggleRouteMap)));
+        // Windows の Ctrl+\ はターミナルの SIGQUIT（0x1C）に渡す。どこでも効くのは Shift 付き（GPUI は `|` で受け取る）。
+        let win = default_bindings(Platform::Windows);
+        assert!(win.contains(&("ctrl-|", Command::ToggleRouteMap)));
+        assert!(!win.iter().any(|(k, _)| *k == "ctrl-\\"));
+        assert!(context_bindings(Platform::Windows).contains(&("ctrl-\\", Command::ToggleRouteMap, NOT_TERMINAL)));
+    }
 
     #[test]
     fn mac_new_tab_is_cmd_t() {
@@ -202,15 +222,21 @@ mod tests {
     }
 
     #[test]
-    fn file_view_has_only_save() {
-        // 計画5の右パネルの履歴のキー（戻る／進む）は無くした。ファイルの中で効くのは保存だけ。
+    fn file_view_has_only_save_and_send() {
+        // 計画5の右パネルの履歴のキー（戻る／進む）は無くした。ファイルの中で効くのは保存と「Claude に渡す」だけ。
         for platform in BOTH {
             for (key, command, context) in context_bindings(platform) {
                 if context == FILE_VIEW {
-                    assert_eq!(command, Command::Save, "{key}");
+                    assert!(matches!(command, Command::Save | Command::SendToClaude), "{key}");
                 }
             }
         }
+    }
+
+    #[test]
+    fn send_to_claude_key() {
+        assert!(context_bindings(Platform::MacOs).contains(&("cmd-shift-l", Command::SendToClaude, FILE_VIEW)));
+        assert!(context_bindings(Platform::Windows).contains(&("ctrl-shift-l", Command::SendToClaude, FILE_VIEW)));
     }
 
     #[test]

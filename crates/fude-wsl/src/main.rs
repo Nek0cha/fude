@@ -13,7 +13,14 @@ enum Cli {
     /// root の変更を監視し、WatchBatch を JSON 1 行ずつ標準出力に書く。標準入力が閉じたら終わる。
     Watch(PathBuf),
     Version,
+    /// Claude Code の hook。信号に縮めて Windows の fude.exe に渡す。print_config なら設定例を出す。
+    Hook { print_config: bool },
 }
+
+/// hook の標準入力を読む上限。
+const HOOK_STDIN_MAX: u64 = 8 * 1024 * 1024;
+/// fude.exe の hook の終わりを待つ時間。
+const HOOK_WAIT: Duration = Duration::from_secs(3);
 
 const BUILD_ID: &str = env!("FUDE_BUILD_ID");
 
@@ -30,9 +37,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         [] => Ok(Cli::Open(PathBuf::from("."))),
         [cmd] if cmd == "serve" => Ok(Cli::Serve),
         [cmd] if cmd == "version" => Ok(Cli::Version),
+        [cmd] if cmd == "hook" => Ok(Cli::Hook { print_config: false }),
+        [cmd, flag] if cmd == "hook" && flag == "--print-config" => Ok(Cli::Hook { print_config: true }),
         [cmd, root] if cmd == "watch" => Ok(Cli::Watch(PathBuf::from(root))),
         [path] => Ok(Cli::Open(PathBuf::from(path))),
-        _ => Err("使い方: fude [フォルダ | ファイル] | fude serve | fude watch <フォルダ> | fude version".to_string()),
+        _ => Err("使い方: fude [フォルダ | ファイル] | fude serve | fude watch <フォルダ> | fude hook [--print-config] | fude version".to_string()),
     }
 }
 
@@ -85,6 +94,14 @@ fn main() {
             }
         }
         Ok(Cli::Watch(root)) => watch(root),
+        Ok(Cli::Hook { print_config: true }) => {
+            print_hook_config();
+            0
+        }
+        Ok(Cli::Hook { print_config: false }) => {
+            hook();
+            0
+        }
         Ok(Cli::Open(path)) => open(&path).unwrap_or_else(|message| {
             eprintln!("fude: {message}");
             2
@@ -119,6 +136,62 @@ fn watch(root: PathBuf) -> i32 {
     0
 }
 
+/// fude.exe に渡すコマンドと引数。
+fn hook_forward_command(host_exe: &str, terminal: &str, instance: Option<&str>) -> (String, Vec<String>) {
+    let mut args = vec!["hook".to_string(), "--signal".to_string(), "--terminal".to_string(), terminal.to_string()];
+    if let Some(instance) = instance {
+        args.extend(["--instance".to_string(), instance.to_string()]);
+    }
+    (host_exe.to_string(), args)
+}
+
+/// fude.exe の場所（host-exe に書いたもの）。
+fn host_exe() -> Option<String> {
+    let own_exe = std::env::current_exe().ok();
+    let home = std::env::var("HOME").ok();
+    host_exe_files(own_exe.as_deref(), home.as_deref())
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
+}
+
+fn print_hook_config() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    // WSL は shell 形式にする（§5.8。パレットの「hook の設定をコピー」と同じ形）。
+    let config = fude_core::claude::hook_config(&fude_core::claude::HookCommand::Shell(exe.to_string_lossy().into_owned()));
+    println!("{}", serde_json::to_string_pretty(&config).unwrap_or_default());
+}
+
+/// 標準入力の hook の入力を信号に縮め、fude.exe hook --signal に渡す。どの失敗でも何もせずに戻る。
+fn hook() {
+    use std::io::{Read, Write};
+    let mut input = Vec::new();
+    if io::stdin().lock().take(HOOK_STDIN_MAX).read_to_end(&mut input).is_err() {
+        return;
+    }
+    let Some(signal) = serde_json::from_slice(&input).ok().and_then(|v| fude_core::claude::signal_from_hook(&v)) else { return };
+    let Some(terminal) = std::env::var("FUDE_TERMINAL_ID").ok().filter(|t| !t.is_empty()) else { return };
+    let Some(host) = host_exe() else { return };
+    let Ok(line) = serde_json::to_vec(&signal) else { return };
+    let instance = std::env::var("FUDE_INSTANCE").ok().filter(|v| !v.is_empty());
+    let (cmd, args) = hook_forward_command(&host, &terminal, instance.as_deref());
+    let Ok(mut child) = Command::new(&cmd).args(&args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(&line);
+    }
+    let deadline = Instant::now() + HOOK_WAIT;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            _ => return,
+        }
+    }
+}
+
 /// 子プロセスを新しいセッションで起動する。WSL は、起動した wsl.exe のセッションが終わるときに、その中から
 /// 起動した Windows のプロセスも終わらせる。fude が動いていなかったときに起動した fude.exe が、端末を閉じると
 /// 一緒に消えないようにする。
@@ -144,14 +217,7 @@ fn new_session(_command: &mut Command) {}
 /// フォルダならプロジェクトとして、ファイルならそのファイルを（プロジェクトのルートを探して添えて）開かせる。
 fn open(path: &Path) -> Result<i32, String> {
     let distro = std::env::var("WSL_DISTRO_NAME").ok().filter(|d| !d.is_empty()).ok_or(NOT_IN_WSL)?;
-    let own_exe = std::env::current_exe().ok();
-    let home = std::env::var("HOME").ok();
-    let host_exe = host_exe_files(own_exe.as_deref(), home.as_deref())
-        .iter()
-        .filter_map(|f| std::fs::read_to_string(f).ok())
-        .map(|s| s.trim().to_string())
-        .find(|s| !s.is_empty())
-        .ok_or(NO_HOST_EXE)?;
+    let host_exe = host_exe().ok_or(NO_HOST_EXE)?;
     let abs = std::fs::canonicalize(path).map_err(|e| format!("開けない: {}: {e}", path.display()))?;
     let (cmd, args) = if abs.is_dir() {
         open_command(&host_exe, &distro, &abs)
@@ -192,6 +258,21 @@ mod tests {
         assert_eq!(parse(&["watch", "/home/x/p"]), Ok(Cli::Watch(PathBuf::from("/home/x/p"))));
         assert_eq!(parse(&["~/x"]), Ok(Cli::Open(PathBuf::from("~/x"))));
         assert!(parse(&["a", "b"]).is_err());
+    }
+
+    #[test]
+    fn parse_hook() {
+        assert_eq!(parse(&["hook"]), Ok(Cli::Hook { print_config: false }));
+        assert_eq!(parse(&["hook", "--print-config"]), Ok(Cli::Hook { print_config: true }));
+    }
+
+    #[test]
+    fn hook_forward_args() {
+        let (cmd, args) = hook_forward_command("/mnt/c/f/fude.exe", "p4", Some("dev"));
+        assert_eq!(cmd, "/mnt/c/f/fude.exe");
+        assert_eq!(args, vec!["hook", "--signal", "--terminal", "p4", "--instance", "dev"]);
+        let (_, args) = hook_forward_command("/mnt/c/f/fude.exe", "p4", None);
+        assert_eq!(args, vec!["hook", "--signal", "--terminal", "p4"]);
     }
 
     #[test]

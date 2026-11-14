@@ -519,6 +519,7 @@ impl WorkspaceView {
             PaletteCommand::NextTab => Box::new(NextTab),
             PaletteCommand::PrevTab => Box::new(PrevTab),
             PaletteCommand::FindInTerminal => Box::new(FindInTerminal),
+            PaletteCommand::ToggleRouteMap => Box::new(crate::workspace_view::ToggleRouteMap),
             PaletteCommand::Save => {
                 // 保存はファイルの中で効くので、選択中のファイルへフォーカスを移してから送る。
                 let Some(view) = self.active_editor_view() else { return };
@@ -528,6 +529,8 @@ impl WorkspaceView {
             PaletteCommand::OpenFolder => return self.prompt_open_project(cx),
             PaletteCommand::GoToFile => return self.open_palette(Scope::Files, "", window, cx),
             PaletteCommand::FindInFiles => return self.open_find_in_files(window, cx),
+            PaletteCommand::LaunchClaude => return self.launch_claude(cx),
+            PaletteCommand::CopyHookConfig => return self.copy_hook_config(window, cx),
         };
         window.dispatch_action(action, cx);
     }

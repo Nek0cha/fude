@@ -31,6 +31,8 @@ pub enum Request {
     GitDiff { root: String, path: RelPath },
     /// 全体検索（計画6で足した）。
     Search { root: String, query: crate::search::SearchQuery },
+    /// 最も新しいプランと台帳（計画7で足した）。
+    PlanFiles { root: String, known: Option<crate::plans::PlanStamp> },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -54,6 +56,8 @@ pub enum Response {
     Patch,
     /// SearchResults の JSON は payload。
     Matches,
+    /// PlanFetch の JSON は payload。
+    Plan,
     /// already_exists は計画5で足した（古いサーバーの応答には無い）。
     Error {
         message: String,

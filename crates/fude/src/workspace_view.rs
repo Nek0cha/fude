@@ -9,7 +9,8 @@ use fude_core::keymap::{Command, Platform, context_bindings, default_bindings};
 use fude_core::recent::RecentList;
 use fude_core::session::{self, SessionData, WindowGeom};
 use fude_core::settings::{LastProjectClosed, Settings};
-use fude_core::workspace::{OpenMode, PaneId, ProjectId, ProjectRoot, ShellKind, Workspace};
+use fude_core::claude::{AgentState, Agents, HookCommand, HookSignal, hook_config, parse_terminal_id};
+use fude_core::workspace::{OpenMode, PaneId, Project, ProjectId, ProjectRoot, ShellKind, Tab, Workspace};
 use fude_core::motion::Fade;
 use fude_ipc::Message;
 use gpui_kit::*;
@@ -45,21 +46,24 @@ gpui_kit::actions!(
         GoToFile,
         FindInFiles,
         FindInTerminal,
+        ToggleRouteMap,
     ]
 );
 
 /// Command と文脈を GPUI のキーバインドにする。
 fn binding(key: &'static str, command: Command, context: Option<&'static str>) -> KeyBinding {
-    use crate::file_view::SaveFile;
+    use crate::file_view::{SaveFile, SendToClaude};
     use crate::tree_view::ToggleTree;
     match command {
         Command::Close => KeyBinding::new(key, CloseItem, context),
         Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
         Command::Save => KeyBinding::new(key, SaveFile, context),
+        Command::SendToClaude => KeyBinding::new(key, SendToClaude, context),
         Command::OpenPalette => KeyBinding::new(key, OpenPalette, context),
         Command::GoToFile => KeyBinding::new(key, GoToFile, context),
         Command::FindInFiles => KeyBinding::new(key, FindInFiles, context),
         Command::FindInTerminal => KeyBinding::new(key, FindInTerminal, context),
+        Command::ToggleRouteMap => KeyBinding::new(key, ToggleRouteMap, context),
         other => default_binding(key, other),
     }
 }
@@ -96,10 +100,12 @@ fn default_binding(key: &'static str, command: Command) -> KeyBinding {
         Command::Close
         | Command::ToggleTree
         | Command::Save
+        | Command::SendToClaude
         | Command::OpenPalette
         | Command::GoToFile
         | Command::FindInFiles
-        | Command::FindInTerminal => {
+        | Command::FindInTerminal
+        | Command::ToggleRouteMap => {
             unreachable!("binding で扱う")
         }
     }
@@ -168,6 +174,18 @@ pub(crate) fn terminal_id(pane: PaneId) -> String {
     format!("p{}", pane.raw())
 }
 
+/// 「Claude Code を起動」で、新しいターミナルを作った直後に書く入力。
+pub const CLAUDE_LAUNCH_INPUT: &[u8] = b"claude\r";
+
+/// 作業中のプロジェクトに合う hook のコマンド。WSL は Shell(WSL 側の fude の置き場所)、それ以外は
+/// Exec(この fude の / 区切りの絶対パス)。
+pub(crate) fn hook_command_for(root: &ProjectRoot, exe: &std::path::Path, wsl_fude: &str) -> HookCommand {
+    match root {
+        ProjectRoot::Wsl { .. } => HookCommand::Shell(wsl_fude.to_string()),
+        ProjectRoot::Local(_) => HookCommand::Exec(exe.to_string_lossy().replace('\\', "/")),
+    }
+}
+
 /// 状態が変わってから保存するまでの待ち時間。続けて変わったら、最後の変化から数え直す。
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 
@@ -188,6 +206,28 @@ pub(crate) fn geom_from_bounds(bounds: WindowBounds) -> WindowGeom {
 
 pub struct WorkspaceView {
     pub(crate) workspace: Workspace,
+    /// ペインごとの Claude Code の状態（返事待ち、タスク）。hook の信号で変わる。
+    pub(crate) agents: Agents,
+    /// 返事待ちの枠の濃さ（0〜1）。
+    pub(crate) wait_frame: Fade,
+    /// 最後に OS に出したバッジの数。
+    last_badge: usize,
+    /// プロジェクトごとのプランの読み取り（路線図）。
+    pub(crate) plans: HashMap<ProjectId, crate::route_map::PlanCache>,
+    /// プランを確かめている最中のプロジェクト。
+    pub(crate) plan_checking: HashSet<ProjectId>,
+    /// 路線図の折りたたみ（全プロジェクトで 1 つ。保存しない）。
+    pub(crate) route_collapsed: bool,
+    /// 路線図の幅（px）と、実行中の輪の位置（駅の番号）。
+    pub(crate) route_w: Fade,
+    pub(crate) ring: Fade,
+    /// 前の描画で輪を出していたか（初めて出るときは動かさない）。
+    pub(crate) ring_shown: bool,
+    /// 前の描画の作業中のプロジェクト（変わったらすぐプランを確かめる）。
+    pub(crate) route_project: Option<ProjectId>,
+    /// 最後に出した路線図。消えるときの動き（幅が 0 に戻るまで）の間、これを描く。
+    pub(crate) route_last: Option<(ProjectId, fude_core::plan::Route)>,
+    pub(crate) plan_poll: Option<Task<()>>,
     /// ピル用のブランチ名。開いたときと、ウィンドウが前面に来たときに読み直す。
     pub(crate) branches: HashMap<ProjectId, Option<String>>,
     pub(crate) hover: HoverFades,
@@ -197,6 +237,8 @@ pub struct WorkspaceView {
     terminals: HashMap<PaneId, (Entity<TerminalView>, Subscription)>,
     /// 最後にフォーカスを当てたペイン。選択が変わったら、新しいペインへフォーカスを移す。
     focused_pane: Option<PaneId>,
+    /// ペインのターミナルを作った直後に書く入力（「Claude Code を起動」）。
+    pending_input: HashMap<PaneId, Vec<u8>>,
     /// ＋の右クリックメニュー。
     pub(crate) shell_menu: Option<Popup>,
     /// レールの右クリックメニューと、その対象のプロジェクト。
@@ -301,11 +343,24 @@ impl WorkspaceView {
         window.focus(&focus, cx);
         let mut this = Self {
             workspace,
+            agents: Agents::default(),
+            wait_frame: Fade::settled(0.0),
+            last_badge: 0,
+            plans: HashMap::new(),
+            plan_checking: HashSet::new(),
+            route_collapsed: false,
+            route_w: Fade::settled(0.0),
+            ring: Fade::settled(0.0),
+            ring_shown: false,
+            route_project: None,
+            route_last: None,
+            plan_poll: None,
             branches: HashMap::new(),
             hover: HoverFades::default(),
             should_move: false,
             terminals: HashMap::new(),
             focused_pane: None,
+            pending_input: HashMap::new(),
             shell_menu: None,
             project_menu: None,
             distros: Vec::new(),
@@ -348,6 +403,7 @@ impl WorkspaceView {
         }
         this.refresh_active_branch(cx);
         this.load_distros(cx);
+        this.start_plan_poll(cx);
         this
     }
 
@@ -433,6 +489,114 @@ impl WorkspaceView {
         }
     }
 
+    /// Claude Code の hook の信号をペインに当てる。新しく返事待ちになったら true。知らないペインは無視する。
+    pub(crate) fn on_hook(&mut self, terminal: &str, signal: HookSignal, window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        let Some((_, pane)) = parse_terminal_id(terminal).and_then(|raw| self.workspace.pane_by_raw(raw)) else { return false };
+        let became = self.agents.apply(pane.raw(), signal);
+        if crate::attention::should_request_attention(became, window.is_window_active()) {
+            crate::attention::request_attention(window);
+        }
+        became
+    }
+
+    /// 返事待ちの枠を動かし、タスクバー／Dock のバッジを数に合わせる。
+    fn observe_waiting(&mut self, window: &mut Window, now: Instant) {
+        use crate::theme::motion::{REDUCED, WAIT_IN, WAIT_OUT, ease_in_out};
+        let count = self.agents.waiting_count();
+        let (target, duration) = if count > 0 { (1.0, WAIT_IN) } else { (0.0, WAIT_OUT) };
+        let duration = if self.reduced_motion { REDUCED } else { duration };
+        self.wait_frame.animate_to(target, duration, ease_in_out, now);
+        if self.wait_frame.is_animating(now) {
+            window.request_animation_frame();
+        }
+        if count != self.last_badge {
+            self.last_badge = count;
+            crate::attention::set_badge(window, count);
+        }
+    }
+
+    /// どこかに返事待ちがある間、ウィンドウの縁に出す warn の枠（にじませない）。
+    fn render_wait_frame(&self, theme: &Theme, now: Instant) -> Option<Div> {
+        let v = self.wait_frame.value(now);
+        (v > 0.0).then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .rounded(crate::theme::size::WINDOW_CORNER)
+                .border(crate::theme::size::WAIT_FRAME_W)
+                .border_color(Rgba { a: theme.warn.a * v, ..theme.warn })
+        })
+    }
+
+    pub(crate) fn pane_waiting(&self, pane: PaneId) -> bool {
+        self.agents.state(pane.raw()) == AgentState::Waiting
+    }
+
+    pub(crate) fn tab_waiting(&self, tab: &Tab) -> bool {
+        tab.panes.iter().any(|p| self.pane_waiting(p.id))
+    }
+
+    pub(crate) fn project_waiting(&self, project: &Project) -> bool {
+        project.tabs.iter().any(|t| self.tab_waiting(t))
+    }
+
+    /// そのプロジェクトの選択中のタブの、フォーカス中のペインに text を書き、そこへフォーカスを移す。ペインが無ければ何もしない。
+    /// Enter は送らない。入力したので、そのペインの返事待ちを消す。
+    pub(crate) fn send_to_claude(&mut self, project: ProjectId, text: String, cx: &mut Context<Self>) {
+        let Some(p) = self.workspace.projects().iter().find(|p| p.id == project) else { return };
+        let Some(pane) = p.active_tab().map(|t| t.panes[t.focused].id) else { return };
+        let Some((view, _)) = self.terminals.get(&pane) else { return };
+        view.read(cx).write(text.into_bytes());
+        self.agents.typed(pane.raw());
+        self.workspace.focus_pane(pane);
+        // 次の描画の sync_terminals がそのペインへフォーカスを当てる。
+        self.refocus_pane();
+        cx.notify();
+    }
+
+    /// 既定のシェルで新しいタブを開き、`claude` と Enter を入力する。
+    pub(crate) fn launch_claude(&mut self, cx: &mut Context<Self>) {
+        let Some(kind) = self.workspace.active_project().map(|p| p.default_shell()) else { return };
+        if self.workspace.new_tab(kind).is_none() {
+            return;
+        }
+        if let Some(pane) = self.workspace.active_project().and_then(|p| p.active_tab()).map(|t| t.panes[t.focused].id) {
+            self.pending_input.insert(pane, CLAUDE_LAUNCH_INPUT.to_vec());
+        }
+        cx.notify();
+    }
+
+    /// 作業中のプロジェクトに合う hook の設定を、settings.json に貼る形でクリップボードに書き、貼る場所を知らせる。
+    pub(crate) fn copy_hook_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) else { return };
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => {
+                self.show_error(format!("fude の場所が分からないため、hook の設定を作れません: {e}"), window, cx);
+                return;
+            }
+        };
+        #[cfg(windows)]
+        let wsl_fude = self.wsl_hosts.bin().to_string();
+        #[cfg(not(windows))]
+        let wsl_fude = String::new();
+        let config = hook_config(&hook_command_for(&root, &exe, &wsl_fude));
+        let place = match root {
+            ProjectRoot::Wsl { .. } => "WSL の中の ~/.claude/settings.json",
+            ProjectRoot::Local(_) => "~/.claude/settings.json",
+        };
+        let message = match serde_json::to_string_pretty(&config) {
+            Ok(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                format!("Claude Code の hook の設定をコピーしました。{place} の \"hooks\" に貼り付けてください。")
+            }
+            Err(e) => format!("hook の設定を作れません: {e}"),
+        };
+        self.show_error(message, window, cx);
+    }
+
     /// 選択中のペインのターミナルに検索の欄を出す。
     fn find_in_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.workspace.active_project().and_then(|p| p.active_tab()).map(|t| t.panes[t.focused].id) else { return };
@@ -459,6 +623,12 @@ impl WorkspaceView {
             Message::Open { root, shell } => self.open_project(root, shell, cx),
             Message::OpenFile { file, root_hint } => self.open_file(file, root_hint, None, window, cx),
             Message::Activate => {}
+            // hook の信号は前面に出さない。
+            Message::Hook { terminal, signal } => {
+                self.on_hook(&terminal, signal, window, cx);
+                cx.notify();
+                return;
+            }
         }
         window.activate_window();
         cx.activate(true);
@@ -601,6 +771,8 @@ impl WorkspaceView {
         let alive: std::collections::HashSet<PaneId> =
             self.workspace.projects().iter().flat_map(|p| &p.tabs).flat_map(|t| &t.panes).map(|p| p.id).collect();
         self.terminals.retain(|id, _| alive.contains(id));
+        self.pending_input.retain(|id, _| alive.contains(id));
+        self.agents.retain(|raw| alive.iter().any(|p| p.raw() == raw));
 
         // フォーカスしていたビューが無くなった（タブやペインを閉じた）か。
         let lost = window.focused(cx).is_none();
@@ -644,6 +816,9 @@ impl WorkspaceView {
                         this.workspace.close_pane(id);
                     }
                     TerminalEvent::Exited { success: false } => {}
+                    TerminalEvent::Input => {
+                        this.agents.typed(id.raw());
+                    }
                     TerminalEvent::Focused => {
                         this.workspace.focus_pane(id);
                         this.focused_pane = Some(id);
@@ -651,6 +826,9 @@ impl WorkspaceView {
                 }
                 cx.notify();
             });
+            if let Some(input) = self.pending_input.remove(&id) {
+                view.read(cx).write(input);
+            }
             self.terminals.insert(id, (view, sub));
         }
         if self.focused_pane != Some(target)
@@ -763,6 +941,8 @@ impl Render for WorkspaceView {
         }
         self.freeze_terminals(self.layout_animating(now), cx);
         self.schedule_save(window, cx);
+        self.observe_waiting(window, now);
+        self.observe_route_map(window, now, cx);
         let home = self.workspace.projects().is_empty();
         if self.showing_home != Some(home) {
             // 最初の描画ではフェードしない。
@@ -782,7 +962,7 @@ impl Render for WorkspaceView {
             self.render_home(cx, now)
         } else {
             let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
-            let main_w = window.viewport_size().width - crate::theme::size::RAIL_W;
+            let main_w = window.viewport_size().width - crate::theme::size::RAIL_W - px(self.route_map_width(now));
             let (tree, editor) = self.render_columns(main_w, now, cx);
             let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
             let share = active_tab.map_or(1.0, |t| self.anims.split_share(t.id, now));
@@ -791,6 +971,7 @@ impl Render for WorkspaceView {
         let main = main.opacity(self.screen_fade.value(now));
         let title_row = self.render_title_row(window, cx, now);
         let rail = self.render_rail(cx, now);
+        let route_map = self.render_route_map(now, cx);
         let menu = self.render_shell_menu(window, cx, now);
         let project_menu = self.render_project_menu(window, cx, now);
         let home_menu = self.render_home_menu(window, cx, now);
@@ -798,6 +979,7 @@ impl Render for WorkspaceView {
         let tree_menu = self.render_tree_menu(window, cx, now);
         let dialog = self.render_dialog(window, cx, now);
         let palette = self.render_palette(window, cx, now);
+        let wait_frame = self.render_wait_frame(&theme, now);
 
         div()
             .id("workspace")
@@ -813,6 +995,7 @@ impl Render for WorkspaceView {
             }))
             .on_action(cx.listener(|this, _: &FindInFiles, window, cx| this.open_find_in_files(window, cx)))
             .on_action(cx.listener(|this, _: &FindInTerminal, window, cx| this.find_in_terminal(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleRouteMap, _, cx| this.toggle_route_map(cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.new_default_tab();
                 cx.notify();
@@ -849,6 +1032,7 @@ impl Render for WorkspaceView {
                     .min_h_0()
                     .relative()
                     .child(rail)
+                    .children(route_map)
                     .child(div().flex_1().min_w_0().h_full().child(main)),
             )
             .children(menu)
@@ -858,6 +1042,7 @@ impl Render for WorkspaceView {
             .children(tree_menu)
             .children(palette)
             .children(dialog)
+            .children(wait_frame)
     }
 }
 
@@ -866,6 +1051,24 @@ mod tests {
     use super::geom_from_bounds;
     use fude_core::session::WindowGeom;
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
+
+    #[test]
+    fn hook_command_per_root() {
+        use super::hook_command_for;
+        use fude_core::claude::HookCommand;
+        use fude_core::workspace::ProjectRoot;
+        use std::path::{Path, PathBuf};
+        let exe = Path::new(r"C:\Program Files\fude\fude.exe");
+        let local = hook_command_for(&ProjectRoot::Local(PathBuf::from(r"C:\w")), exe, "~/.local/bin/fude");
+        assert!(matches!(local, HookCommand::Exec(ref p) if p == "C:/Program Files/fude/fude.exe"));
+        let wsl = hook_command_for(&ProjectRoot::Wsl { distro: "Ubuntu".into(), path: "/home/x".into() }, exe, "~/.local/bin/fude");
+        assert!(matches!(wsl, HookCommand::Shell(ref s) if s == "~/.local/bin/fude"));
+    }
+
+    #[test]
+    fn claude_launch_input_runs_claude() {
+        assert_eq!(super::CLAUDE_LAUNCH_INPUT, b"claude\r");
+    }
 
     #[test]
     fn last_project_closed_rules() {

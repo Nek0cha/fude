@@ -13,7 +13,7 @@ use crate::layout_anim::{tab_close_progress, tab_open_progress, tab_width_estima
 use crate::theme::{Theme, size};
 use crate::workspace_view::WorkspaceView;
 
-const ICON: Pixels = px(14.);
+pub(crate) const ICON: Pixels = px(14.);
 
 pub(crate) fn icon(name: IconName, color: Rgba) -> Svg {
     svg().path(name.path()).size(ICON).flex_shrink_0().text_color(color)
@@ -186,7 +186,7 @@ impl WorkspaceView {
             .bg(bg)
             .text_color(fg)
             .text_size(px(13.))
-            .child(icon(IconName::Terminal, fg))
+            .child(if self.tab_waiting(tab) { icon(IconName::Bell, theme.warn) } else { icon(IconName::Terminal, fg) })
             .child(div().min_w_0().overflow_hidden().whitespace_nowrap().child(tab.title()))
             .child(close)
             .on_click(cx.listener(move |this, _, _, cx| {

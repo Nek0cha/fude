@@ -233,6 +233,14 @@ impl ProjectFs for RemoteFs {
         }
     }
 
+    fn plan_files(&self, known: Option<&crate::plans::PlanStamp>) -> io::Result<crate::plans::PlanFetch> {
+        match self.call(Request::PlanFiles { root: self.root.clone(), known: known.cloned() }, &[])? {
+            (Response::Plan, json) => serde_json::from_slice(&json)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("プランを読めない: {e}"))),
+            (resp, _) => Err(unexpected(resp)),
+        }
+    }
+
     fn search(&self, query: &crate::search::SearchQuery) -> io::Result<crate::search::SearchResults> {
         match self.call(Request::Search { root: self.root.clone(), query: query.clone() }, &[])? {
             (Response::Matches, json) => serde_json::from_slice(&json)

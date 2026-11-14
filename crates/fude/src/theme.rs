@@ -97,6 +97,9 @@ pub mod size {
     pub const PALETTE_TOP: Pixels = px(72.);
     pub const PALETTE_SHIFT: Pixels = px(8.);
     pub const PALETTE_ROW_H: Pixels = px(30.);
+    /// 返事待ちの枠の太さと、ウィンドウの角に合わせた丸み。
+    pub const WAIT_FRAME_W: Pixels = px(1.5);
+    pub const WINDOW_CORNER: Pixels = if cfg!(target_os = "macos") { px(10.) } else { px(8.) };
 }
 
 /// 動きのトークン。
@@ -138,6 +141,16 @@ pub mod motion {
 
     pub fn ease_out_quint(t: f32) -> f32 {
         1.0 - (1.0 - t).powi(5)
+    }
+
+    /// 返事待ちの枠が出るときと消えるとき（§6.3）。
+    pub const WAIT_IN: Duration = Duration::from_millis(300);
+    pub const WAIT_OUT: Duration = Duration::from_millis(200);
+    /// 路線図の「実行中」の輪が次の駅へ動く時間（§6.3）。
+    pub const RING_MOVE: Duration = Duration::from_millis(240);
+
+    pub fn ease_in_out(t: f32) -> f32 {
+        if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0 }
     }
 }
 

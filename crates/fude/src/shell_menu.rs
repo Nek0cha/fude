@@ -45,7 +45,7 @@ impl WorkspaceView {
         }
         let theme = *cx.global::<Theme>();
         let closing = menu.closing();
-        let items: Vec<AnyElement> = menu_items(&self.distros, cfg!(windows))
+        let mut items: Vec<AnyElement> = menu_items(&self.distros, cfg!(windows))
             .into_iter()
             .enumerate()
             .map(|(i, kind)| {
@@ -73,6 +73,37 @@ impl WorkspaceView {
                     .into_any_element()
             })
             .collect();
+        // 区切りの線と「Claude Code」（既定のシェルで新しいタブを開き、claude を起動する）。
+        let key = HoverKey::MenuItem(items.len());
+        let bg = self.hover_bg(key, theme.bg_hover, now);
+        items.push(div().h(px(1.)).mx(px(4.)).my(px(4.)).bg(theme.border_subtle).into_any_element());
+        items.push(
+            self.hoverable(div().id("shell-menu-claude"), key, cx)
+                .h(ITEM_H)
+                .px(px(8.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .rounded(size::RADIUS_SM)
+                .bg(bg)
+                .child(
+                    svg()
+                        .path(crate::assets::CLAUDE_LOGO)
+                        .size(crate::title_row::ICON)
+                        .flex_shrink_0()
+                        .text_color(rgb(crate::assets::CLAUDE_COLOR)),
+                )
+                .child("Claude Code")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.shell_menu.as_ref().is_some_and(|m| m.closing()) {
+                        return;
+                    }
+                    this.launch_claude(cx);
+                    this.close_shell_menu(cx);
+                }))
+                .into_any_element(),
+        );
         let body = menu
             .frame("shell-menu", &theme, now)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {

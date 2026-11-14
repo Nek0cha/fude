@@ -647,6 +647,9 @@ impl WorkspaceView {
             FileViewEvent::LeaveEditor => this.leave_editor(cx),
             FileViewEvent::Dirty | FileViewEvent::Saved => cx.notify(),
             FileViewEvent::SaveFailed(message) => this.show_error(message.clone(), window, cx),
+            FileViewEvent::SendToClaude { rel, lines } => {
+                this.send_to_claude(project, fude_core::claude::mention(rel, *lines), cx);
+            }
         });
         if let Some((line, col)) = goto {
             view.update(cx, |v, cx| v.goto(line, col, window, cx));
