@@ -50,6 +50,10 @@ fn handle(req: Request, payload: &[u8], build_id: &str) -> (Response, Vec<u8>) {
         Request::CreateDir { root, path } => done(local(&root).and_then(|fs| fs.create_dir(&path))),
         Request::Rename { root, from, to } => done(local(&root).and_then(|fs| fs.rename(&from, &to))),
         Request::Remove { root, path } => done(local(&root).and_then(|fs| fs.remove(&path))),
+        Request::Trash { root, path } => {
+            local(&root).and_then(|fs| fs.trash(&path)).map(|ticket| (Response::Trashed { ticket }, Vec::new()))
+        }
+        Request::Restore { root, ticket, path } => done(local(&root).and_then(|fs| fs.restore(&ticket, &path))),
         Request::Metadata { root, path } => {
             local(&root).and_then(|fs| fs.metadata(&path)).map(|meta| (Response::Meta { meta }, Vec::new()))
         }
@@ -179,6 +183,37 @@ mod tests {
         ]);
         assert!(matches!(out[0].0, Response::Error { not_found: true, .. }), "{:?}", out[0]);
         assert_eq!(out[1].0, Response::Version { id: "0.1.0+1".into() });
+    }
+
+    #[test]
+    fn serve_trash_and_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = root_of(&dir);
+        let path = RelPath::new("t.txt").unwrap();
+        std::fs::write(dir.path().join("t.txt"), "one").unwrap();
+        let out = run(&[(Request::Trash { root: root.clone(), path: path.clone() }, vec![])]);
+        let Response::Trashed { ticket } = out[0].0.clone() else { panic!("{:?}", out[0]) };
+        assert!(!ticket.id.is_empty());
+        assert!(!dir.path().join("t.txt").exists());
+        std::fs::write(dir.path().join("t.txt"), "new").unwrap();
+        let out = run(&[(Request::Restore { root: root.clone(), ticket: ticket.clone(), path: path.clone() }, vec![])]);
+        assert!(matches!(out[0].0, Response::Error { already_exists: true, .. }), "{:?}", out[0]);
+        std::fs::remove_file(dir.path().join("t.txt")).unwrap();
+        let out = run(&[(Request::Restore { root, ticket, path }, vec![])]);
+        assert_eq!(out[0].0, Response::Done);
+        assert_eq!(std::fs::read_to_string(dir.path().join("t.txt")).unwrap(), "one");
+    }
+
+    /// 知らない要求（古い fude serve に新しい要求を送ったとき）はエラーで返し、何も消さない。
+    #[test]
+    fn serve_unknown_op_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("t.txt"), "x").unwrap();
+        let header = serde_json::json!({"op": "no_such_op", "root": root_of(&dir), "path": "t.txt", "len": 0});
+        let out = responses(format!("{header}
+").as_bytes());
+        assert!(matches!(out[0].0, Response::Error { .. }), "{:?}", out[0]);
+        assert!(dir.path().join("t.txt").exists());
     }
 
     #[test]

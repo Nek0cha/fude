@@ -33,6 +33,10 @@ pub enum Request {
     Search { root: String, query: crate::search::SearchQuery },
     /// 最も新しいプランと台帳（計画7で足した）。
     PlanFiles { root: String, known: Option<crate::plans::PlanStamp> },
+    /// ゴミ箱に送る（計画8bで足した）。
+    Trash { root: String, path: RelPath },
+    /// ゴミ箱から path へ戻す（計画8bで足した）。
+    Restore { root: String, ticket: crate::TrashTicket, path: RelPath },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -58,6 +62,8 @@ pub enum Response {
     Matches,
     /// PlanFetch の JSON は payload。
     Plan,
+    /// ゴミ箱に送った札。
+    Trashed { ticket: crate::TrashTicket },
     /// already_exists は計画5で足した（古いサーバーの応答には無い）。
     Error {
         message: String,
@@ -153,6 +159,25 @@ mod tests {
         write_frame(&mut buf, &Request::Version, &[]).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v, serde_json::json!({"op": "version", "len": 0}));
+    }
+
+    #[test]
+    fn trash_request_round_trips() {
+        let ticket = crate::TrashTicket { id: "/home/x/.local/share/Trash/info/a b.md.trashinfo".into() };
+        let reqs = [
+            Request::Trash { root: "/home/x".into(), path: RelPath::new("a b.md").unwrap() },
+            Request::Restore { root: "/home/x".into(), ticket: ticket.clone(), path: RelPath::new("d/a.md").unwrap() },
+        ];
+        for req in reqs {
+            let mut buf = Vec::new();
+            write_frame(&mut buf, &req, &[]).unwrap();
+            let (back, _) = read_frame::<Request>(&mut Cursor::new(buf)).unwrap().unwrap();
+            assert_eq!(back, req);
+        }
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &Response::Trashed { ticket: ticket.clone() }, &[]).unwrap();
+        let (back, _) = read_frame::<Response>(&mut Cursor::new(buf)).unwrap().unwrap();
+        assert_eq!(back, Response::Trashed { ticket });
     }
 
     #[test]
