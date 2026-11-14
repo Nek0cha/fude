@@ -31,9 +31,14 @@ pub fn spawn_spec(kind: &ShellKind, root: &ProjectRoot, terminal_id: &str, env: 
     ];
     let (program, args) = match kind {
         ShellKind::Wsl { distro } => {
+            let mut add = WSLENV_ADD.to_string();
+            // 開発中のインスタンス（FUDE_INSTANCE）を、WSL の hook が送り先を選ぶために渡す。
+            if env("FUDE_INSTANCE").is_some_and(|v| !v.is_empty()) {
+                add.push_str(":FUDE_INSTANCE/u");
+            }
             let wslenv = match env("WSLENV").filter(|v| !v.is_empty()) {
-                Some(existing) => format!("{existing}:{WSLENV_ADD}"),
-                None => WSLENV_ADD.to_string(),
+                Some(existing) => format!("{existing}:{add}"),
+                None => add,
             };
             vars.push(("WSLENV".into(), wslenv));
             let cd = match root {
@@ -106,6 +111,14 @@ mod tests {
 
     fn env<'a>(spec: &'a SpawnSpec, key: &str) -> Option<&'a str> {
         spec.env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn instance_is_forwarded_to_wsl() {
+        let spec = spec_with(&ShellKind::Wsl { distro: "Ubuntu".into() }, r"C:\w\a", &[("FUDE_INSTANCE", "dev")]);
+        assert_eq!(env(&spec, "WSLENV"), Some("COLORTERM/u:TERM_PROGRAM/u:FUDE_TERMINAL_ID/u:FUDE_INSTANCE/u"));
+        let spec = spec_with(&ShellKind::Wsl { distro: "Ubuntu".into() }, r"C:\w\a", &[]);
+        assert_eq!(env(&spec, "WSLENV"), Some("COLORTERM/u:TERM_PROGRAM/u:FUDE_TERMINAL_ID/u"));
     }
 
     #[cfg(target_os = "macos")]

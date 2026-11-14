@@ -10,6 +10,7 @@ fude-term = { path = "../fude-term" }
 futures = "0.3"
 fude-ipc = { path = "../fude-ipc" }
 fude-fs = { path = "../fude-fs" }
+serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }

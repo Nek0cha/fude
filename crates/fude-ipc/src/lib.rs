@@ -31,6 +31,8 @@ pub enum Message {
     },
     /// 前面に出すだけ。
     Activate,
+    /// Claude Code の hook の信号（`fude hook` が送る）。terminal は FUDE_TERMINAL_ID。前面には出さない。
+    Hook { terminal: String, signal: fude_core::claude::HookSignal },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -239,6 +241,13 @@ mod tests {
         assert_eq!(serde_json::from_str::<Message>(&json).unwrap(), msg);
         let bare = r#"{"type":"open_file","file":{"local":"C:\\w\\a.rs"}}"#;
         assert!(matches!(serde_json::from_str::<Message>(bare).unwrap(), Message::OpenFile { root_hint: None, .. }));
+    }
+
+    #[test]
+    fn hook_roundtrips() {
+        let msg = Message::Hook { terminal: "p7".into(), signal: fude_core::claude::HookSignal::SessionStart { reset: true } };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<Message>(&json).unwrap(), msg);
     }
 
     #[test]

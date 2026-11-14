@@ -459,6 +459,8 @@ impl WorkspaceView {
             Message::Open { root, shell } => self.open_project(root, shell, cx),
             Message::OpenFile { file, root_hint } => self.open_file(file, root_hint, None, window, cx),
             Message::Activate => {}
+            // hook の信号は前面に出さない（受けるのは計画7の Task 6）。
+            Message::Hook { .. } => return,
         }
         window.activate_window();
         cx.activate(true);

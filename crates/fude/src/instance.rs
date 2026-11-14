@@ -43,10 +43,15 @@ pub fn hand_off(name: &str, launch: &Launch) -> Result<HandOff, String> {
 
 /// Windows のリリース版（GUI サブシステム）では標準エラーが見えないため、親のコンソールにつないでから出す。
 pub fn report_error(message: &str) {
+    attach_parent_console();
+    eprintln!("fude: {message}");
+}
+
+/// Windows のリリース版（GUI サブシステム）で、親のコンソールに出力をつなぐ。ほかでは何もしない。
+pub fn attach_parent_console() {
     #[cfg(windows)]
     // SAFETY: 引数は定数で、失敗しても（親にコンソールが無い、既にある）害は無い。
     unsafe {
         windows_sys::Win32::System::Console::AttachConsole(windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS);
     }
-    eprintln!("fude: {message}");
 }

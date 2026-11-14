@@ -12,6 +12,7 @@ mod editor_tabs_view;
 mod file_icons;
 mod file_view;
 mod home;
+mod hook_cli;
 mod hover;
 mod instance;
 mod language;
@@ -80,6 +81,10 @@ fn initial_bounds(saved: Option<WindowGeom>, cx: &App) -> WindowBounds {
 
 fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    // `fude hook` は待ち受けも GUI も始めず、信号を送って終わる（`hook` というフォルダは `fude ./hook` で開く）。
+    if args.first().is_some_and(|a| a == "hook") {
+        std::process::exit(hook_cli::hook_main(&args[1..]));
+    }
     let cwd = std::env::current_dir().expect("現在のディレクトリを取得できない");
     let launch = match parse_launch(&args, &cwd) {
         Ok(launch) => launch,
