@@ -121,13 +121,19 @@ pub fn search_dir(root: &Path, q: &SearchQuery) -> io::Result<SearchResults> {
     let matcher = grep_regex::RegexMatcherBuilder::new()
         .case_insensitive(!q.case_sensitive)
         .line_terminator(Some(b'\n'))
+        // CRLF のファイルでも $ が \r の前で一致するように。
+        .crlf(true)
+        .multi_line(true)
         .build(&pattern)
         .map_err(|e| invalid_input(e.to_string()))?;
     let mut searcher = grep_searcher::SearcherBuilder::new()
         .line_number(true)
+        // 一致させる側の crlf(true) と合わせる（合わないと検索がエラーになる）。LF だけの行も行として扱う。
+        .line_terminator(grep_matcher::LineTerminator::crlf())
         .binary_detection(grep_searcher::BinaryDetection::quit(0))
         .build();
     let started = Instant::now();
+    let canonical_root = std::fs::canonicalize(root).ok();
     let walker =
         ignore::WalkBuilder::new(root).hidden(false).parents(true).filter_entry(|e| e.file_name() != ".git").build();
     let mut results = SearchResults::default();
@@ -139,6 +145,14 @@ pub fn search_dir(root: &Path, q: &SearchQuery) -> io::Result<SearchResults> {
         }
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_some_and(|t| t.is_file() || (t.is_symlink() && entry.path().is_file())) {
+            continue;
+        }
+        // ルートの中のファイルを指すリンク（CLAUDE.md -> AGENTS.md など）は、指す先だけを出す。
+        // 両方を出すと、置換が同じ中身に 2 回当たる。
+        if entry.path_is_symlink()
+            && let (Some(croot), Ok(target)) = (&canonical_root, std::fs::canonicalize(entry.path()))
+            && target.starts_with(croot)
+        {
             continue;
         }
         let Ok(rel) = entry.path().strip_prefix(root) else { continue };
@@ -176,21 +190,34 @@ pub fn replace_text(text: &str, q: &SearchQuery, replacement: &str) -> Result<(S
     for line in text.split_inclusive('\n') {
         let body = trim_eol(line);
         let eol = &line[body.len()..];
-        count += re.find_iter(body).count();
-        if q.regex {
-            out.push_str(&re.replace_all(body, replacement));
-        } else {
-            out.push_str(&re.replace_all(body, regex::NoExpand(replacement)));
+        // 空の一致は検索に出さないので、置換もしない（プレビューと同じ所だけを変える）。
+        let mut at = 0;
+        for caps in re.captures_iter(body) {
+            let m = caps.get(0).expect("一致の全体");
+            if m.is_empty() {
+                continue;
+            }
+            out.push_str(&body[at..m.start()]);
+            if q.regex {
+                caps.expand(replacement, &mut out);
+            } else {
+                out.push_str(replacement);
+            }
+            at = m.end();
+            count += 1;
         }
+        out.push_str(&body[at..]);
         out.push_str(eol);
     }
     Ok((out, count))
 }
 
-/// fs の rel を読み、UTF-8 なら replace_text して、1 件以上なら書く。UTF-8 でなければ Ok(0)。
+/// fs の rel を読み、replace_text して、1 件以上なら書く。UTF-8 でなければ InvalidData（黙って飛ばさない）。
 pub fn replace_in_file(fs: &dyn ProjectFs, rel: &RelPath, q: &SearchQuery, replacement: &str) -> io::Result<usize> {
     let data = fs.read(rel)?;
-    let Ok(text) = String::from_utf8(data) else { return Ok(0) };
+    let Ok(text) = String::from_utf8(data) else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "UTF-8 ではないため置換できません"));
+    };
     let (new, count) = replace_text(&text, q, replacement).map_err(invalid_input)?;
     if count > 0 {
         fs.write(rel, new.as_bytes())?;
@@ -291,9 +318,43 @@ mod tests {
 
     #[test]
     fn replace_with_empty_match_terminates() {
+        // 空の一致は検索に出さないので、置換もしない（プレビューと同じ所だけを変える）。
         let q = SearchQuery { pattern: "x*".into(), regex: true, ..Default::default() };
-        let (out, n) = replace_text("ab", &q, "-").unwrap();
-        assert_eq!((out.as_str(), n), ("-a-b-", 3));
+        assert_eq!(replace_text("ab", &q, "-").unwrap(), ("ab".into(), 0));
+        assert_eq!(replace_text("axxb", &q, "-").unwrap(), ("a-b".into(), 1));
+        let d = SearchQuery { pattern: r"(\d)*".into(), regex: true, ..Default::default() };
+        assert_eq!(replace_text("a1b\nxyz\n", &d, "N$1").unwrap(), ("aN1b\nxyz\n".into(), 1));
+    }
+
+    #[test]
+    fn dollar_anchor_matches_in_crlf_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "crlf.txt", b"foo\r\n");
+        write(root, "lf.txt", b"foo\n");
+        let re = SearchQuery { pattern: "foo$".into(), regex: true, ..Default::default() };
+        assert_eq!(search_dir(root, &re).unwrap().files.len(), 2);
+    }
+
+    #[test]
+    fn replace_in_non_utf8_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "sjis.txt", b"foo \x82\xa0\n");
+        let fs = LocalFs::new(dir.path().to_path_buf());
+        let err = replace_in_file(&fs, &rel("sjis.txt"), &q("foo"), "bar").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_file_in_root_is_listed_once() {
+        // CLAUDE.md -> AGENTS.md の形。両方を出すと、置換が同じ中身に 2 回当たる。
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "AGENTS.md", b"foo\n");
+        std::os::unix::fs::symlink("AGENTS.md", root.join("CLAUDE.md")).unwrap();
+        let rels: Vec<String> = search_dir(root, &q("foo")).unwrap().files.iter().map(|f| f.rel.as_str().to_string()).collect();
+        assert_eq!(rels, ["AGENTS.md"]);
     }
 
     #[test]
@@ -348,9 +409,9 @@ mod tests {
         assert_eq!(replace_in_file(&fs, &rel("a.txt"), &q("foo"), "bar").unwrap(), 2);
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "bar\nbar x\n");
         assert_eq!(replace_in_file(&fs, &rel("a.txt"), &q("zzz"), "y").unwrap(), 0);
-        // UTF-8 でないファイルは触らない。
+        // UTF-8 でないファイルは触らず、置換できなかったことを返す。
         write(root, "s.txt", b"foo\xff");
-        assert_eq!(replace_in_file(&fs, &rel("s.txt"), &q("foo"), "y").unwrap(), 0);
+        assert!(replace_in_file(&fs, &rel("s.txt"), &q("foo"), "y").is_err());
         assert_eq!(std::fs::read(root.join("s.txt")).unwrap(), b"foo\xff");
     }
 }
