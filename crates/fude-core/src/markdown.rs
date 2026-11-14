@@ -218,6 +218,18 @@ pub fn source_to_preview(blocks: &[u32], total_lines: u32, top_line: f32) -> (us
     (i, fraction)
 }
 
+/// ブロックの数がプレビューの項目の数と合わないときの写し方。全体の割合 ratio（0..1）→（項目の番号, 項目の中の割合）。
+pub fn proportional(ratio: f32, items: usize) -> (usize, f32) {
+    if items == 0 {
+        return (0, 0.0);
+    }
+    let at = ratio.clamp(0.0, 1.0) * items as f32;
+    if at >= items as f32 {
+        return (items - 1, 1.0);
+    }
+    (at.trunc() as usize, at.fract())
+}
+
 /// プレビューの（項目の番号, 項目の中の割合）→ ソースの行（小数あり）。ブロックが無ければ 0。
 pub fn preview_to_source(blocks: &[u32], total_lines: u32, item: usize, fraction: f32) -> f32 {
     if blocks.is_empty() {
@@ -322,5 +334,12 @@ mod tests {
     #[test]
     fn images_by_extension() {
         assert!(is_image("a.PNG") && is_image("b.svg") && is_image("c.webp") && !is_image("d.md"));
+    }
+
+    #[test]
+    fn proportional_fallback() {
+        assert_eq!(proportional(0.25, 8), (2, 0.0));
+        assert_eq!(proportional(1.0, 8), (7, 1.0));
+        assert_eq!(proportional(0.5, 0), (0, 0.0));
     }
 }

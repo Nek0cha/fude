@@ -82,7 +82,7 @@ mod tests {
         let local = FileLocation::Local(PathBuf::from(r"C:\Users\me\a b.png"));
         assert_eq!(drop_text(&[local], &ubuntu, Platform::Windows), "'/mnt/c/Users/me/a b.png' ");
         let same = FileLocation::Wsl { distro: "Ubuntu".into(), path: "/home/me/x.rs".into() };
-        assert_eq!(drop_text(&[same.clone()], &ubuntu, Platform::Windows), "/home/me/x.rs ");
+        assert_eq!(drop_text(std::slice::from_ref(&same), &ubuntu, Platform::Windows), "/home/me/x.rs ");
         assert_eq!(drop_text(&[same], &ShellKind::Native, Platform::Windows), r"\\wsl.localhost\Ubuntu\home\me\x.rs ");
         let other = FileLocation::Wsl { distro: "Debian".into(), path: "/x".into() };
         assert_eq!(drop_text(&[other], &ubuntu, Platform::Windows), r"'\\wsl.localhost\Debian\x' ");

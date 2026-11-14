@@ -7,7 +7,7 @@ use std::io;
 use std::sync::Arc;
 
 use fude_core::claude::selected_lines;
-use fude_core::markdown::{is_markdown, split_preview};
+use fude_core::markdown::{block_lines, is_markdown, preview_to_source, proportional, source_to_preview, split_preview};
 use fude_core::panel::{ExternalAction, FileMode, ReadOutcome, external_change};
 use fude_core::text::{OpenError, TextDoc, decode_text, encode_text};
 use fude_fs::git::{GitMark, LineMark, line_marks};
@@ -59,6 +59,84 @@ pub(crate) fn dirty_after_save(current: &str, saved: &str) -> bool {
 pub(crate) enum MdMode {
     Preview,
     Source,
+}
+
+/// 表示モードで、スクロールを先導している側（もう一方を合わせる）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrollLeader {
+    Source,
+    Preview,
+}
+
+/// ホイールやキーのあと、動きが続く間は描き直してスクロールを揃え続ける。
+const SYNC_FOLLOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// スクロールを揃えるために、テキストが変わるまで覚えておくもの。
+struct SyncText {
+    /// 最上位のブロックの開始行（0 始まり）。
+    blocks: Vec<u32>,
+    /// 行の数。
+    total: u32,
+    /// 各行の頭のバイト位置。
+    starts: Vec<usize>,
+}
+
+/// ソースの見えている所。
+struct SourceView {
+    /// 先頭の行（0 始まり。行の中の位置を小数で）。折り返しは 1 行に数える。
+    top: f32,
+    /// 表示の上端（ウィンドウの座標）。
+    viewport_top: f32,
+    /// 見えている行の、1 行あたりのおおよその高さ。
+    per_line: f32,
+}
+
+/// 行 line の頭の上端（ウィンドウの座標）。見えていなければ None。
+fn line_top(e: &EditorState, starts: &[usize], line: usize) -> Option<f32> {
+    let at = *starts.get(line)?;
+    e.range_to_bounds(&(at..at)).map(|b| f32::from(b.top()))
+}
+
+/// ソースの先頭の行。visible_row_range は折り返しの前の行で数える。
+fn source_view(e: &EditorState, starts: &[usize]) -> Option<SourceView> {
+    let rows = e.visible_row_range()?;
+    let viewport_top = f32::from(e.input_bounds().top());
+    let line_h = e.line_height().map(f32::from).filter(|h| *h > 0.0)?;
+    let first = rows.start;
+    let last = rows.end.saturating_sub(1).max(first);
+    let per_line = match (line_top(e, starts, first), line_top(e, starts, last)) {
+        (Some(a), Some(b)) if last > first => ((b - a) / (last - first) as f32).max(line_h),
+        _ => line_h,
+    };
+    // 先頭の見えている行のうち、上端より上にはみ出した分を小数にする。
+    let mut line = first;
+    while line < last && line_top(e, starts, line + 1).is_some_and(|t| t <= viewport_top) {
+        line += 1;
+    }
+    let top = match (line_top(e, starts, line), line_top(e, starts, line + 1)) {
+        (Some(a), Some(b)) if b > a => line as f32 + ((viewport_top - a) / (b - a)).clamp(0.0, 1.0),
+        (Some(a), _) => line as f32 + ((viewport_top - a) / line_h).clamp(0.0, 1.0),
+        _ => line as f32,
+    };
+    Some(SourceView { top, viewport_top, per_line })
+}
+
+/// side の上でホイールを回したら、side をスクロールの先導役にする。エディタもプレビューも
+/// ホイールの出来事を止めるため、キャプチャの段階で見る。キャプチャは登録の順に呼ばれ、プレビューは
+/// キャプチャの段階でも止めるので、中身より先に描いて先に登録する。
+fn scroll_watch(view: WeakEntity<FileView>, side: ScrollLeader) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            window.on_mouse_event(move |ev: &ScrollEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture && bounds.contains(&ev.position) {
+                    view.update(cx, |this, cx| this.lead(side, cx)).ok();
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// 本文の出し方。
@@ -147,6 +225,11 @@ pub struct FileView {
     preview: Option<MdPreview>,
     /// エディタ列の幅（論理ピクセル）。表示モードで並べるかを決める。
     column_w: f32,
+    /// スクロールを揃えるための、最上位のブロックの開始行など。None は出し直しが要る。
+    blocks: Option<SyncText>,
+    leader: ScrollLeader,
+    /// 先導役が変わったか動いた時刻。SYNC_FOLLOW の間は描き直し続ける。
+    lead_at: Option<std::time::Instant>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -173,6 +256,9 @@ impl FileView {
             md_mode: MdMode::Preview,
             preview: None,
             column_w: 1000.0,
+            blocks: None,
+            leader: ScrollLeader::Source,
+            lead_at: None,
             focus: cx.focus_handle(),
             _subs: Vec::new(),
         };
@@ -291,9 +377,79 @@ impl FileView {
             return;
         }
         let text = editor.read(cx).value().to_string();
+        self.blocks = None;
         match &self.preview {
             Some(p) => p.set_text(&text, cx),
             None => self.preview = Some(MdPreview::new(&text, self.root.clone(), self.rel.clone(), cx)),
+        }
+    }
+
+    /// ホイールやキーで、どちらがスクロールを先導するかを決める。
+    fn lead(&mut self, leader: ScrollLeader, cx: &mut Context<Self>) {
+        self.leader = leader;
+        self.lead_at = Some(std::time::Instant::now());
+        cx.notify();
+    }
+
+    /// 表示モードで並べているとき、先導役のスクロール位置をもう一方に写す（設計書 §5.4）。
+    /// ブロックの数とプレビューの項目の数が合えばブロック単位で、合わなければ全体の割合で揃える。
+    /// 写す側の位置がずれていれば毎回詰める（折り返しのある行の高さは、見えるまで分からないため）。
+    fn sync_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Body::Text { editor, .. }, Some(preview)) = (&self.body, &self.preview) else { return };
+        if self.lead_at.is_some_and(|t| t.elapsed() < SYNC_FOLLOW) {
+            window.request_animation_frame();
+        }
+        let editor = editor.clone();
+        let list = preview.state.read(cx).list_state().clone();
+        let items = list.item_count();
+        if items == 0 {
+            return;
+        }
+        if self.blocks.is_none() {
+            let text = editor.read(cx).value().to_string();
+            let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+            self.blocks = Some(SyncText { blocks: block_lines(&text), total: starts.len() as u32, starts });
+        }
+        let Some(sync) = self.blocks.as_ref() else { return };
+        let Some(source) = source_view(editor.read(cx), &sync.starts) else { return };
+        let matched = sync.blocks.len() == items;
+        let item_h = |ix: usize| list.bounds_for_item(ix).map_or(0.0, |b| f32::from(b.size.height));
+        match self.leader {
+            ScrollLeader::Source => {
+                let (ix, fraction) = if matched {
+                    source_to_preview(&sync.blocks, sync.total, source.top)
+                } else {
+                    proportional(source.top / sync.total as f32, items)
+                };
+                let offset = item_h(ix) * fraction;
+                let now = list.logical_scroll_top();
+                if now.item_ix != ix || (f32::from(now.offset_in_item) - offset).abs() >= 1.0 {
+                    list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(offset) });
+                }
+            }
+            ScrollLeader::Preview => {
+                let top = list.logical_scroll_top();
+                let h = item_h(top.item_ix);
+                let fraction = if h > 0.0 { f32::from(top.offset_in_item) / h } else { 0.0 };
+                let target = if matched {
+                    preview_to_source(&sync.blocks, sync.total, top.item_ix, fraction)
+                } else {
+                    (top.item_ix as f32 + fraction) / items as f32 * sync.total as f32
+                };
+                if (target - source.top).abs() < 0.02 {
+                    return;
+                }
+                // 目当ての行が見えていればその位置へ、見えていなければ見えている行の平均の高さで近づける。
+                let e = editor.read(cx);
+                let line = target.floor() as usize;
+                let delta = match (line_top(e, &sync.starts, line), line_top(e, &sync.starts, line + 1)) {
+                    (Some(a), Some(b)) => a + (b - a) * target.fract() - source.viewport_top,
+                    (Some(a), None) => a - source.viewport_top,
+                    _ => (target - source.top) * source.per_line,
+                };
+                let offset = e.scroll_offset();
+                editor.update(cx, |e, cx| e.set_scroll_offset(point(offset.x, offset.y - px(delta)), cx));
+            }
         }
     }
 
@@ -747,6 +903,9 @@ impl Render for FileView {
         let banner = self.render_banner(&theme, cx);
         let send = self.render_selection_button(&theme, cx);
         let layout = self.layout();
+        if layout == MdBody::Split {
+            self.sync_scroll(window, cx);
+        }
         let body: AnyElement = match (layout, &self.diff, &self.body) {
             (MdBody::Diff, Some(state), _) => Diff::new(state).into_any_element(),
             (_, _, Body::Text { editor, .. }) => {
@@ -757,9 +916,28 @@ impl Render for FileView {
                         .size_full()
                         .flex()
                         .flex_row()
-                        .child(div().flex_1().min_w_0().h_full().child(source()))
+                        .child(
+                            div()
+                                .id("fv-source")
+                                .relative()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                // 中身より先に描き、キャプチャの段階で先に呼ばれるようにする。
+                                .child(scroll_watch(cx.entity().downgrade(), ScrollLeader::Source))
+                                .child(source()),
+                        )
                         .child(div().w(px(1.)).h_full().flex_shrink_0().bg(theme.border_subtle))
-                        .child(div().flex_1().min_w_0().h_full().child(preview))
+                        .child(
+                            div()
+                                .id("fv-preview")
+                                .relative()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .child(scroll_watch(cx.entity().downgrade(), ScrollLeader::Preview))
+                                .child(preview),
+                        )
                         .into_any_element(),
                     (MdBody::PreviewOnly, Some(preview)) => preview.into_any_element(),
                     _ => source().into_any_element(),
@@ -783,6 +961,14 @@ impl Render for FileView {
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_from_key(cx)))
             .on_action(cx.listener(|this, _: &SendToClaude, _, cx| this.send_to_claude(cx)))
             .on_action(cx.listener(|this, _: &ToggleMarkdownMode, _, cx| this.toggle_md_mode(cx)))
+            // キーで動かしたら、ソースがスクロールを先導する。
+            .on_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
+                if this.leader != ScrollLeader::Source || this.lead_at.is_none() {
+                    this.lead(ScrollLeader::Source, cx);
+                } else {
+                    this.lead_at = Some(std::time::Instant::now());
+                }
+            }))
             // エディタは、閉じる検索欄や選択が無いときに Esc を親へ回す。そのときだけターミナルへ戻る。
             .on_action(cx.listener(|_, _: &gpui_kit::base::input::Escape, _, cx| cx.emit(FileViewEvent::LeaveEditor)))
             .on_action(cx.listener(|_, _: &LeaveEditor, _, cx| cx.emit(FileViewEvent::LeaveEditor)))
