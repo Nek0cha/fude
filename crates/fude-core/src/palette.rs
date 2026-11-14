@@ -163,6 +163,7 @@ pub fn key_label(key: &str, platform: Platform) -> String {
     let key = match *last {
         "{" => Some("["),
         "}" => Some("]"),
+        "|" => Some("\\"),
         _ => None,
     };
     let key = match key {
@@ -223,6 +224,8 @@ mod tests {
         assert!(PaletteCommand::ALL.contains(&PaletteCommand::ToggleRouteMap));
         assert_eq!(PaletteCommand::ToggleRouteMap.keymap_command(), Some(Command::ToggleRouteMap));
         assert_eq!(key_label("ctrl-\\", Platform::Windows), "Ctrl+\\");
+        assert_eq!(key_label("ctrl-|", Platform::Windows), "Ctrl+Shift+\\");
+        assert_eq!(key_hint(Command::ToggleRouteMap, Platform::Windows).as_deref(), Some("Ctrl+Shift+\\"));
     }
 
     #[test]

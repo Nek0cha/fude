@@ -95,7 +95,8 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("ctrl-shift-k", Command::OpenPalette),
                 ("ctrl-shift-p", Command::GoToFile),
                 ("ctrl-shift-f", Command::FindInFiles),
-                ("ctrl-\\", Command::ToggleRouteMap),
+                // Ctrl+\ はシェルの SIGQUIT と重なるため、どこでも効くのは Shift 付きだけ（§10）。
+                ("ctrl-|", Command::ToggleRouteMap),
             ],
             PROJECT_KEYS_WIN,
         ),
@@ -121,6 +122,7 @@ pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'sta
             ("ctrl-shift-l", Command::SendToClaude, FILE_VIEW),
             ("ctrl-k", Command::OpenPalette, NOT_TERMINAL),
             ("ctrl-p", Command::GoToFile, NOT_TERMINAL),
+            ("ctrl-\\", Command::ToggleRouteMap, NOT_TERMINAL),
             // Ctrl+F はシェル（1 文字進む、fish の補完の確定）に、Ctrl+Shift+F は全体検索に使う。
             ("ctrl-alt-f", Command::FindInTerminal, TERMINAL),
         ],
@@ -137,7 +139,11 @@ mod tests {
     #[test]
     fn route_map_key() {
         assert!(default_bindings(Platform::MacOs).contains(&("cmd-\\", Command::ToggleRouteMap)));
-        assert!(default_bindings(Platform::Windows).contains(&("ctrl-\\", Command::ToggleRouteMap)));
+        // Windows の Ctrl+\ はターミナルの SIGQUIT（0x1C）に渡す。どこでも効くのは Shift 付き（GPUI は `|` で受け取る）。
+        let win = default_bindings(Platform::Windows);
+        assert!(win.contains(&("ctrl-|", Command::ToggleRouteMap)));
+        assert!(!win.iter().any(|(k, _)| *k == "ctrl-\\"));
+        assert!(context_bindings(Platform::Windows).contains(&("ctrl-\\", Command::ToggleRouteMap, NOT_TERMINAL)));
     }
 
     #[test]

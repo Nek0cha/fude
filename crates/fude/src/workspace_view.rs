@@ -63,6 +63,7 @@ fn binding(key: &'static str, command: Command, context: Option<&'static str>) -
         Command::GoToFile => KeyBinding::new(key, GoToFile, context),
         Command::FindInFiles => KeyBinding::new(key, FindInFiles, context),
         Command::FindInTerminal => KeyBinding::new(key, FindInTerminal, context),
+        Command::ToggleRouteMap => KeyBinding::new(key, ToggleRouteMap, context),
         other => default_binding(key, other),
     }
 }
@@ -79,7 +80,6 @@ pub fn bind_keys(cx: &mut App) {
 fn default_binding(key: &'static str, command: Command) -> KeyBinding {
     match command {
         Command::NewTab => KeyBinding::new(key, NewTab, None),
-        Command::ToggleRouteMap => KeyBinding::new(key, ToggleRouteMap, None),
         Command::SplitTab => KeyBinding::new(key, SplitTab, None),
         Command::NextTab => KeyBinding::new(key, NextTab, None),
         Command::PrevTab => KeyBinding::new(key, PrevTab, None),
@@ -104,7 +104,8 @@ fn default_binding(key: &'static str, command: Command) -> KeyBinding {
         | Command::OpenPalette
         | Command::GoToFile
         | Command::FindInFiles
-        | Command::FindInTerminal => {
+        | Command::FindInTerminal
+        | Command::ToggleRouteMap => {
             unreachable!("binding で扱う")
         }
     }
@@ -225,7 +226,7 @@ pub struct WorkspaceView {
     /// 前の描画の作業中のプロジェクト（変わったらすぐプランを確かめる）。
     pub(crate) route_project: Option<ProjectId>,
     /// 最後に出した路線図。消えるときの動き（幅が 0 に戻るまで）の間、これを描く。
-    pub(crate) route_last: Option<fude_core::plan::Route>,
+    pub(crate) route_last: Option<(ProjectId, fude_core::plan::Route)>,
     pub(crate) plan_poll: Option<Task<()>>,
     /// ピル用のブランチ名。開いたときと、ウィンドウが前面に来たときに読み直す。
     pub(crate) branches: HashMap<ProjectId, Option<String>>,
