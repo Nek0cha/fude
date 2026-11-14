@@ -40,13 +40,34 @@ pub(crate) fn columns(main_w: f32, window_w: f32, has_terminals: bool, tree_open
     if !pin_open {
         return base_columns(main_w, has_terminals, tree_open, editor_open);
     }
-    let over = has_terminals && editor_open && window_w < PIN_OVERLAY_BELOW;
-    let mut c = base_columns((main_w - PIN_W).max(0.0), has_terminals, tree_open, editor_open && !over);
+    let rest = (main_w - PIN_W).max(0.0);
+    if !has_terminals {
+        // ターミナルが 0 枚: ツリーを並べるとエディタ列が EDITOR_MIN を割るなら、ツリーを重ねる。
+        // ピン列の残りでも足りなければ、エディタ列をピン列の上に重ねる。
+        let tree_inline = tree_open && rest - TREE_W >= EDITOR_MIN;
+        let mut c = base_columns(rest, false, tree_inline, editor_open);
+        if tree_open && !tree_inline {
+            c.tree = Place::Overlay;
+            c.tree_w = TREE_W;
+            c.editor_w = rest;
+        }
+        if editor_open && rest < EDITOR_MIN {
+            c.editor = Place::Overlay;
+            c.editor_w = overlay_editor_w(main_w);
+        }
+        c.pin = Place::Inline;
+        c.pin_w = PIN_W;
+        return c;
+    }
+    // ピン列を並べるとターミナルが TERMINAL_MIN を割るなら、ピン列も右端に重ねる（ターミナルを押さない）。
+    let pin_inline = rest >= TERMINAL_MIN;
+    let over = editor_open && (window_w < PIN_OVERLAY_BELOW || !pin_inline);
+    let mut c = base_columns(if pin_inline { rest } else { main_w }, true, tree_open, editor_open && !over);
     if over {
         c.editor = Place::Overlay;
         c.editor_w = overlay_editor_w(main_w);
     }
-    c.pin = Place::Inline;
+    c.pin = if pin_inline { Place::Inline } else { Place::Overlay };
     c.pin_w = PIN_W;
     c
 }
@@ -165,5 +186,32 @@ mod tests {
         assert_eq!(c.editor_w, 1200.0 - PIN_W);
         let only_pin = columns(1200.0, 1300.0, false, false, false, true);
         assert_eq!((only_pin.editor, only_pin.pin), (Place::Hidden, Place::Inline));
+    }
+
+    /// ピン列を並べるとターミナルが TERMINAL_MIN を割るときは、ピン列も右端に重ねる。
+    #[test]
+    fn pin_overlays_when_terminal_would_shrink() {
+        let c = columns(588.0, 640.0, true, false, false, true);
+        assert_eq!(c.pin, Place::Overlay);
+        assert_eq!(c.terminal_w, 588.0);
+        let c = columns(588.0, 640.0, true, false, true, true);
+        assert_eq!((c.editor, c.pin), (Place::Overlay, Place::Overlay));
+        assert_eq!(c.terminal_w, 588.0);
+        // ウィンドウ 1000px で縦のタブ（160px）を出したとき。
+        let c = columns(788.0, 1000.0, true, false, true, true);
+        assert!(c.terminal_w >= TERMINAL_MIN);
+        assert_eq!(c.pin, Place::Overlay);
+    }
+
+    /// ターミナルが 0 枚でも、エディタ列が EDITOR_MIN を割らない（先にツリーを重ね、次にエディタ列をピン列に重ねる）。
+    #[test]
+    fn pin_without_terminals_keeps_editor_min() {
+        let c = columns(848.0, 900.0, false, true, true, true);
+        assert_eq!(c.tree, Place::Overlay);
+        assert_eq!(c.editor, Place::Inline);
+        assert_eq!(c.editor_w, 848.0 - PIN_W);
+        let c = columns(588.0, 640.0, false, true, true, true);
+        assert_eq!(c.editor, Place::Overlay);
+        assert!(c.editor_w >= EDITOR_MIN);
     }
 }
