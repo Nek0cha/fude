@@ -43,6 +43,8 @@ pub enum TerminalEvent {
     Focused,
     /// キー入力、IME の確定、貼り付けで PTY に書いた（返事待ちを消す）。
     Input,
+    /// ファイルやフォルダが落とされた。パスを入力する（設計書 §5.2）。
+    DroppedFiles(Vec<fude_core::location::FileLocation>),
 }
 
 pub struct TerminalView {
@@ -705,8 +707,15 @@ impl Render for TerminalView {
             .id("terminal")
             .track_focus(&self.focus)
             .key_context("Terminal")
-            // ターミナルへのドロップ（パスの入力）は別の段階で入れる。ウィンドウの「開く」には回さない。
-            .on_drop(|_: &ExternalPaths, _, cx| cx.stop_propagation())
+            // 落とされたもののパスを入力する。ウィンドウの「開く」には回さない。
+            .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| {
+                cx.stop_propagation();
+                cx.emit(TerminalEvent::DroppedFiles(crate::drag::external_locations(paths)));
+            }))
+            .on_drop(cx.listener(|_, entry: &crate::drag::DraggedEntry, _, cx| {
+                cx.stop_propagation();
+                cx.emit(TerminalEvent::DroppedFiles(vec![entry.location.clone()]));
+            }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| this.on_key(ev, cx)))
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy(cx)))
             .on_action(cx.listener(|this, _: &PasteText, _, cx| this.paste(cx)))

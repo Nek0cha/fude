@@ -813,7 +813,7 @@ impl WorkspaceView {
             let view = cx.new(|cx| TerminalView::new(&kind, &root, &terminal_id, window, cx));
             let link_kind = kind.clone();
             let link_root = root.clone();
-            let sub = cx.subscribe_in(&view, window, move |this, _, event: &TerminalEvent, window, cx| {
+            let sub = cx.subscribe_in(&view, window, move |this, view, event: &TerminalEvent, window, cx| {
                 match event {
                     TerminalEvent::OpenLink(target) => this.open_link(target.clone(), &link_kind, &link_root, window, cx),
                     TerminalEvent::Title(title) => this.workspace.set_pane_title(id, title.clone()),
@@ -823,6 +823,13 @@ impl WorkspaceView {
                     TerminalEvent::Exited { success: false } => {}
                     TerminalEvent::Input => {
                         this.agents.typed(id.raw());
+                    }
+                    TerminalEvent::DroppedFiles(files) => {
+                        let text = fude_core::drop_text::drop_text(files, &link_kind, Platform::current());
+                        view.read(cx).write(text.into_bytes());
+                        this.agents.typed(id.raw());
+                        this.workspace.focus_pane(id);
+                        this.refocus_pane();
                     }
                     TerminalEvent::Focused => {
                         this.workspace.focus_pane(id);

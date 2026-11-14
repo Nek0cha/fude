@@ -292,6 +292,30 @@ impl WorkspaceView {
             .child(div().flex_1().min_h_0().children(view))
     }
 
+    /// Markdown に落とされたもののうち画像だけを、その .md からの相対パス（外なら絶対パス）のリンクにして入れる（設計書 §5.4）。
+    fn drop_into_markdown(
+        &mut self,
+        project: ProjectId,
+        files: &[fude_core::location::FileLocation],
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use fude_core::markdown::{image_link, is_image, link_target};
+        let Some(p) = self.workspace.projects().iter().find(|p| p.id == project) else { return };
+        let Some(view) = p.editor.active().and_then(|a| self.editors.get(&project)?.views.get(&a.rel).cloned()) else { return };
+        let md_rel = view.read(cx).rel.clone();
+        let links: Vec<String> = files
+            .iter()
+            .map(|f| link_target(&p.root, f))
+            .filter(|t| is_image(match t {
+                fude_core::markdown::LinkTarget::Project(r) | fude_core::markdown::LinkTarget::Outside(r) => r,
+            }))
+            .map(|t| image_link(&md_rel, &t))
+            .collect();
+        view.update(cx, |v, cx| v.insert_links(links, line, window, cx));
+    }
+
     /// 選択中のプロジェクトのエディタ列にタブがあるか。
     pub(crate) fn editor_open(&self) -> bool {
         self.workspace.active_project().is_some_and(|p| !p.editor.is_empty())
@@ -678,6 +702,7 @@ impl WorkspaceView {
             }
             FileViewEvent::OpenRel(rel) => this.open_in_editor(project, rel.clone(), None, None, window, cx),
             FileViewEvent::TogglePin(rel) => this.toggle_pin(project, Some(rel.clone()), cx),
+            FileViewEvent::DroppedFiles(files, line) => this.drop_into_markdown(project, files, *line, window, cx),
         });
         if let Some((line, col)) = goto {
             view.update(cx, |v, cx| v.goto(line, col, window, cx));

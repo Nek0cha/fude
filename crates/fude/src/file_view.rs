@@ -183,6 +183,8 @@ pub enum FileViewEvent {
     OpenRel(String),
     /// この Markdown をピン列に留める、外す。
     TogglePin(String),
+    /// Markdown にファイルが落とされた。画像なら line（0 始まり。None はカーソルの位置）にリンクを入れる。
+    DroppedFiles(Vec<fude_core::location::FileLocation>, Option<u32>),
 }
 
 /// 上部の帯。
@@ -460,6 +462,70 @@ impl FileView {
                 editor.update(cx, |e, cx| e.set_scroll_offset(point(offset.x, offset.y - px(delta)), cx));
             }
         }
+    }
+
+    /// 落とした点 pos の下の行（0 始まり）。ソースの上でなければ None（カーソルの位置に入れる）。
+    fn drop_target_line(&self, pos: Point<Pixels>, cx: &App) -> Option<u32> {
+        let Body::Text { editor, .. } = &self.body else { return None };
+        if !matches!(self.layout(), MdBody::Editor | MdBody::Split) {
+            return None;
+        }
+        let e = editor.read(cx);
+        if !e.input_bounds().contains(&pos) {
+            return None;
+        }
+        let text = e.value();
+        let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+        let y = f32::from(pos.y);
+        let rows = e.visible_row_range()?;
+        // 見えている行のうち、頭が落とした点より上にある最後の行。
+        let hit = rows.clone().filter(|&l| line_top(e, &starts, l).is_some_and(|t| t <= y)).last();
+        match hit {
+            Some(line) => Some(line as u32),
+            None => {
+                let top = f32::from(e.input_bounds().top());
+                let h = e.line_height().map(f32::from).unwrap_or(0.0);
+                Some(crate::drag::drop_line(y - top, f32::from(e.scroll_offset().y), h, starts.len() as u32))
+            }
+        }
+    }
+
+    /// 落とされたものを、持ち主にリンクの文字列にしてもらう。Markdown でなければ何もしない。
+    fn on_dropped(&mut self, files: Vec<fude_core::location::FileLocation>, window: &Window, cx: &mut Context<Self>) {
+        if !self.is_md() || files.is_empty() {
+            return;
+        }
+        let line = self.drop_target_line(window.mouse_position(), cx);
+        cx.emit(FileViewEvent::DroppedFiles(files, line));
+    }
+
+    /// 行 at の頭に、links を 1 行に 1 つずつ入れる。at が None ならカーソルの位置（行の途中なら改行してから）。
+    pub(crate) fn insert_links(&mut self, links: Vec<String>, at: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        let Body::Text { editor, .. } = &self.body else { return };
+        if links.is_empty() {
+            return;
+        }
+        let block: String = links.iter().map(|l| format!("{l}\n")).collect();
+        editor.update(cx, |e, cx| {
+            let text = e.value().to_string();
+            let lines: Vec<&str> = text.split('\n').collect();
+            let last = lines.len().saturating_sub(1) as u32;
+            let (pos, insert) = match at {
+                // 最後の行（改行で終わらない行）より後ろなら、末尾で改行してから足す。
+                Some(line) if line > last => {
+                    let end = lines[last as usize].encode_utf16().count() as u32;
+                    (Position::new(last, end), format!("\n{block}"))
+                }
+                Some(line) => (Position::new(line, 0), block),
+                None => {
+                    let pos = e.cursor_position();
+                    let insert = if pos.character > 0 { format!("\n{block}") } else { block };
+                    (pos, insert)
+                }
+            };
+            e.set_cursor_position(pos, window, cx);
+            e.insert(insert, window, cx);
+        });
     }
 
     fn rel_path(&self) -> io::Result<RelPath> {
@@ -924,6 +990,7 @@ impl Render for FileView {
         let header = self.render_header(&theme, cx);
         let banner = self.render_banner(&theme, cx);
         let send = self.render_selection_button(&theme, cx);
+        let accent = theme.accent;
         let layout = self.layout();
         if layout == MdBody::Split {
             self.sync_scroll(window, cx);
@@ -979,7 +1046,16 @@ impl Render for FileView {
             .id("file-view")
             .track_focus(&self.focus)
             .key_context("FileView")
-            .on_drop(|_: &ExternalPaths, _, cx| cx.stop_propagation())
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                // Markdown 以外でも、ウィンドウの「開く」には回さない。
+                cx.stop_propagation();
+                this.on_dropped(crate::drag::external_locations(paths), window, cx);
+            }))
+            .on_drop(cx.listener(|this, entry: &crate::drag::DraggedEntry, window, cx| {
+                cx.stop_propagation();
+                this.on_dropped(vec![entry.location.clone()], window, cx);
+            }))
+            .when(self.is_md(), |d| d.drag_over::<crate::drag::DraggedEntry>(move |s, _, _, _| s.border_1().border_color(accent)))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_from_key(cx)))
             .on_action(cx.listener(|this, _: &SendToClaude, _, cx| this.send_to_claude(cx)))
             .on_action(cx.listener(|this, _: &ToggleMarkdownMode, _, cx| this.toggle_md_mode(cx)))
