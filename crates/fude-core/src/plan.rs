@@ -194,12 +194,21 @@ impl Route {
     }
 }
 
-/// 台帳が無く、印も無いプランは None。タスクが 0 個も None。実行中は最初の未完了。
-pub fn plan_route(rel: &str, text: &str, ledger: Option<&str>) -> Option<Route> {
+/// 台帳も印も無いプランを、書いた直後とみなして出す期間（更新からの時間）。
+/// Superpowers は終わると台帳を消すため、終わったプランと書いただけのプランは見分けられない。期間で区切る。
+pub const RECENT_PLAN_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// プランの更新が RECENT_PLAN_MS 以内か。更新時刻が未来（時計のずれ）なら最近とみなす。
+pub fn plan_is_recent(plan_mtime_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(plan_mtime_ms) < RECENT_PLAN_MS
+}
+
+/// 台帳が無く、印も無いプランは、最近（recent）でなければ None。タスクが 0 個も None。実行中は最初の未完了。
+pub fn plan_route(rel: &str, text: &str, ledger: Option<&str>, recent: bool) -> Option<Route> {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     let name = name.strip_suffix(".md").unwrap_or(name);
     let plan = parse_plan(text, name);
-    if (ledger.is_none() && !plan.ticked) || plan.tasks.is_empty() {
+    if (ledger.is_none() && !plan.ticked && !recent) || plan.tasks.is_empty() {
         return None;
     }
     let done = ledger.map(ledger_done).unwrap_or_default();
@@ -249,7 +258,7 @@ pub fn todo_route(todos: &[TodoItem]) -> Option<Route> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StationState, ledger_done, parse_plan, plan_route, todo_route};
+    use super::{RECENT_PLAN_MS, StationState, ledger_done, parse_plan, plan_is_recent, plan_route, todo_route};
 
     const PLAN: &str = "# fude 計画9: 仕上げ Implementation Plan\n\n## Global Constraints\n\n- [ ] 例ではない\n\n### Task 1: 一つ目\n\n- [x] **Step 1: a**\n- [x] **Step 2: b**\n\n### Task 2: 二つ目\n\n- [x] **Step 1: a**\n- [ ] **Step 2: b**\n\n### Task 3: 三つ目\n\n- [ ] **Step 1: a**\n";
 
@@ -308,7 +317,7 @@ mod tests {
     #[test]
     fn plan_route_uses_ledger() {
         let text = "# P\n### Task 1: a\n- [ ] s\n### Task 2: b\n- [ ] s\n### Task 3: c\n- [ ] s\n";
-        let r = plan_route("docs/superpowers/plans/p.md", text, Some("Task 1: complete (x)\n")).unwrap();
+        let r = plan_route("docs/superpowers/plans/p.md", text, Some("Task 1: complete (x)\n"), false).unwrap();
         assert_eq!(r.progress(), (1, 3));
         assert_eq!(r.current(), Some(1));
         assert_eq!(
@@ -318,17 +327,38 @@ mod tests {
         assert_eq!(r.stations[1].line, Some(4));
         assert_eq!(r.plan_rel.as_deref(), Some("docs/superpowers/plans/p.md"));
         // 台帳が空でも、台帳があれば出す。
-        assert_eq!(plan_route("p.md", text, Some("# SDD ledger — plan: p.md\n")).unwrap().progress(), (0, 3));
+        assert_eq!(plan_route("p.md", text, Some("# SDD ledger — plan: p.md\n"), false).unwrap().progress(), (0, 3));
     }
 
     #[test]
     fn finished_plan_without_ledger_is_hidden() {
         let text = "# P\n### Task 1: a\n- [ ] s\n";
-        assert_eq!(plan_route("p.md", text, None), None);
-        assert_eq!(plan_route("p.md", "# P\n本文だけ\n", Some("")), None);
-        let all = plan_route("p.md", "# P\n### Task 1: a\n- [x] s\n", None).unwrap();
+        assert_eq!(plan_route("p.md", text, None, false), None);
+        assert_eq!(plan_route("p.md", "# P\n本文だけ\n", Some(""), false), None);
+        let all = plan_route("p.md", "# P\n### Task 1: a\n- [x] s\n", None, false).unwrap();
         assert_eq!(all.progress(), (1, 1));
         assert_eq!(all.current(), None);
+    }
+
+    /// 書いた直後のプランや、git の外（Superpowers の台帳ができない）のプランも、最近のものなら 0/N で出す。
+    #[test]
+    fn recent_plan_without_ledger_is_shown() {
+        let text = "# P\n### Task 1: a\n- [ ] s\n### Task 2: b\n- [ ] s\n";
+        let r = plan_route("p.md", text, None, true).unwrap();
+        assert_eq!(r.progress(), (0, 2));
+        assert_eq!(r.current(), Some(0));
+        // タスクが無いプランは、最近でも出さない。
+        assert_eq!(plan_route("p.md", "# P\n本文だけ\n", None, true), None);
+    }
+
+    #[test]
+    fn plan_recency_window() {
+        let day = RECENT_PLAN_MS;
+        assert!(plan_is_recent(1_000, 1_000));
+        assert!(plan_is_recent(1_000, 1_000 + day - 1));
+        assert!(!plan_is_recent(1_000, 1_000 + day));
+        // 時計のずれで更新時刻が未来でも、最近として扱う。
+        assert!(plan_is_recent(5_000, 1_000));
     }
 
     #[test]

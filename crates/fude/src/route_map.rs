@@ -7,7 +7,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use fude_core::location::FileLocation;
-use fude_core::plan::{Route, StationState, plan_route, todo_route};
+use fude_core::plan::{Route, StationState, plan_is_recent, plan_route, todo_route};
 use fude_core::workspace::{ProjectId, ProjectRoot};
 use fude_fs::plans::{PlanFetch, PlanStamp};
 use gpui_kit::assets::IconName;
@@ -33,6 +33,13 @@ const HEADER_H: f32 = 32.0;
 pub(crate) struct PlanCache {
     pub stamp: Option<PlanStamp>,
     pub route: Option<Route>,
+    /// 台帳も印も無く、更新が最近なので出しているだけ（期間を過ぎたら消す）。
+    pub recent_only: bool,
+}
+
+/// 今の UNIX 時刻（ミリ秒）。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// 幅の目標。route が無ければ 0、折りたたみなら ROUTE_COLLAPSED_W、それ以外は ROUTE_W。
@@ -109,9 +116,23 @@ impl WorkspaceView {
     fn apply_plan_fetch(&mut self, project: ProjectId, result: io::Result<PlanFetch>, cx: &mut Context<Self>) {
         match result {
             Ok(PlanFetch::Changed { stamp, plan, ledger }) => {
-                let route = plan_route(stamp.rel.as_str(), &plan, ledger.as_deref());
-                self.plans.insert(project, PlanCache { stamp: Some(stamp), route });
+                let recent = plan_is_recent(stamp.plan_mtime_ms, now_ms());
+                let started = plan_route(stamp.rel.as_str(), &plan, ledger.as_deref(), false);
+                let recent_only = started.is_none() && recent;
+                let route = if recent_only { plan_route(stamp.rel.as_str(), &plan, None, true) } else { started };
+                self.plans.insert(project, PlanCache { stamp: Some(stamp), route, recent_only });
                 cx.notify();
+            }
+            // 変わっていなくても、最近だから出していたプランは、期間を過ぎたら消す。
+            Ok(PlanFetch::Unchanged) => {
+                if let Some(cache) = self.plans.get_mut(&project)
+                    && cache.recent_only
+                    && cache.stamp.as_ref().is_some_and(|s| !plan_is_recent(s.plan_mtime_ms, now_ms()))
+                {
+                    cache.route = None;
+                    cache.recent_only = false;
+                    cx.notify();
+                }
             }
             Ok(PlanFetch::None) => {
                 if self.plans.remove(&project).is_some_and(|c| c.route.is_some()) {
@@ -119,7 +140,7 @@ impl WorkspaceView {
                 }
             }
             // 変わっていない、または読めない（次にまたやる）。
-            Ok(PlanFetch::Unchanged) | Err(_) => {}
+            Err(_) => {}
         }
     }
 
