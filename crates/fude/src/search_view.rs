@@ -70,6 +70,11 @@ pub(crate) fn plan_replace(targets: &[String], dirty: &[String]) -> (Vec<String>
     targets.iter().cloned().partition(|rel| !dirty.contains(rel))
 }
 
+/// 置換の文字列。置換の欄に触れた（フォーカスした、打った）あとは、空でも置換の形にする（一致を消せる）。
+pub(crate) fn replacement_of(active: bool, text: &str) -> Option<String> {
+    (active || !text.is_empty()).then(|| text.to_string())
+}
+
 /// 置換のプレビューの 1 片。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Span {
@@ -136,6 +141,8 @@ pub(crate) struct SearchView {
     focus: FocusHandle,
     /// 置換の文字列の入力欄。
     replace: Entity<InputState>,
+    /// 置換の欄に触れたか。
+    replace_active: bool,
     _replace_sub: Subscription,
 }
 
@@ -144,13 +151,15 @@ impl EventEmitter<SearchViewEvent> for SearchView {}
 impl SearchView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let replace = cx.new(|cx| InputState::new(window, cx).placeholder("置換"));
-        let _replace_sub = cx.subscribe(&replace, |_, _, ev: &InputEvent, cx| {
-            if matches!(ev, InputEvent::Change) {
+        let _replace_sub = cx.subscribe(&replace, |this: &mut SearchView, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change | InputEvent::Focus) {
+                this.replace_active = true;
                 cx.notify();
             }
         });
         SearchView {
             replace,
+            replace_active: false,
             _replace_sub,
             query: None,
             results: SearchResults::default(),
@@ -232,8 +241,7 @@ impl SearchView {
 
     /// 置換の欄の文字列（空なら置換しない）。
     fn replacement(&self, cx: &App) -> Option<String> {
-        let text = self.replace.read(cx).value().to_string();
-        (!text.is_empty()).then_some(text)
+        replacement_of(self.replace_active, &self.replace.read(cx).value())
     }
 
     fn emit_replace(&mut self, rels: Vec<String>, confirm: bool, cx: &mut Context<Self>) {
@@ -482,7 +490,7 @@ fn preview_text(spans: &[Span], theme: &Theme) -> StyledText {
 
 #[cfg(test)]
 mod tests {
-    use super::{Row, Span, accept_results, flatten, plan_replace, preview_spans, tab_title};
+    use super::{Row, Span, accept_results, flatten, plan_replace, preview_spans, replacement_of, tab_title};
     use fude_fs::RelPath;
     use fude_fs::search::{FileMatches, LineMatch, SearchQuery, SearchResults};
     use std::collections::HashSet;
@@ -512,6 +520,14 @@ mod tests {
     fn stale_results_are_ignored() {
         assert!(accept_results(3, 3));
         assert!(!accept_results(3, 2));
+    }
+
+    #[test]
+    fn empty_replacement_is_allowed_once_replace_is_used() {
+        // 一致を消す（空の文字列で置換する）ことができる。置換の欄に触れるまでは置換の形にしない。
+        assert_eq!(replacement_of(false, ""), None);
+        assert_eq!(replacement_of(true, ""), Some(String::new()));
+        assert_eq!(replacement_of(false, "x"), Some("x".into()));
     }
 
     #[test]

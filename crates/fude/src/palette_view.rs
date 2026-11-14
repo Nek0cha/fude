@@ -197,6 +197,19 @@ pub(crate) const FILES_LIMIT: usize = 200;
 pub(crate) const FILES_IN_ALL: usize = 30;
 
 /// 範囲と文字列と候補の材料から一覧を作る。
+/// Enter で選ぶ行。一覧が今の入力に追いついていなければ（stale）、今の入力で作り直した先頭を選ぶ。
+pub(crate) fn confirm_choice(
+    items: &[PaletteItem],
+    selected: usize,
+    stale: bool,
+    rebuild: impl FnOnce() -> Vec<PaletteItem>,
+) -> Option<PaletteItem> {
+    if stale {
+        return rebuild().into_iter().next();
+    }
+    items.get(selected).cloned()
+}
+
 pub(crate) fn build_items(scope: Scope, query: &str, sources: &PaletteSources, platform: Platform) -> Vec<PaletteItem> {
     match scope {
         Scope::Commands => command_items(query, sources, platform),
@@ -233,6 +246,8 @@ pub(crate) struct PaletteState {
     pub closing: bool,
     /// 一覧の世代。入力のたびに 1 増やし、裏で作った一覧が古ければ捨てる。
     pub generation: u64,
+    /// items を作った世代。generation と違えば、一覧はまだ今の入力に追いついていない。
+    pub applied: u64,
     pub items: Vec<PaletteItem>,
     pub search_flags: SearchFlags,
     pub error: Option<String>,
@@ -339,6 +354,7 @@ impl WorkspaceView {
             fade,
             closing: false,
             generation: 0,
+            applied: 0,
             items: Vec::new(),
             search_flags: SearchFlags::default(),
             error: None,
@@ -410,6 +426,7 @@ impl WorkspaceView {
             this.update(cx, |this, cx| {
                 let Some(p) = this.palette.as_mut().filter(|p| p.generation == generation) else { return };
                 p.items = items;
+                p.applied = generation;
                 p.selected = 0;
                 p.scroll.scroll_to_item(0);
                 cx.notify();
@@ -440,9 +457,16 @@ impl WorkspaceView {
 
     /// 選択中の行を実行する。
     fn confirm_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.palette.as_ref().filter(|p| !p.closing).and_then(|p| p.items.get(p.selected).cloned()) else {
-            return;
+        let Some(p) = self.palette.as_ref().filter(|p| !p.closing) else { return };
+        // 打ってすぐの Enter（裏で一覧を作っている途中）でも、今の入力どおりに動く。
+        let stale = p.applied != p.generation;
+        let (text, base) = (p.input.read(cx).value().to_string(), p.base);
+        let rebuild = || {
+            let sources = self.palette_sources();
+            let (scope, query) = parse_input(&text, base);
+            build_items(scope, query, &sources, Platform::current())
         };
+        let Some(item) = confirm_choice(&p.items, p.selected, stale, rebuild) else { return };
         // 正しくない検索の条件なら理由を出し、閉じない。
         if let (PaletteTarget::Search(pattern), Some(p)) = (&item.target, self.palette.as_mut())
             && let Err(e) = fude_fs::search::build_pattern(&crate::search_view::make_query(pattern, p.search_flags))
@@ -657,7 +681,7 @@ impl WorkspaceView {
 mod tests {
     use super::{
         GROUP_COMMANDS, GROUP_FILES, GROUP_PROJECTS, GROUP_TERMINALS, PaletteSources, PaletteTarget, ProjectSource, TerminalSource,
-        build_items,
+        build_items, confirm_choice,
     };
     use fude_core::keymap::Platform;
     use fude_core::palette::{PaletteCommand, Scope};
@@ -688,6 +712,18 @@ mod tests {
             }
         }
         assert_eq!(groups, [GROUP_COMMANDS, GROUP_PROJECTS, GROUP_TERMINALS]);
+    }
+
+    #[test]
+    fn enter_before_the_list_catches_up_uses_the_current_input() {
+        // "#foo_ba" の一覧のまま、"#foo_bar" で Enter。今の入力から作り直したほうを選ぶ。
+        let sources = sources_with_one_project();
+        let old = build_items(Scope::Search, "foo_ba", &sources, Platform::Windows);
+        let fresh = || build_items(Scope::Search, "foo_bar", &sources, Platform::Windows);
+        assert_eq!(confirm_choice(&old, 0, true, fresh).unwrap().target, PaletteTarget::Search("foo_bar".into()));
+        // 一覧が今の入力のものなら、選んでいる行を使う（作り直さない）。
+        let got = confirm_choice(&old, 0, false, || unreachable!("作り直さない"));
+        assert_eq!(got.unwrap().target, PaletteTarget::Search("foo_ba".into()));
     }
 
     #[test]
