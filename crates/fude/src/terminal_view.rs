@@ -205,6 +205,18 @@ impl TerminalView {
             window.request_animation_frame();
         }
         let query = bar.input.read(cx).value().to_string();
+        // 出力で一致がずれたら、間隔を空けて探し直し、数も合わせる。
+        if !bar.closing
+            && let Some((counts, pending)) = self.session.as_ref().and_then(|s| s.with_state(|st| st.refresh_search()))
+        {
+            if pending {
+                window.request_animation_frame();
+            }
+            if let Some(bar) = self.search.as_mut() {
+                bar.counts = counts;
+            }
+        }
+        let bar = self.search.as_ref()?;
         Some(
             bar.frame(&query, theme, now)
                 .on_action(cx.listener(|this, _: &TermSearchClose, window, cx| this.close_search(window, cx)))

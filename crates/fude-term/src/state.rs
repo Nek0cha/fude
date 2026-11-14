@@ -140,11 +140,17 @@ impl EventListener for Listener {
 /// ターミナル内の検索で数える一致の上限。
 pub const TERM_SEARCH_MAX: usize = 1000;
 
+/// 出力のあとに一致を探し直す間隔の最小（出力の流れている間、履歴全体を毎回は探さない）。
+pub const SEARCH_RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// ターミナル内の検索の状態。一致は履歴を含む全体から集めて控える。
 struct TermSearch {
     regex: RegexSearch,
     matches: Vec<Match>,
     current: Option<usize>,
+    /// 出力が来て、一致の位置がずれているかもしれない。
+    dirty: bool,
+    last_scan: std::time::Instant,
 }
 
 /// 正規表現の記号を逃がし、文字どおりに探す形にする。
@@ -159,11 +165,13 @@ fn escape_literal(query: &str) -> String {
     out
 }
 
-/// 履歴を含む全体の一致（上から順、TERM_SEARCH_MAX まで）。
+/// 履歴を含む全体の一致（上から順）。TERM_SEARCH_MAX を超えるときは、下（新しい、カーソルに近い）ほうを残す。
 fn collect_matches(term: &Term<Listener>, regex: &mut RegexSearch) -> Vec<Match> {
-    let start = Point::new(term.topmost_line(), Column(0));
-    let end = Point::new(term.bottommost_line(), term.last_column());
-    RegexIter::new(start, end, Direction::Right, term, regex).take(TERM_SEARCH_MAX).collect()
+    let top = Point::new(term.topmost_line(), Column(0));
+    let bottom = Point::new(term.bottommost_line(), term.last_column());
+    let mut matches: Vec<Match> = RegexIter::new(bottom, top, Direction::Left, term, regex).take(TERM_SEARCH_MAX).collect();
+    matches.reverse();
+    matches
 }
 
 /// 端末の状態。PTY には依存しない。
@@ -186,7 +194,12 @@ impl TermState {
     /// PTY の出力を解析して画面に反映する。検索中なら、ずれた一致を探し直す。
     pub fn advance(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
-        self.refresh_search();
+        if let Some(s) = self.search.as_mut() {
+            s.dirty = true;
+            if s.last_scan.elapsed() >= SEARCH_RESCAN_INTERVAL {
+                self.rescan_search();
+            }
+        }
     }
 
     /// query（文字どおり、スマートケース）で探し直し、カーソルに近い（下から上へ見て最初の）一致を選んで、
@@ -203,13 +216,16 @@ impl TermState {
         let matches = collect_matches(&self.term, &mut regex);
         let cursor = self.term.grid().cursor.point;
         let current = matches.iter().rposition(|m| *m.start() <= cursor).or_else(|| matches.len().checked_sub(1));
-        self.search = Some(TermSearch { regex, matches, current });
+        self.search = Some(TermSearch { regex, matches, current, dirty: false, last_scan: std::time::Instant::now() });
         self.reveal_current();
         self.search_position()
     }
 
     /// 次（forward = true は下へ）の一致を選んでスクロールする。端を越えたら反対の端へ回る。
     pub fn search_step(&mut self, forward: bool) -> (usize, usize) {
+        if self.search.as_ref().is_some_and(|s| s.dirty) {
+            self.rescan_search();
+        }
         let Some(s) = self.search.as_mut() else { return (0, 0) };
         let n = s.matches.len();
         if n == 0 {
@@ -229,9 +245,22 @@ impl TermState {
         self.search = None;
     }
 
+    /// 描画の前に呼ぶ。検索中なら（今の位置, まだ探し直しを待っているか）を返す。
+    /// 間隔が空いていれば探し直す。待っている間は true（呼び出し側はもう一度描く）。
+    pub fn refresh_search(&mut self) -> Option<((usize, usize), bool)> {
+        let s = self.search.as_ref()?;
+        if s.dirty && s.last_scan.elapsed() >= SEARCH_RESCAN_INTERVAL {
+            self.rescan_search();
+        }
+        let pending = self.search.as_ref().is_some_and(|s| s.dirty);
+        Some((self.search_position(), pending))
+    }
+
     /// 出力や大きさの変更のあと、同じ条件で探し直す。選んでいた番号はできるだけ保つ（スクロールはしない）。
-    fn refresh_search(&mut self) {
+    fn rescan_search(&mut self) {
         let Some(s) = self.search.as_mut() else { return };
+        s.dirty = false;
+        s.last_scan = std::time::Instant::now();
         s.matches = collect_matches(&self.term, &mut s.regex);
         s.current = match (s.current, s.matches.len()) {
             (_, 0) => None,
@@ -240,7 +269,7 @@ impl TermState {
         };
     }
 
-    fn search_position(&self) -> (usize, usize) {
+    pub fn search_position(&self) -> (usize, usize) {
         match &self.search {
             Some(TermSearch { matches, current: Some(i), .. }) => (i + 1, matches.len()),
             _ => (0, 0),
@@ -260,7 +289,7 @@ impl TermState {
         if size != self.size {
             self.size = size;
             self.term.resize(size.term_size());
-            self.refresh_search();
+            self.rescan_search();
         }
     }
 
@@ -434,6 +463,33 @@ mod tests {
         }
         assert_eq!(t.search("needle"), (1, 1));
         assert!(t.display_offset() > 0);
+    }
+
+    #[test]
+    fn search_keeps_newest_matches_near_cursor() {
+        // 上限を超えたら、カーソルに近い（新しい）ほうを残す。選んだ一致は画面の中にある。
+        let mut t = TermState::new(GridSize { cols: 20, rows: 5 }, 3000);
+        for i in 0..1200 {
+            t.advance(format!("hit {i}\r\n").as_bytes());
+        }
+        assert_eq!(t.search("hit"), (TERM_SEARCH_MAX, TERM_SEARCH_MAX));
+        assert_eq!(t.display_offset(), 0);
+        assert!(snap(&t).lines.iter().any(|l| l.iter().any(|c| c.current_match)));
+    }
+
+    #[test]
+    fn output_rescan_is_throttled() {
+        // 出力のたびに履歴全体を探し直さない（読む側のロックを長く持たない）。描画の前に refresh_search で追いつく。
+        let mut t = TermState::new(GridSize { cols: 20, rows: 5 }, 100);
+        t.advance(b"foo\r\n");
+        assert_eq!(t.search("foo"), (1, 1));
+        t.advance(b"foo\r\n");
+        assert_eq!(t.search_position(), (1, 1));
+        std::thread::sleep(SEARCH_RESCAN_INTERVAL);
+        let (pos, pending) = t.refresh_search().unwrap();
+        assert_eq!((pos.1, pending), (2, false));
+        t.clear_search();
+        assert!(t.refresh_search().is_none());
     }
 
     #[test]
