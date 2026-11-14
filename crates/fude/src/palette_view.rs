@@ -544,7 +544,7 @@ impl WorkspaceView {
                 let rel = p.editor.active().map(|i| i.rel.clone()).filter(|r| fude_core::markdown::is_markdown(r));
                 return self.toggle_pin(project, rel, cx);
             }
-            PaletteCommand::ToggleVerticalTabs => return,
+            PaletteCommand::ToggleVerticalTabs => return self.toggle_vertical_tabs(cx),
         };
         window.dispatch_action(action, cx);
     }
