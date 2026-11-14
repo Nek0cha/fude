@@ -272,7 +272,13 @@ fn palette_toggle(
         .when(on, |d| d.bg(theme.bg_hover).border_1().border_color(theme.accent))
         .hover(|s| s.bg(theme.bg_hover))
         .child(label)
-        .on_click(cx.listener(move |this, _, _, cx| this.toggle_search_flag(change, cx)))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.toggle_search_flag(change, cx);
+            // クリックで外れた入力欄のフォーカスを戻し、続けて打てるようにする。
+            if let Some(p) = this.palette.as_ref() {
+                p.input.update(cx, |s, cx| s.focus(window, cx));
+            }
+        }))
 }
 
 /// 一覧の中の、selected の行の子の番号（グループの見出しも 1 行に数える）。
