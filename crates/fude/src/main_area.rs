@@ -1,5 +1,6 @@
-//! メイン領域。「ターミナル｜ツリー｜エディタ列」を左から並べる（設計書 §4.1.3）。
+//! メイン領域。「ターミナル｜ツリー｜エディタ列｜ピン列」を左から並べる（設計書 §4.1.3）。
 //! 狭いときは、ツリーとエディタ列をターミナルの上に重ねて出す（columns の Place::Overlay）。
+//! エディタ列を重ねるときは右端に寄せ、ピン列の上に出す。
 
 use std::collections::HashMap;
 
@@ -26,6 +27,7 @@ pub(crate) fn render_main_area(
     split_share: f32,
     tree: Option<ColumnEl>,
     editor: Option<ColumnEl>,
+    pin: Option<ColumnEl>,
     cx: &App,
 ) -> Div {
     let theme = *cx.global::<Theme>();
@@ -58,8 +60,13 @@ pub(crate) fn render_main_area(
         None => row = row.child(div().flex_1()),
     }
     let mut overlays: Vec<Div> = Vec::new();
-    // 重ねるツリーは、エディタ列（並べていても重ねていても）の左隣に置く。
-    let editor_right = editor.as_ref().filter(|e| e.place != Place::Hidden).map_or(px(0.), |e| e.w);
+    // 重ねるツリーは、エディタ列（並べていても重ねていても）の左隣に置く。並べたエディタ列の右にはピン列がある。
+    let pin_w = pin.as_ref().filter(|p| p.place == Place::Inline).map_or(px(0.), |p| p.w);
+    let editor_right = match editor.as_ref().map(|e| e.place) {
+        Some(Place::Inline) => editor.as_ref().map_or(px(0.), |e| e.w) + pin_w,
+        Some(Place::Overlay) => editor.as_ref().map_or(px(0.), |e| e.w),
+        _ => pin_w,
+    };
     let overlay = |c: ColumnEl, right: Pixels| {
         div()
             .absolute()
@@ -75,7 +82,7 @@ pub(crate) fn render_main_area(
             .shadow(popup_shadow())
             .child(c.el)
     };
-    for (c, is_tree) in [(tree, true), (editor, false)] {
+    for (c, is_tree) in [(tree, true), (editor, false), (pin, false)] {
         let Some(c) = c else { continue };
         let place = c.place;
         match place {

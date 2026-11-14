@@ -10,7 +10,7 @@ use fude_fs::ProjectFs;
 use gpui_kit::*;
 
 use crate::dialog::{ButtonRole, Dialog, DialogButton, error_text};
-use crate::columns::{Place, TREE_W, columns};
+use crate::columns::{PIN_W, Place, TREE_W, columns};
 use crate::file_view::{FileView, FileViewEvent, initial_mode};
 use crate::main_area::ColumnEl;
 use crate::workspace_view::WorkspaceView;
@@ -200,10 +200,16 @@ impl WorkspaceView {
         self.editor_anim.presence.is_animating(now) || self.editor_anim.share.is_animating(now)
     }
 
-    /// メイン領域に描くツリーとエディタ列。main_w はメイン領域の幅。並べ方は columns で決め、
+    /// メイン領域に描くツリー、エディタ列、ピン列。main_w はメイン領域の幅。並べ方は columns で決め、
     /// 並べた列の幅には出入りの動きを掛ける（重ねた列は不透明度だけを変える）。
-    pub(crate) fn render_columns(&mut self, main_w: Pixels, window_w: Pixels, now: std::time::Instant, cx: &mut Context<Self>) -> (Option<ColumnEl>, Option<ColumnEl>) {
-        let Some(project) = self.workspace.active_project().map(|p| p.id) else { return (None, None) };
+    pub(crate) fn render_columns(
+        &mut self,
+        main_w: Pixels,
+        window_w: Pixels,
+        now: std::time::Instant,
+        cx: &mut Context<Self>,
+    ) -> (Option<ColumnEl>, Option<ColumnEl>, Option<ColumnEl>) {
+        let Some(project) = self.workspace.active_project().map(|p| p.id) else { return (None, None, None) };
         let main = f32::from(main_w);
         let tree_presence = self.tree_presence;
         let tree_shown = self.tree.open || !tree_presence.is_gone(now);
@@ -212,17 +218,22 @@ impl WorkspaceView {
         let editor_shown = self.editor_open() || (has_view && !editor_presence.is_gone(now));
         let share = self.editor_anim.share.value(now);
         let window_w = f32::from(window_w);
-        // ピン列は Task 7 で入れる。
-        let with_terms = columns(main, window_w, true, tree_shown, editor_shown, false);
-        let without = columns(main, window_w, false, tree_shown, editor_shown, false);
+        let pin_presence = self.pins.presence;
+        let pin_shown = self.pin_shown(now);
+        let with_terms = columns(main, window_w, true, tree_shown, editor_shown, pin_shown);
+        let without = columns(main, window_w, false, tree_shown, editor_shown, pin_shown);
         // 置き方は、ターミナルの有無が変わり終えた側で決める。幅は動きの間を補う。
         let c = if share >= 1.0 { without } else { with_terms };
         let tree_w = match c.tree {
             Place::Inline => TREE_W * tree_presence.travel(now),
             _ => TREE_W,
         };
+        let pin_w = match c.pin {
+            Place::Inline => PIN_W * pin_presence.travel(now),
+            _ => 0.0,
+        };
         let editor_target = {
-            let fill = main - if c.tree == Place::Inline { tree_w } else { 0.0 };
+            let fill = main - pin_w - if c.tree == Place::Inline { tree_w } else { 0.0 };
             with_terms.editor_w + (fill - with_terms.editor_w) * share.clamp(0.0, 1.0)
         };
         let editor_w = match c.editor {
@@ -245,7 +256,14 @@ impl WorkspaceView {
         } else {
             None
         };
-        (tree, editor)
+        let pin = self.pin_view().filter(|_| pin_shown).map(|view| ColumnEl {
+            el: div().w(px(PIN_W)).h_full().child(view).into_any_element(),
+            place: c.pin,
+            w: px(pin_w),
+            // エディタ列を重ねている間は、下のピン列が半透明の背景から透けないように描かない。
+            opacity: if c.editor == Place::Overlay { 0.0 } else { pin_presence.value(now) },
+        });
+        (tree, editor, pin)
     }
 
     /// エディタ列の中身（タブ列と、選択中のタブの FileView）。中身の幅は w に固定し、出入りの動きで折り返し直さない。
@@ -256,8 +274,12 @@ impl WorkspaceView {
             self.searches.get(&project).map(|(v, _)| v.clone().into())
         } else {
             let view = self.active_editor_view().or_else(|| self.editor_anim.closing.clone());
+            let pin = self.workspace.active_project().and_then(|p| p.pin.clone());
             if let Some(v) = &view {
-                v.update(cx, |v, _| v.set_column_width(w));
+                v.update(cx, |v, _| {
+                    v.set_column_width(w);
+                    v.set_pinned(pin.as_deref() == Some(v.rel.as_str()));
+                });
             }
             view.map(Into::into)
         };
@@ -655,6 +677,7 @@ impl WorkspaceView {
                 this.send_to_claude(project, fude_core::claude::mention(rel, *lines), cx);
             }
             FileViewEvent::OpenRel(rel) => this.open_in_editor(project, rel.clone(), None, None, window, cx),
+            FileViewEvent::TogglePin(rel) => this.toggle_pin(project, Some(rel.clone()), cx),
         });
         if let Some((line, col)) = goto {
             view.update(cx, |v, cx| v.goto(line, col, window, cx));

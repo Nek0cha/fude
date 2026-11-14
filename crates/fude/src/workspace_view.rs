@@ -283,6 +283,8 @@ pub struct WorkspaceView {
     pub(crate) editor_anim: crate::editor_column::EditorAnim,
     /// 左パネル（ツリー）の出入り。
     pub(crate) tree_presence: crate::anim::Presence,
+    /// ピン列（プロジェクトごとのビューと、出入りの動き）。
+    pub(crate) pins: crate::pin_view::PinSlot,
     /// タブと分割の動き。
     pub(crate) anims: crate::layout_anim::LayoutAnims,
     /// OS の「動きを減らす」設定。起動時とウィンドウが前面に来たときに読む。
@@ -383,6 +385,7 @@ impl WorkspaceView {
             anims: Default::default(),
             editor_anim: Default::default(),
             tree_presence: crate::anim::Presence::hidden(),
+            pins: Default::default(),
             editors: HashMap::new(),
             editor_tab_scroll: (ScrollHandle::new(), None),
             live: HashMap::new(),
@@ -885,7 +888,10 @@ impl WorkspaceView {
 
     /// ターミナルの大きさが変わる動き（分割、エディタ列、ツリー、エディタの移動）の途中か。
     pub(crate) fn layout_animating(&self, now: Instant) -> bool {
-        self.anims.split_animating(now) || self.editor_animating(now) || self.tree_presence.is_animating(now)
+        self.anims.split_animating(now)
+            || self.editor_animating(now)
+            || self.tree_presence.is_animating(now)
+            || self.pins.presence.is_animating(now)
     }
 
     /// 動きの間は、選択中のタブのターミナルが PTY にサイズを送らないようにする。
@@ -927,6 +933,7 @@ impl Render for WorkspaceView {
         let (bg, fg) = (theme.bg_window, theme.fg_default);
         self.sync_terminals(window, cx);
         self.sync_live(cx);
+        self.sync_pins(now, window, cx);
         self.ensure_active_view(window, cx);
         self.anims.observe(self.workspace.active_project(), now, self.reduced_motion);
         let editor_shape =
@@ -938,6 +945,7 @@ impl Render for WorkspaceView {
             || self.anims.editor_tabs_animating(now)
             || self.editor_animating(now)
             || self.tree_presence.is_animating(now)
+            || self.pins.presence.is_animating(now)
         {
             window.request_animation_frame();
         }
@@ -965,10 +973,10 @@ impl Render for WorkspaceView {
         } else {
             let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
             let main_w = window.viewport_size().width - crate::theme::size::RAIL_W - px(self.route_map_width(now));
-            let (tree, editor) = self.render_columns(main_w, window.viewport_size().width, now, cx);
+            let (tree, editor, pin) = self.render_columns(main_w, window.viewport_size().width, now, cx);
             let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
             let share = active_tab.map_or(1.0, |t| self.anims.split_share(t.id, now));
-            render_main_area(active_tab, &terminals, share, tree, editor, cx)
+            render_main_area(active_tab, &terminals, share, tree, editor, pin, cx)
         };
         let main = main.opacity(self.screen_fade.value(now));
         let title_row = self.render_title_row(window, cx, now);

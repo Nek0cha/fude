@@ -22,6 +22,7 @@ mod main_area;
 mod md_preview;
 mod open_file;
 mod palette_view;
+mod pin_view;
 mod popup;
 mod project_state;
 mod project_menu;

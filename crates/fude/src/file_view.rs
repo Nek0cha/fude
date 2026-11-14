@@ -181,6 +181,8 @@ pub enum FileViewEvent {
     SendToClaude { rel: String, lines: Option<(u32, u32)> },
     /// プレビューのリンクから、プロジェクトの中のファイル（ルートからの相対パス）を開く。
     OpenRel(String),
+    /// この Markdown をピン列に留める、外す。
+    TogglePin(String),
 }
 
 /// 上部の帯。
@@ -225,6 +227,8 @@ pub struct FileView {
     preview: Option<MdPreview>,
     /// エディタ列の幅（論理ピクセル）。表示モードで並べるかを決める。
     column_w: f32,
+    /// ピン列に留めているか。描くたびに持ち主が渡す。
+    pinned: bool,
     /// スクロールを揃えるための、最上位のブロックの開始行など。None は出し直しが要る。
     blocks: Option<SyncText>,
     leader: ScrollLeader,
@@ -256,6 +260,7 @@ impl FileView {
             md_mode: MdMode::Preview,
             preview: None,
             column_w: 1000.0,
+            pinned: false,
             blocks: None,
             leader: ScrollLeader::Source,
             lead_at: None,
@@ -331,6 +336,10 @@ impl FileView {
     /// エディタ列の幅。描くたびに持ち主が渡す。
     pub(crate) fn set_column_width(&mut self, w: Pixels) {
         self.column_w = f32::from(w);
+    }
+
+    pub(crate) fn set_pinned(&mut self, pinned: bool) {
+        self.pinned = pinned;
     }
 
     fn is_md(&self) -> bool {
@@ -822,6 +831,19 @@ impl FileView {
             }
         }
         if self.is_md() {
+            let color = if self.pinned { theme.accent } else { theme.fg_dim };
+            row = row.child(
+                div()
+                    .id("fv-pin")
+                    .size(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(size::RADIUS_SM)
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .child(icon(IconName::Pin, color))
+                    .on_click(cx.listener(|this, _, _, cx| cx.emit(FileViewEvent::TogglePin(this.rel.clone())))),
+            );
             // 差分の表示中は、どちらも選んでいない見た目にする。
             let shown = !self.showing_diff();
             let preview_on = shown && self.md_mode == MdMode::Preview;

@@ -34,6 +34,7 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     Check,
     ListTodo,
     Send,
+    Pin,
 ]);
 
 mod embedded {

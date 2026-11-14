@@ -537,7 +537,14 @@ impl WorkspaceView {
                 window.focus(&view.read(cx).focus_handle(), cx);
                 Box::new(crate::file_view::ToggleMarkdownMode)
             }
-            PaletteCommand::TogglePin | PaletteCommand::ToggleVerticalTabs => return,
+            PaletteCommand::TogglePin => {
+                // 選択中のタブが Markdown ならそれを切り替える。そうでなければピンを外す。
+                let Some(p) = self.workspace.active_project() else { return };
+                let project = p.id;
+                let rel = p.editor.active().map(|i| i.rel.clone()).filter(|r| fude_core::markdown::is_markdown(r));
+                return self.toggle_pin(project, rel, cx);
+            }
+            PaletteCommand::ToggleVerticalTabs => return,
         };
         window.dispatch_action(action, cx);
     }
