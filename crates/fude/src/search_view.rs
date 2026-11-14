@@ -401,7 +401,7 @@ impl Render for SearchView {
             cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
                 let theme = *cx.global::<Theme>();
                 let end = range.end.min(this.rows.len());
-                this.rows[range.start.min(end)..end].to_vec().into_iter().map(|row| this.render_row(row, &theme, cx)).collect()
+                this.rows[range.start.min(end)..end].iter().copied().map(|row| this.render_row(row, &theme, cx)).collect()
             }),
         )
         .track_scroll(&self.list)

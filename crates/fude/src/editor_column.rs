@@ -306,7 +306,7 @@ impl WorkspaceView {
             self.show_error("プロジェクトのファイルをまだ読めません。少し待ってから検索してください".into(), window, cx);
             return;
         };
-        if !self.searches.contains_key(&project) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.searches.entry(project) {
             let view = cx.new(|cx| crate::search_view::SearchView::new(window, cx));
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &crate::search_view::SearchViewEvent, window, cx| match ev {
                 crate::search_view::SearchViewEvent::Open { rel, line, col } => {
@@ -333,7 +333,7 @@ impl WorkspaceView {
                     this.show_dialog(dialog, window, cx);
                 }
             });
-            self.searches.insert(project, (view, sub));
+            slot.insert((view, sub));
         }
         let view = self.searches[&project].0.clone();
         view.update(cx, |v, cx| v.run(fs, query, cx));
