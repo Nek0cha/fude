@@ -10,6 +10,7 @@ pub mod motion;
 pub mod panel;
 pub mod palette;
 pub mod paths;
+pub mod plan;
 pub mod recent;
 pub mod session;
 pub mod settings;
