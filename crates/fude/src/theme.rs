@@ -29,6 +29,9 @@ pub struct Theme {
     /// 差分とツリーの状態の記号だけに使う「中身の色」（設計書 §6.1.1）。
     pub diff_add: Rgba,
     pub diff_del: Rgba,
+    /// ターミナル内の検索の一致（warn の 30%）と、選んだ一致（warn の 70%）。
+    pub search_match: Rgba,
+    pub search_current: Rgba,
 }
 
 impl Theme {
@@ -64,6 +67,8 @@ impl Theme {
             selection: rgba(0xb9a8ff4d),
             diff_add: rgb(0x5fe0b0),
             diff_del: rgb(0xff8a8a),
+            search_match: rgba(0xffd28a4d),
+            search_current: rgba(0xffd28ab3),
         }
     }
 }
@@ -88,6 +93,10 @@ pub mod size {
     pub const TERM_LINE_HEIGHT: Pixels = px(18.);
     pub const TERM_PAD_X: Pixels = px(12.);
     pub const TERM_PAD_Y: Pixels = px(8.);
+    pub const PALETTE_W: Pixels = px(560.);
+    pub const PALETTE_TOP: Pixels = px(72.);
+    pub const PALETTE_SHIFT: Pixels = px(8.);
+    pub const PALETTE_ROW_H: Pixels = px(30.);
 }
 
 /// 動きのトークン。
@@ -104,6 +113,9 @@ pub mod motion {
     /// ポップアップ（メニュー）の出るときと消えるとき。
     pub const POPUP_IN: Duration = Duration::from_millis(120);
     pub const POPUP_OUT: Duration = Duration::from_millis(80);
+    /// コマンドパレット（§6.3）。出るときは上から PALETTE_SHIFT だけ下がりながら。
+    pub const PALETTE_IN: Duration = Duration::from_millis(160);
+    pub const PALETTE_OUT: Duration = Duration::from_millis(100);
 
     /// ホーム画面とプロジェクトの画面の切り替え。
     pub const SCREEN_FADE: Duration = Duration::from_millis(160);

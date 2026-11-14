@@ -41,6 +41,10 @@ gpui_kit::actions!(
         CopySelection,
         PasteText,
         CloseItem,
+        OpenPalette,
+        GoToFile,
+        FindInFiles,
+        FindInTerminal,
     ]
 );
 
@@ -52,6 +56,10 @@ fn binding(key: &'static str, command: Command, context: Option<&'static str>) -
         Command::Close => KeyBinding::new(key, CloseItem, context),
         Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
         Command::Save => KeyBinding::new(key, SaveFile, context),
+        Command::OpenPalette => KeyBinding::new(key, OpenPalette, context),
+        Command::GoToFile => KeyBinding::new(key, GoToFile, context),
+        Command::FindInFiles => KeyBinding::new(key, FindInFiles, context),
+        Command::FindInTerminal => KeyBinding::new(key, FindInTerminal, context),
         other => default_binding(key, other),
     }
 }
@@ -85,7 +93,13 @@ fn default_binding(key: &'static str, command: Command) -> KeyBinding {
             _ => KeyBinding::new(key, ActivateProject9, None),
         },
         // 文脈の付くものは binding で扱う。
-        Command::Close | Command::ToggleTree | Command::Save => {
+        Command::Close
+        | Command::ToggleTree
+        | Command::Save
+        | Command::OpenPalette
+        | Command::GoToFile
+        | Command::FindInFiles
+        | Command::FindInTerminal => {
             unreachable!("binding で扱う")
         }
     }
@@ -233,6 +247,10 @@ pub struct WorkspaceView {
     pub(crate) allow_close: bool,
     /// 確認ダイアログ。
     pub(crate) dialog: Option<crate::dialog::OpenDialog>,
+    /// プロジェクトごとの全体検索の結果のタブ。
+    pub(crate) searches: HashMap<ProjectId, (Entity<crate::search_view::SearchView>, Subscription)>,
+    /// コマンドパレット。
+    pub(crate) palette: Option<crate::palette_view::PaletteState>,
     /// ホーム画面の「最近」の右クリックメニュー。
     pub(crate) home_menu: Option<(ProjectRoot, crate::popup::Popup)>,
     /// ホーム画面とプロジェクトの画面の切り替えのフェード（新しい画面の不透明度）。
@@ -300,6 +318,8 @@ impl WorkspaceView {
             last_session,
             missing_roots: HashSet::new(),
             home_menu: None,
+            palette: None,
+            searches: HashMap::new(),
             dialog: None,
             allow_close: false,
             reduced_motion: crate::reduced_motion::reduced_motion(),
@@ -404,14 +424,21 @@ impl WorkspaceView {
         let has_pane = self.workspace.active_project().and_then(|p| p.active_tab()).is_some();
         if has_pane {
             self.refocus_pane();
-        } else if let Some(view) = self.active_editor_view() {
+        } else if let Some(focus) = self.active_editor_focus(cx) {
             self.focused_pane = None;
-            let focus = view.read(cx).focus_handle();
             window.focus(&focus, cx);
         } else {
             self.focused_pane = None;
             window.focus(&self.focus, cx);
         }
+    }
+
+    /// 選択中のペインのターミナルに検索の欄を出す。
+    fn find_in_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.workspace.active_project().and_then(|p| p.active_tab()).map(|t| t.panes[t.focused].id) else { return };
+        let Some((view, _)) = self.terminals.get(&id) else { return };
+        self.focused_pane = Some(id);
+        view.update(cx, |v, cx| v.open_search(window, cx));
     }
 
     /// 次の描画で、選択中のペインへフォーカスを当て直す。
@@ -663,7 +690,7 @@ impl WorkspaceView {
 
     /// タブの切り替え。エディタ列にフォーカスがあればファイルのタブ、それ以外はターミナルのタブ。
     fn cycle_focused_tabs(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
-        let in_editor = self.active_editor_view().is_some_and(|v| v.read(cx).focus_handle().contains_focused(window, cx));
+        let in_editor = self.active_editor_focus(cx).is_some_and(|f| f.contains_focused(window, cx));
         match self.workspace.active_project().map(|p| p.id) {
             Some(project) if in_editor => {
                 if let Some(tabs) = self.workspace.editor_mut(project) {
@@ -770,6 +797,7 @@ impl Render for WorkspaceView {
         let changes_menu = self.render_changes_menu(window, cx, now);
         let tree_menu = self.render_tree_menu(window, cx, now);
         let dialog = self.render_dialog(window, cx, now);
+        let palette = self.render_palette(window, cx, now);
 
         div()
             .id("workspace")
@@ -777,6 +805,14 @@ impl Render for WorkspaceView {
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &crate::tree_view::ToggleTree, window, cx| this.toggle_tree(window, cx)))
             .on_action(cx.listener(|this, _: &CloseItem, window, cx| this.close_key(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
+                this.open_palette(fude_core::palette::Scope::All, "", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToFile, window, cx| {
+                this.open_palette(fude_core::palette::Scope::Files, "", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FindInFiles, window, cx| this.open_find_in_files(window, cx)))
+            .on_action(cx.listener(|this, _: &FindInTerminal, window, cx| this.find_in_terminal(window, cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.new_default_tab();
                 cx.notify();
@@ -820,6 +856,7 @@ impl Render for WorkspaceView {
             .children(home_menu)
             .children(changes_menu)
             .children(tree_menu)
+            .children(palette)
             .children(dialog)
     }
 }

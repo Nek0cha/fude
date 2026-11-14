@@ -9,6 +9,7 @@ pub mod git;
 mod local;
 pub mod procs;
 mod remote;
+pub mod search;
 pub mod serve;
 pub mod watch;
 pub mod wire;
@@ -139,6 +140,8 @@ pub trait ProjectFs: Send + Sync {
     fn git_status(&self) -> io::Result<Option<git::GitStatus>>;
     /// rel の HEAD との差分（unified diff）。
     fn git_diff(&self, rel: &RelPath) -> io::Result<String>;
+    /// 全体検索（search::search_dir と同じ規則）。正しくない条件は InvalidInput。
+    fn search(&self, query: &search::SearchQuery) -> io::Result<search::SearchResults>;
 }
 
 #[cfg(test)]

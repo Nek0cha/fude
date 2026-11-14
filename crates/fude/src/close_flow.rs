@@ -67,8 +67,8 @@ impl WorkspaceView {
         if self.workspace.projects().is_empty() {
             return FocusArea::Home;
         }
-        if let Some(view) = self.active_editor_view()
-            && view.read(cx).focus_handle().contains_focused(window, cx)
+        if let Some(focus) = self.active_editor_focus(cx)
+            && focus.contains_focused(window, cx)
         {
             return FocusArea::Editor;
         }

@@ -128,11 +128,13 @@ impl RemoteFs {
 /// Response::Error を io::Error にして返す。
 fn call_checked(client: &RemoteClient, req: Request, payload: &[u8]) -> io::Result<(Response, Vec<u8>)> {
     match client.call(&req, payload)? {
-        (Response::Error { message, not_found, already_exists }, _) => {
+        (Response::Error { message, not_found, already_exists, invalid_input }, _) => {
             let kind = if not_found {
                 io::ErrorKind::NotFound
             } else if already_exists {
                 io::ErrorKind::AlreadyExists
+            } else if invalid_input {
+                io::ErrorKind::InvalidInput
             } else {
                 io::ErrorKind::Other
             };
@@ -231,6 +233,14 @@ impl ProjectFs for RemoteFs {
         }
     }
 
+    fn search(&self, query: &crate::search::SearchQuery) -> io::Result<crate::search::SearchResults> {
+        match self.call(Request::Search { root: self.root.clone(), query: query.clone() }, &[])? {
+            (Response::Matches, json) => serde_json::from_slice(&json)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("検索の結果を読めない: {e}"))),
+            (resp, _) => Err(unexpected(resp)),
+        }
+    }
+
     fn metadata(&self, rel: &RelPath) -> io::Result<FileMeta> {
         match self.call(Request::Metadata { root: self.root.clone(), path: rel.clone() }, &[])? {
             (Response::Meta { meta }, _) => Ok(meta),
@@ -304,6 +314,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fs = RemoteFs::new(client(ServeConnector, Duration::from_secs(5)), dir.path().to_string_lossy().into());
         assert_eq!(fs.read(&rel("none")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn remote_search_maps_invalid_input() {
+        use crate::search::SearchQuery;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "foo\n").unwrap();
+        let fs = RemoteFs::new(client(ServeConnector, Duration::from_secs(5)), dir.path().to_string_lossy().into());
+        assert_eq!(fs.search(&SearchQuery { pattern: "foo".into(), ..Default::default() }).unwrap().files.len(), 1);
+        let err = fs.search(&SearchQuery { pattern: "(".into(), regex: true, ..Default::default() }).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     /// 受け取るが、何も返さない。

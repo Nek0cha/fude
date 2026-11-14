@@ -171,6 +171,10 @@ impl ProjectFs for LocalFs {
     fn git_diff(&self, rel: &RelPath) -> io::Result<String> {
         crate::git::git_diff(&self.root, rel)
     }
+
+    fn search(&self, query: &crate::search::SearchQuery) -> io::Result<crate::search::SearchResults> {
+        crate::search::search_dir(&self.root, query)
+    }
 }
 
 impl LocalFs {

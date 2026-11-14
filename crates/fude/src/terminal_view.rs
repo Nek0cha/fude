@@ -19,11 +19,14 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::hover::{HoverFades, HoverKey};
+use crate::term_search::{TermSearchBar, TermSearchClose, bar_button};
 use crate::terminal_paint::{CellMetrics, paint_terminal};
 use crate::theme::size::{TERM_FONT_SIZE, TERM_PAD_X, TERM_PAD_Y};
 use crate::theme::{Theme, mono_font};
 use crate::title_row::icon;
 use crate::workspace_view::{CopySelection, PasteText};
+use fude_core::motion::Fade;
+use gpui_kit::base::input::{InputEvent, InputState};
 
 /// 「最新へ」のボタンの大きさと、ペインの端からの距離。
 const TO_BOTTOM_SIZE: Pixels = px(28.);
@@ -61,6 +64,8 @@ pub struct TerminalView {
     resize_frozen: Rc<Cell<bool>>,
     /// 作った時刻（中身のフェードイン）。
     created_at: Instant,
+    /// ターミナル内の検索の欄。
+    search: Option<TermSearchBar>,
     _events: Task<()>,
 }
 
@@ -105,6 +110,7 @@ impl TerminalView {
             hover_link: None,
             resize_frozen: Rc::new(Cell::new(false)),
             created_at: Instant::now(),
+            search: None,
             _events: events,
         }
     }
@@ -139,6 +145,85 @@ impl TerminalView {
             }
         }
         cx.notify();
+    }
+
+    /// 検索の欄を出して入力欄へフォーカスする。出ていれば入力欄へフォーカスするだけ。
+    pub(crate) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if let Some(bar) = self.search.as_mut().filter(|b| !b.closing) {
+            bar.input.update(cx, |s, cx| s.focus(window, cx));
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("ターミナル内を検索"));
+        let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, _, cx| match ev {
+            InputEvent::Change => {
+                let query = input.read(cx).value().to_string();
+                let counts = this.session.as_ref().map_or((0, 0), |s| s.with_state(|st| st.search(&query)));
+                if let Some(bar) = this.search.as_mut() {
+                    bar.counts = counts;
+                }
+                cx.notify();
+            }
+            // Enter は上へ（古いほう）、Shift+Enter は下へ。
+            InputEvent::PressEnter { shift, .. } => this.step_search(*shift, cx),
+            _ => {}
+        });
+        let mut fade = Fade::settled(0.0);
+        fade.animate_to(1.0, crate::theme::motion::POPUP_IN, crate::theme::motion::ease_out_quint, now);
+        input.update(cx, |s, cx| s.focus(window, cx));
+        self.search = Some(TermSearchBar { input, counts: (0, 0), fade, closing: false, _sub: sub });
+        cx.notify();
+    }
+
+    /// 検索の欄を閉じ、一致の塗りを消して、ターミナルへフォーカスを戻す。
+    pub(crate) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bar) = self.search.as_mut().filter(|b| !b.closing) else { return };
+        bar.closing = true;
+        bar.fade.animate_to(0.0, crate::theme::motion::POPUP_OUT, crate::theme::motion::ease_out_quint, Instant::now());
+        if let Some(s) = &self.session {
+            s.with_state(|st| st.clear_search());
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn step_search(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let counts = self.session.as_ref().map_or((0, 0), |s| s.with_state(|st| st.search_step(forward)));
+        if let Some(bar) = self.search.as_mut() {
+            bar.counts = counts;
+        }
+        cx.notify();
+    }
+
+    fn render_search(&mut self, theme: &Theme, now: Instant, window: &mut Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let bar = self.search.as_ref()?;
+        if bar.closing && !bar.fade.is_animating(now) {
+            self.search = None;
+            return None;
+        }
+        if bar.fade.is_animating(now) {
+            window.request_animation_frame();
+        }
+        let query = bar.input.read(cx).value().to_string();
+        // 出力で一致がずれたら、間隔を空けて探し直し、数も合わせる。
+        if !bar.closing
+            && let Some((counts, pending)) = self.session.as_ref().and_then(|s| s.with_state(|st| st.refresh_search()))
+        {
+            if pending {
+                window.request_animation_frame();
+            }
+            if let Some(bar) = self.search.as_mut() {
+                bar.counts = counts;
+            }
+        }
+        let bar = self.search.as_ref()?;
+        Some(
+            bar.frame(&query, theme, now)
+                .on_action(cx.listener(|this, _: &TermSearchClose, window, cx| this.close_search(window, cx)))
+                .child(bar_button("term-search-up", IconName::ArrowUp, theme).on_click(cx.listener(|this, _, _, cx| this.step_search(false, cx))))
+                .child(bar_button("term-search-down", IconName::ArrowDown, theme).on_click(cx.listener(|this, _, _, cx| this.step_search(true, cx))))
+                .child(bar_button("term-search-close", IconName::X, theme).on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx)))),
+        )
     }
 
     /// 送る文字列を PTY に書く。
@@ -464,6 +549,7 @@ impl Render for TerminalView {
             window.request_animation_frame();
         }
         let to_bottom = self.render_to_bottom(&theme, now, cx);
+        let search = self.render_search(&theme, now, window, cx);
         let focused = self.focus.is_focused(window);
         let entity = cx.entity();
         let focus = self.focus.clone();
@@ -513,7 +599,7 @@ impl Render for TerminalView {
         let message = self.message.clone().map(|msg| {
             div().absolute().left(TERM_PAD_X).bottom(TERM_PAD_Y).text_color(msg_color).child(msg)
         });
-        div()
+        let terminal = div()
             .id("terminal")
             .track_focus(&self.focus)
             .key_context("Terminal")
@@ -540,7 +626,9 @@ impl Render for TerminalView {
             .text_size(TERM_FONT_SIZE)
             .child(grid)
             .children(message)
-            .children(to_bottom)
+            .children(to_bottom);
+        // 検索の欄はターミナルの外側に重ねる（欄の入力のキーがターミナルの on_key_down に流れないように）。
+        div().relative().size_full().child(terminal).children(search)
     }
 }
 

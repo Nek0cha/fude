@@ -24,6 +24,9 @@ pub(crate) struct ProjectLive {
     /// Git の状態を 1 回でも読んだ（status が None でも、リポジトリでないとわかった）。
     pub status_loaded: bool,
     pub fs: Option<Arc<dyn ProjectFs>>,
+    /// gitignore を尊重したファイルの一覧（⌘P 用）。パレットを開くたびに裏で読み直す。
+    pub files: Option<Arc<Vec<String>>>,
+    files_task: Option<Task<()>>,
     /// 監視（LocalWatcher か WslWatcher）。捨てると止まる。
     _watcher: Option<Box<dyn Any>>,
     _events: Option<Task<()>>,
@@ -55,6 +58,7 @@ impl WorkspaceView {
     pub(crate) fn sync_live(&mut self, cx: &mut Context<Self>) {
         let ids: Vec<(ProjectId, ProjectRoot)> = self.workspace.projects().iter().map(|p| (p.id, p.root.clone())).collect();
         self.live.retain(|id, _| ids.iter().any(|(i, _)| i == id));
+        self.searches.retain(|id, _| ids.iter().any(|(i, _)| i == id));
         for (id, root) in ids {
             if self.live.contains_key(&id) {
                 continue;
@@ -100,6 +104,9 @@ impl WorkspaceView {
                 live._events = Some(events);
                 this.refresh_status(project, Duration::ZERO, cx);
                 this.tree_live_ready(project, cx);
+                if this.palette.as_ref().is_some_and(|p| !p.closing) {
+                    this.refresh_files(project, cx);
+                }
             })
             .ok();
         })
@@ -169,6 +176,32 @@ impl WorkspaceView {
     /// project の Git の状態をまだ読んでいない。
     pub(crate) fn status_pending(&self, project: ProjectId) -> bool {
         !self.live.get(&project).is_some_and(|l| l.status_loaded)
+    }
+
+    /// project のファイルの一覧を裏で読み直す。読み終えたら、開いているパレットの一覧を作り直す。
+    /// ProjectFs がまだ無ければ、用意できたとき（tree_live_ready と同じ時点）に読む。
+    pub(crate) fn refresh_files(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(&project) else { return };
+        let Some(fs) = live.fs.clone() else { return };
+        let task = cx.background_spawn(async move { fs.walk_files() });
+        live.files_task = Some(cx.spawn(async move |this, cx| {
+            let files = match task.await {
+                Ok(files) => files.into_iter().map(String::from).collect::<Vec<String>>(),
+                Err(e) => {
+                    eprintln!("ファイルの一覧を読めない: {e}");
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                let Some(live) = this.live.get_mut(&project) else { return };
+                live.files = Some(Arc::new(files));
+                live.files_task = None;
+                if this.palette.as_ref().is_some_and(|p| !p.closing) {
+                    this.refresh_palette(cx);
+                }
+            })
+            .ok();
+        }));
     }
 
     /// project の ProjectFs（用意できていれば）。

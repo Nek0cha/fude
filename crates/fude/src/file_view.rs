@@ -28,6 +28,11 @@ gpui_kit::actions!(file_view, [SaveFile, LeaveEditor]);
 pub fn bind_file_view_keys(cx: &mut App) {
     // 保存は fude_core::keymap::context_bindings（workspace_view::bind_keys）で登録する。
     cx.bind_keys([KeyBinding::new("escape", LeaveEditor, Some("FileView"))]);
+    // gpui-kit は macOS の置換を ⌘⇧F に割り当てているが、⌘⇧F は全体検索に使う（設計書 §4.2 の ⌘⌥F）。
+    // gpui-kit の初期化より後に登録するので、同じ文脈の割り当てより優先される。
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([KeyBinding::new("cmd-alt-f", gpui_kit::base::input::Replace, Some("Input"))]);
+    }
 }
 
 /// Git で変更があるファイルは差分から開く（設計書 §5.3）。

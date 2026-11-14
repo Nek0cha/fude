@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use fude_core::editor_tabs::SEARCH_TAB;
 use fude_core::workspace::ProjectId;
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -19,6 +20,8 @@ pub(crate) const EDITOR_TABS_H: Pixels = px(36.);
 /// 1 枚のタブの描き方。
 struct TabLook {
     index: usize,
+    /// 全体検索の結果のタブ。
+    search: bool,
     name: String,
     parent: Option<String>,
     selected: bool,
@@ -40,14 +43,25 @@ impl WorkspaceView {
             self.editor_tab_scroll.1 = Some((project, i));
         }
         let slot = self.editors.get(&project);
-        let labels = tab_labels(&rels.iter().map(String::as_str).collect::<Vec<_>>());
+        let search_title = self
+            .searches
+            .get(&project)
+            .and_then(|(v, _)| v.read(cx).query.as_ref().map(|q| crate::search_view::tab_title(&q.pattern)))
+            .unwrap_or_else(|| "検索".into());
+        let file_rels: Vec<&str> = rels.iter().map(String::as_str).filter(|r| *r != SEARCH_TAB).collect();
+        let mut file_labels = tab_labels(&file_rels).into_iter();
+        let labels: Vec<(String, Option<String>)> = rels
+            .iter()
+            .map(|r| if r == SEARCH_TAB { (search_title.clone(), None) } else { file_labels.next().unwrap_or_default() })
+            .collect();
         let mut tabs: Vec<AnyElement> = labels
             .into_iter()
             .enumerate()
             .map(|(index, (name, parent))| {
                 let dirty = slot.and_then(|s| s.views.get(&rels[index])).is_some_and(|v| v.read(cx).is_dirty());
                 let width = tab_width_estimate(&name);
-                let el = self.render_editor_tab(project, TabLook { index, name, parent, selected: active == Some(index), dirty }, cx, now);
+                let search = rels[index] == SEARCH_TAB;
+                let el = self.render_editor_tab(project, TabLook { index, search, name, parent, selected: active == Some(index), dirty }, cx, now);
                 // 出てきたタブは幅を広げながら、文字をフェードインする（ターミナルのタブと同じ。設計書 §6.3）。
                 match self.anims.editor_opened.get(&rels[index]) {
                     Some(start) => {
@@ -61,7 +75,7 @@ impl WorkspaceView {
         // 閉じたタブは、文字を消してから幅を縮める。
         for c in &self.anims.editor_closing {
             let (text, width, _) = tab_close_progress(now.saturating_duration_since(c.started), self.reduced_motion);
-            let name = c.title.rsplit('/').next().unwrap_or_default().to_string();
+            let name = if c.title == SEARCH_TAB { "検索".to_string() } else { c.title.rsplit('/').next().unwrap_or_default().to_string() };
             let ghost = div()
                 .h(size::TAB_H)
                 .w(px(tab_width_estimate(&name) * width))
@@ -125,7 +139,11 @@ impl WorkspaceView {
                 cx.stop_propagation();
                 this.close_editor_tab(project, index, window, cx);
             }));
-        let icon = file_icon(icon_for_file(&look.name));
+        let icon: AnyElement = if look.search {
+            crate::title_row::icon(IconName::Search, theme.fg_dim).into_any_element()
+        } else {
+            file_icon(icon_for_file(&look.name)).into_any_element()
+        };
         self.hoverable(div().id(ElementId::Name(format!("editor-tab-{index}").into())), key, cx)
             .h(size::TAB_H)
             .max_w(size::TAB_MAX_W)
