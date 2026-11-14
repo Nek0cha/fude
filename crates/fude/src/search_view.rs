@@ -65,6 +65,33 @@ pub(crate) fn tab_title(pattern: &str) -> String {
     format!("検索: {title}")
 }
 
+gpui_kit::actions!(search_view, [SearchUp, SearchDown, SearchConfirm]);
+
+pub fn bind_search_view_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("up", SearchUp, Some("SearchView")),
+        KeyBinding::new("down", SearchDown, Some("SearchView")),
+        KeyBinding::new("enter", SearchConfirm, Some("SearchView")),
+    ]);
+}
+
+/// 置換のボタンを押せるか（検索中、置換中、検索が失敗したとき、結果が無いときは押せない）。
+pub(crate) fn can_replace(running: bool, replacing: bool, failed: bool, has_results: bool) -> bool {
+    !running && !replacing && !failed && has_results
+}
+
+/// キーボードで選ぶ行を delta だけ動かす。端で止まる。未選択なら下で先頭、上で末尾。
+pub(crate) fn step_selection(len: usize, cur: Option<usize>, delta: i32) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match cur {
+        None if delta >= 0 => 0,
+        None => len - 1,
+        Some(i) => (i.min(len - 1) as i64 + i64::from(delta)).clamp(0, len as i64 - 1) as usize,
+    })
+}
+
 /// 置換する rel と、未保存のため飛ばす rel に分ける。
 pub(crate) fn plan_replace(targets: &[String], dirty: &[String]) -> (Vec<String>, Vec<String>) {
     targets.iter().cloned().partition(|rel| !dirty.contains(rel))
@@ -143,6 +170,10 @@ pub(crate) struct SearchView {
     replace: Entity<InputState>,
     /// 置換の欄に触れたか。
     replace_active: bool,
+    /// 置換を当てている途中（検索し直すまで）。
+    replacing: bool,
+    /// キーボードで選んでいる行（rows の番号）。
+    selected: Option<usize>,
     _replace_sub: Subscription,
 }
 
@@ -160,6 +191,8 @@ impl SearchView {
         SearchView {
             replace,
             replace_active: false,
+            replacing: false,
+            selected: None,
             _replace_sub,
             query: None,
             results: SearchResults::default(),
@@ -184,6 +217,8 @@ impl SearchView {
         let generation = self.generation;
         self.query = Some(query.clone());
         self.running = true;
+        self.replacing = false;
+        self.selected = None;
         self.error = None;
         self.fs = Some(fs.clone());
         let task = cx.background_spawn(async move { fs.search(&query) });
@@ -201,7 +236,12 @@ impl SearchView {
                         this.rows = flatten(&this.results, &this.collapsed);
                         this.list.scroll_to_item(0, ScrollStrategy::Top);
                     }
-                    Err(e) => this.error = Some(e.to_string()),
+                    // 失敗したら古い結果を残さない（新しい条件で古い一覧を置換しない）。
+                    Err(e) => {
+                        this.error = Some(e.to_string());
+                        this.results = SearchResults::default();
+                        this.rows.clear();
+                    }
                 }
                 cx.notify();
             })
@@ -225,6 +265,7 @@ impl SearchView {
             self.collapsed.insert(rel);
         }
         self.rows = flatten(&self.results, &self.collapsed);
+        self.selected = self.selected.map(|s| s.min(self.rows.len().saturating_sub(1))).filter(|_| !self.rows.is_empty());
         cx.notify();
     }
 
@@ -235,7 +276,7 @@ impl SearchView {
             .iter()
             .filter(|f| rels.iter().any(|r| r == f.rel.as_str()))
             .flat_map(|f| &f.lines)
-            .map(|l| l.ranges.len())
+            .map(|l| l.matches as usize)
             .sum()
     }
 
@@ -244,9 +285,38 @@ impl SearchView {
         replacement_of(self.replace_active, &self.replace.read(cx).value())
     }
 
+    fn replace_allowed(&self) -> bool {
+        can_replace(self.running, self.replacing, self.error.is_some(), !self.results.files.is_empty())
+    }
+
+    pub fn set_replacing(&mut self, cx: &mut Context<Self>) {
+        self.replacing = true;
+        cx.notify();
+    }
+
+    fn move_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.selected = step_selection(self.rows.len(), self.selected, delta);
+        if let Some(i) = self.selected {
+            self.list.scroll_to_item(i, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
+    /// 選んでいる行で Enter: 一致の行なら開き、ファイルの見出しなら折りたたむ。
+    fn confirm_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.selected.and_then(|i| self.rows.get(i).copied()) else { return };
+        match row {
+            Row::File(i) => self.toggle_collapsed(i, cx),
+            Row::Line(i, j) => {
+                let (file, m) = (&self.results.files[i], &self.results.files[i].lines[j]);
+                cx.emit(SearchViewEvent::Open { rel: file.rel.as_str().to_string(), line: m.line, col: m.col });
+            }
+        }
+    }
+
     fn emit_replace(&mut self, rels: Vec<String>, confirm: bool, cx: &mut Context<Self>) {
         let Some(replacement) = self.replacement(cx) else { return };
-        if rels.is_empty() || self.running {
+        if rels.is_empty() || !self.replace_allowed() {
             return;
         }
         cx.emit(SearchViewEvent::ReplaceFiles { rels, replacement, confirm });
@@ -256,7 +326,7 @@ impl SearchView {
         if self.running {
             return "検索中…".into();
         }
-        let matches: usize = self.results.files.iter().flat_map(|f| &f.lines).map(|l| l.ranges.len()).sum();
+        let matches: usize = self.results.files.iter().flat_map(|f| &f.lines).map(|l| l.matches as usize).sum();
         let files = self.results.files.len();
         let mut text = format!("{matches} 件・{files} ファイル");
         if self.results.truncated {
@@ -282,7 +352,8 @@ impl SearchView {
             .on_click(cx.listener(move |this, _, _, cx| this.rerun_with(change, cx)))
     }
 
-    fn render_row(&self, row: Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&self, index: usize, row: Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.selected == Some(index);
         let replacement = self.replacement(cx);
         match row {
             Row::File(i) => {
@@ -291,9 +362,11 @@ impl SearchView {
                 let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
                 let open = !self.collapsed.contains(&rel);
                 let rel_for_button = rel.clone();
-                let count: usize = file.lines.iter().map(|l| l.ranges.len()).sum();
+                let count: usize = file.lines.iter().map(|l| l.matches as usize).sum();
                 div()
                     .id(ElementId::Name(format!("search-file-{i}").into()))
+                    .w_full()
+                    .when(selected, |d| d.bg(theme.bg_hover))
                     .h(ROW_H)
                     .px(px(8.))
                     .flex()
@@ -335,6 +408,8 @@ impl SearchView {
                 let (line, col) = (m.line, m.col);
                 div()
                     .id(ElementId::Name(format!("search-line-{i}-{j}").into()))
+                    .w_full()
+                    .when(selected, |d| d.bg(theme.bg_hover))
                     .h(ROW_H)
                     .pl(px(30.))
                     .pr(px(8.))
@@ -382,7 +457,7 @@ impl Render for SearchView {
             .child(self.render_toggle("search-case", "Aa", flags.case_sensitive, &theme, cx, |f| f.case_sensitive = !f.case_sensitive))
             .child(self.render_toggle("search-word", "ab", flags.whole_word, &theme, cx, |f| f.whole_word = !f.whole_word))
             .child(self.render_toggle("search-regex", ".*", flags.regex, &theme, cx, |f| f.regex = !f.regex));
-        let can_replace = self.replacement(cx).is_some() && !self.results.files.is_empty() && !self.running;
+        let can_replace = self.replacement(cx).is_some() && self.replace_allowed();
         let replace_row = div()
             .flex_shrink_0()
             .px(px(10.))
@@ -409,7 +484,8 @@ impl Render for SearchView {
             cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
                 let theme = *cx.global::<Theme>();
                 let end = range.end.min(this.rows.len());
-                this.rows[range.start.min(end)..end].iter().copied().map(|row| this.render_row(row, &theme, cx)).collect()
+                let start = range.start.min(end);
+                (start..end).map(|i| this.render_row(i, this.rows[i], &theme, cx)).collect()
             }),
         )
         .track_scroll(&self.list)
@@ -419,6 +495,9 @@ impl Render for SearchView {
             .id("search-view")
             .track_focus(&self.focus)
             .key_context("SearchView")
+            .on_action(cx.listener(|this, _: &SearchUp, _, cx| this.move_selection(-1, cx)))
+            .on_action(cx.listener(|this, _: &SearchDown, _, cx| this.move_selection(1, cx)))
+            .on_action(cx.listener(|this, _: &SearchConfirm, _, cx| this.confirm_selection(cx)))
             .size_full()
             .flex()
             .flex_col()
@@ -490,7 +569,9 @@ fn preview_text(spans: &[Span], theme: &Theme) -> StyledText {
 
 #[cfg(test)]
 mod tests {
-    use super::{Row, Span, accept_results, flatten, plan_replace, preview_spans, replacement_of, tab_title};
+    use super::{
+        Row, Span, accept_results, can_replace, flatten, plan_replace, preview_spans, replacement_of, step_selection, tab_title,
+    };
     use fude_fs::RelPath;
     use fude_fs::search::{FileMatches, LineMatch, SearchQuery, SearchResults};
     use std::collections::HashSet;
@@ -501,7 +582,7 @@ mod tests {
                 .iter()
                 .map(|(rel, n)| FileMatches {
                     rel: RelPath::new(rel).unwrap(),
-                    lines: (0..*n).map(|i| LineMatch { line: i as u32 + 1, col: 1, text: "x".into(), ranges: vec![(0, 1)] }).collect(),
+                    lines: (0..*n).map(|i| LineMatch { line: i as u32 + 1, col: 1, text: "x".into(), ranges: vec![(0, 1)], matches: 1 }).collect(),
                 })
                 .collect(),
             truncated: false,
@@ -531,6 +612,26 @@ mod tests {
     }
 
     #[test]
+    fn replace_is_blocked_while_busy_or_failed() {
+        // 引数は（検索中, 置換中, 検索が失敗した, 結果がある）。
+        assert!(can_replace(false, false, false, true));
+        assert!(!can_replace(true, false, false, true));
+        assert!(!can_replace(false, true, false, true));
+        assert!(!can_replace(false, false, true, true));
+        assert!(!can_replace(false, false, false, false));
+    }
+
+    #[test]
+    fn keyboard_selection_moves_and_stops_at_ends() {
+        assert_eq!(step_selection(3, None, 1), Some(0));
+        assert_eq!(step_selection(3, None, -1), Some(2));
+        assert_eq!(step_selection(3, Some(2), 1), Some(2));
+        assert_eq!(step_selection(3, Some(0), -1), Some(0));
+        assert_eq!(step_selection(3, Some(5), 1), Some(2));
+        assert_eq!(step_selection(0, None, 1), None);
+    }
+
+    #[test]
     fn replace_skips_dirty_files() {
         let (go, skip) = plan_replace(&["a.rs".into(), "b.rs".into()], &["b.rs".into()]);
         assert_eq!(go, ["a.rs"]);
@@ -539,7 +640,7 @@ mod tests {
 
     #[test]
     fn preview_marks_old_and_new() {
-        let m = LineMatch { line: 1, col: 5, text: "let foo = foo;".into(), ranges: vec![(4, 7), (10, 13)] };
+        let m = LineMatch { line: 1, col: 5, text: "let foo = foo;".into(), ranges: vec![(4, 7), (10, 13)], matches: 2 };
         let q = SearchQuery { pattern: "foo".into(), ..Default::default() };
         assert_eq!(
             preview_spans(&m, &q, "bar"),
@@ -555,7 +656,7 @@ mod tests {
         );
         // 正規表現のときは、一致ごとに $1 を展開した文字列を出す。
         let re = SearchQuery { pattern: r"(\w)oo".into(), regex: true, ..Default::default() };
-        let m = LineMatch { line: 1, col: 1, text: "foo".into(), ranges: vec![(0, 3)] };
+        let m = LineMatch { line: 1, col: 1, text: "foo".into(), ranges: vec![(0, 3)], matches: 1 };
         assert_eq!(preview_spans(&m, &re, "${1}X"), [Span::Old("foo".into()), Span::New("fX".into())]);
     }
 

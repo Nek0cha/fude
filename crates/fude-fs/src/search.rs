@@ -28,6 +28,9 @@ pub struct LineMatch {
     pub text: String,
     /// text の中の一致のバイト範囲（空の範囲は含めない）。
     pub ranges: Vec<(u32, u32)>,
+    /// 行の中の一致の数（プレビューの窓の外も含む）。
+    #[serde(default)]
+    pub matches: u32,
 }
 
 /// 1 ファイルの一致。
@@ -89,8 +92,9 @@ fn line_match(re: &regex::Regex, line_no: u64, line: &str) -> Option<LineMatch> 
     let ranges: Vec<(usize, usize)> = re.find_iter(line).filter(|m| !m.is_empty()).map(|m| (m.start(), m.end())).collect();
     let first = ranges.first()?.0;
     let col = line[..first].chars().count() as u32 + 1;
+    let matches = ranges.len() as u32;
     let (text, ranges) = preview(line, &ranges, first);
-    Some(LineMatch { line: line_no as u32, col, text, ranges })
+    Some(LineMatch { line: line_no as u32, col, text, ranges, matches })
 }
 
 /// 長い行は、最初の一致の少し前から PREVIEW_MAX_CHARS 文字だけを切り出す。範囲は切り出した文字列に合わせる。
@@ -106,16 +110,23 @@ fn preview(line: &str, ranges: &[(usize, usize)], first: usize) -> (String, Vec<
     let prefix = if start > 0 { "…" } else { "" };
     let shift = prefix.len() as i64 - start as i64;
     let text = format!("{prefix}{}", &line[start..end]);
+    // 窓に掛かる一致は、窓の中へ切り詰めて残す（窓より長い一致にも色を付ける）。
     let ranges = ranges
         .iter()
-        .filter(|&&(s, e)| s >= start && e <= end)
-        .map(|&(s, e)| ((s as i64 + shift) as u32, (e as i64 + shift) as u32))
+        .filter(|&&(s, e)| s < end && e > start)
+        .map(|&(s, e)| ((s.max(start) as i64 + shift) as u32, (e.min(end) as i64 + shift) as u32))
         .collect();
     (text, ranges)
 }
 
 /// gitignore を尊重して root の下を探す（.git を除く、隠しファイルは含む、バイナリは飛ばす）。rel の名前順。
 pub fn search_dir(root: &Path, q: &SearchQuery) -> io::Result<SearchResults> {
+    let started = Instant::now();
+    search_dir_with(root, q, &mut || started.elapsed() >= SEARCH_TIME_LIMIT)
+}
+
+/// search_dir の本体。out_of_time はファイルごとと一致ごとに呼び、true なら打ち切る（試験で時刻を差し替える）。
+pub fn search_dir_with(root: &Path, q: &SearchQuery, out_of_time: &mut dyn FnMut() -> bool) -> io::Result<SearchResults> {
     let pattern = build_pattern(q).map_err(invalid_input)?;
     let re = compile(&pattern, q).map_err(invalid_input)?;
     let matcher = grep_regex::RegexMatcherBuilder::new()
@@ -132,14 +143,13 @@ pub fn search_dir(root: &Path, q: &SearchQuery) -> io::Result<SearchResults> {
         .line_terminator(grep_matcher::LineTerminator::crlf())
         .binary_detection(grep_searcher::BinaryDetection::quit(0))
         .build();
-    let started = Instant::now();
     let canonical_root = std::fs::canonicalize(root).ok();
     let walker =
         ignore::WalkBuilder::new(root).hidden(false).parents(true).filter_entry(|e| e.file_name() != ".git").build();
     let mut results = SearchResults::default();
     let mut total = 0usize;
     for entry in walker {
-        if started.elapsed() >= SEARCH_TIME_LIMIT || total >= SEARCH_MAX_MATCHES {
+        if total >= SEARCH_MAX_MATCHES || out_of_time() {
             results.truncated = true;
             break;
         }
@@ -158,11 +168,17 @@ pub fn search_dir(root: &Path, q: &SearchQuery) -> io::Result<SearchResults> {
         let Ok(rel) = entry.path().strip_prefix(root) else { continue };
         let Ok(rel) = RelPath::new(&rel.to_string_lossy()) else { continue };
         let mut lines = Vec::new();
+        let mut timed_out = false;
         let sink = grep_searcher::sinks::Bytes(|line_no, bytes| {
             let text = String::from_utf8_lossy(bytes);
             if let Some(m) = line_match(&re, line_no, trim_eol(&text)) {
                 lines.push(m);
                 total += 1;
+            }
+            // 1 つの大きなファイルの途中でも時間の上限を見る。
+            if out_of_time() {
+                timed_out = true;
+                return Ok(false);
             }
             Ok(total < SEARCH_MAX_MATCHES)
         });
@@ -170,7 +186,7 @@ pub fn search_dir(root: &Path, q: &SearchQuery) -> io::Result<SearchResults> {
         if searcher.search_path(&matcher, entry.path(), sink).is_err() {
             continue;
         }
-        if total >= SEARCH_MAX_MATCHES {
+        if total >= SEARCH_MAX_MATCHES || timed_out {
             results.truncated = true;
         }
         if !lines.is_empty() {
@@ -229,6 +245,7 @@ pub fn replace_in_file(fs: &dyn ProjectFs, rel: &RelPath, q: &SearchQuery, repla
 mod tests {
     use super::{
         LineMatch, PREVIEW_MAX_CHARS, SEARCH_MAX_MATCHES, SearchQuery, build_pattern, replace_in_file, replace_text, search_dir,
+        search_dir_with,
     };
     use crate::{LocalFs, RelPath};
     use std::io;
@@ -324,6 +341,42 @@ mod tests {
         assert_eq!(replace_text("axxb", &q, "-").unwrap(), ("a-b".into(), 1));
         let d = SearchQuery { pattern: r"(\d)*".into(), regex: true, ..Default::default() };
         assert_eq!(replace_text("a1b\nxyz\n", &d, "N$1").unwrap(), ("aN1b\nxyz\n".into(), 1));
+    }
+
+    #[test]
+    fn long_line_counts_matches_outside_the_window() {
+        // プレビューの窓の外の一致も、件数（確認の数）には入れる。
+        let dir = tempfile::tempdir().unwrap();
+        let line = format!("foo{}foo\n", "x".repeat(PREVIEW_MAX_CHARS * 2));
+        write(dir.path(), "a.txt", line.as_bytes());
+        let r = search_dir(dir.path(), &q("foo")).unwrap();
+        let m = &r.files[0].lines[0];
+        assert_eq!(m.ranges.len(), 1);
+        assert_eq!(m.matches, 2);
+    }
+
+    #[test]
+    fn match_longer_than_window_is_clipped() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", format!("{}\n", "a".repeat(PREVIEW_MAX_CHARS * 2)).as_bytes());
+        let re = SearchQuery { pattern: "a+".into(), regex: true, ..Default::default() };
+        let m = &search_dir(dir.path(), &re).unwrap().files[0].lines[0];
+        assert_eq!(m.ranges, [(0, m.text.len() as u32)]);
+    }
+
+    #[test]
+    fn time_limit_is_checked_inside_a_file() {
+        // 1 つの大きなファイルの途中でも時間の上限を見る（WSL の応答待ちの上限を越えない）。
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "big.txt", "foo\n".repeat(5000).as_bytes());
+        let mut calls = 0;
+        let mut out_of_time = || {
+            calls += 1;
+            calls > 3
+        };
+        let r = search_dir_with(dir.path(), &q("foo"), &mut out_of_time).unwrap();
+        assert!(r.truncated);
+        assert!(r.files[0].lines.len() < 10);
     }
 
     #[test]

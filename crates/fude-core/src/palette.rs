@@ -23,7 +23,12 @@ pub fn parse_input(input: &str, base: Scope) -> (Scope, &str) {
         Some('@') => Scope::Projects,
         _ => return (base, input.trim()),
     };
-    (scope, trimmed[1..].trim())
+    let rest = &trimmed[1..];
+    if scope == Scope::Search {
+        // 全体検索は # の直後の空白 1 つだけを除き、前後の空白を残す（"  return" を探せる）。
+        return (scope, rest.strip_prefix(' ').unwrap_or(rest));
+    }
+    (scope, rest.trim())
 }
 
 /// パレットから実行できるコマンド。
@@ -183,7 +188,9 @@ mod tests {
     #[test]
     fn prefixes_pick_scope() {
         assert_eq!(parse_input(">split", Scope::All), (Scope::Commands, "split"));
-        assert_eq!(parse_input("# foo ", Scope::All), (Scope::Search, "foo"));
+        // 全体検索は # の直後の空白 1 つだけを除き、前後の空白を残す（"  return" を探せる）。
+        assert_eq!(parse_input("# foo ", Scope::All), (Scope::Search, "foo "));
+        assert_eq!(parse_input("#  return", Scope::All), (Scope::Search, " return"));
         assert_eq!(parse_input("@web", Scope::Files), (Scope::Projects, "web"));
         assert_eq!(parse_input("main.rs", Scope::Files), (Scope::Files, "main.rs"));
         assert_eq!(parse_input("", Scope::All), (Scope::All, ""));

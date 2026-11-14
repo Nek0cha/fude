@@ -320,8 +320,7 @@ mod tests {
     fn remote_search_maps_invalid_input() {
         use crate::search::SearchQuery;
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "foo
-").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "foo\n").unwrap();
         let fs = RemoteFs::new(client(ServeConnector, Duration::from_secs(5)), dir.path().to_string_lossy().into());
         assert_eq!(fs.search(&SearchQuery { pattern: "foo".into(), ..Default::default() }).unwrap().files.len(), 1);
         let err = fs.search(&SearchQuery { pattern: "(".into(), regex: true, ..Default::default() }).unwrap_err();

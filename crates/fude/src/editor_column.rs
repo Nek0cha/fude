@@ -292,7 +292,9 @@ impl WorkspaceView {
             .active_project()
             .and_then(|p| self.searches.get(&p.id))
             .and_then(|(v, _)| v.read(cx).query.clone());
-        let initial = format!("#{}", last.as_ref().map_or("", |q| q.pattern.as_str()));
+        let pattern = last.as_ref().map_or("", |q| q.pattern.as_str());
+        // 空白で始まる文字列は、# の直後の空白が 1 つ除かれるので、1 つ足しておく。
+        let initial = if pattern.starts_with(' ') { format!("# {pattern}") } else { format!("#{pattern}") };
         self.open_palette(fude_core::palette::Scope::Search, &initial, window, cx);
         if let (Some(p), Some(q)) = (self.palette.as_mut(), last) {
             p.search_flags = crate::search_view::flags_of(&q);
@@ -360,6 +362,8 @@ impl WorkspaceView {
         let dirty: Vec<String> =
             self.project_views(project).iter().map(|v| v.read(cx)).filter(|v| v.is_dirty()).map(|v| v.rel.clone()).collect();
         let (go, skipped) = crate::search_view::plan_replace(&rels, &dirty);
+        // 終わって検索し直すまで、置換のボタンを押せなくする（二重に当てない）。
+        view.update(cx, |v, cx| v.set_replacing(cx));
         let task_fs = fs.clone();
         let task_query = query.clone();
         let task_go = go.clone();

@@ -187,8 +187,7 @@ mod tests {
     fn search_roundtrip_and_invalid_input() {
         use crate::search::{SearchQuery, SearchResults};
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "foo
-").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "foo\n").unwrap();
         let root = root_of(&dir);
         let out = run(&[
             (Request::Search { root: root.clone(), query: SearchQuery { pattern: "foo".into(), ..Default::default() } }, vec![]),
