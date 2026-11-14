@@ -19,12 +19,24 @@ use crate::title_row::icon;
 use crate::tree_model::{TreeModel, TreeRow};
 use crate::workspace_view::WorkspaceView;
 
-gpui_kit::actions!(tree, [ToggleTree, CloseTree]);
+gpui_kit::actions!(tree, [ToggleTree, CloseTree, TreeUndo, TreeRedo]);
+
+/// ツリーの取り消しとやり直しが効く文脈。入力欄と絞り込み欄の中では、入力欄の取り消しを優先する。
+const TREE_NOT_INPUT: &str = "Tree && !Input";
 
 /// ツリーの開閉（⌘B、Windows は Ctrl+B。ターミナルの中では Ctrl+Shift+B。設計書 §10）と、Esc で閉じる。
+/// 取り消しとやり直し（計画8b）は ⌘Z / ⌘⇧Z、Windows は Ctrl+Z / Ctrl+Shift+Z。
 pub fn bind_tree_keys(cx: &mut App) {
     // 開閉のキーは fude_core::keymap（workspace_view::bind_keys）で登録する。
-    cx.bind_keys([KeyBinding::new("escape", CloseTree, Some("Tree"))]);
+    let (undo, redo) = match fude_core::keymap::Platform::current() {
+        fude_core::keymap::Platform::MacOs => ("cmd-z", "cmd-shift-z"),
+        fude_core::keymap::Platform::Windows => ("ctrl-z", "ctrl-shift-z"),
+    };
+    cx.bind_keys([
+        KeyBinding::new("escape", CloseTree, Some("Tree")),
+        KeyBinding::new(undo, TreeUndo, Some(TREE_NOT_INPUT)),
+        KeyBinding::new(redo, TreeRedo, Some(TREE_NOT_INPUT)),
+    ]);
 }
 
 const ROW_H: Pixels = px(24.);
@@ -46,6 +58,8 @@ pub(crate) struct TreeState {
     pub edit: Option<crate::tree_menu::TreeEdit>,
     /// プロジェクトごとの取り消しとやり直しの履歴（メモリだけ）。
     pub history: HashMap<ProjectId, fude_core::tree_history::TreeHistory<fude_fs::TrashTicket>>,
+    /// 取り消しかやり直しの途中（終わるまで次のキーは無視する）。
+    pub undo_running: bool,
     _filter_sub: Option<Subscription>,
 }
 
@@ -61,6 +75,7 @@ impl TreeState {
             menu: None,
             edit: None,
             history: HashMap::new(),
+            undo_running: false,
             _filter_sub: None,
         }
     }
@@ -333,6 +348,8 @@ impl WorkspaceView {
                 .track_focus(&self.tree.focus)
                 .key_context("Tree")
                 .on_action(cx.listener(|this, _: &CloseTree, window, cx| this.close_tree(window, cx)))
+                .on_action(cx.listener(|this, _: &TreeUndo, window, cx| this.undo_tree_op(window, cx)))
+                .on_action(cx.listener(|this, _: &TreeRedo, window, cx| this.redo_tree_op(window, cx)))
                 // 絞り込み欄は、消すものが無いときに Esc を親へ回す。
                 .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| this.close_tree(window, cx)))
                 // 重ねて出したとき、下のターミナルにクリックを渡さない。

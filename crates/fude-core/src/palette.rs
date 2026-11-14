@@ -51,10 +51,12 @@ pub enum PaletteCommand {
     ToggleMarkdownMode,
     TogglePin,
     ToggleVerticalTabs,
+    UndoTreeOp,
+    RedoTreeOp,
 }
 
 impl PaletteCommand {
-    pub const ALL: [PaletteCommand; 17] = [
+    pub const ALL: [PaletteCommand; 19] = [
         PaletteCommand::NewTerminal,
         PaletteCommand::SplitTerminal,
         PaletteCommand::ToggleTree,
@@ -72,6 +74,8 @@ impl PaletteCommand {
         PaletteCommand::ToggleMarkdownMode,
         PaletteCommand::TogglePin,
         PaletteCommand::ToggleVerticalTabs,
+        PaletteCommand::UndoTreeOp,
+        PaletteCommand::RedoTreeOp,
     ];
 
     /// 表示名。
@@ -94,6 +98,8 @@ impl PaletteCommand {
             PaletteCommand::ToggleMarkdownMode => "表示／ソースの切り替え",
             PaletteCommand::TogglePin => "Markdown をピン留め／外す",
             PaletteCommand::ToggleVerticalTabs => "ターミナルのタブを縦に並べる",
+            PaletteCommand::UndoTreeOp => "ツリーの操作を取り消す",
+            PaletteCommand::RedoTreeOp => "ツリーの操作をやり直す",
         }
     }
 
@@ -117,6 +123,8 @@ impl PaletteCommand {
             PaletteCommand::ToggleMarkdownMode => "toggle markdown preview source",
             PaletteCommand::TogglePin => "pin markdown",
             PaletteCommand::ToggleVerticalTabs => "vertical terminal tabs",
+            PaletteCommand::UndoTreeOp => "undo file operation",
+            PaletteCommand::RedoTreeOp => "redo file operation",
         }
     }
 
@@ -144,7 +152,9 @@ impl PaletteCommand {
             | PaletteCommand::LaunchClaude
             | PaletteCommand::CopyHookConfig
             | PaletteCommand::TogglePin
-            | PaletteCommand::ToggleVerticalTabs => None,
+            | PaletteCommand::ToggleVerticalTabs
+            | PaletteCommand::UndoTreeOp
+            | PaletteCommand::RedoTreeOp => None,
         }
     }
 }
@@ -272,5 +282,17 @@ mod tests {
         assert!(!PaletteCommand::ToggleVerticalTabs.needs_project());
         assert_eq!(PaletteCommand::ToggleMarkdownMode.keymap_command(), Some(Command::ToggleMarkdownMode));
         assert_eq!(PaletteCommand::TogglePin.keymap_command(), None);
+    }
+
+    #[test]
+    fn tree_undo_commands_are_listed() {
+        assert!(PaletteCommand::ALL.contains(&PaletteCommand::UndoTreeOp));
+        assert!(PaletteCommand::ALL.contains(&PaletteCommand::RedoTreeOp));
+        assert_eq!(PaletteCommand::UndoTreeOp.label(), "ツリーの操作を取り消す");
+        assert_eq!(PaletteCommand::RedoTreeOp.label(), "ツリーの操作をやり直す");
+        assert_eq!(PaletteCommand::UndoTreeOp.keywords(), "undo file operation");
+        assert_eq!(PaletteCommand::RedoTreeOp.keywords(), "redo file operation");
+        assert!(PaletteCommand::UndoTreeOp.needs_project());
+        assert!(PaletteCommand::RedoTreeOp.needs_project());
     }
 }

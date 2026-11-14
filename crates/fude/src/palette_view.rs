@@ -545,6 +545,8 @@ impl WorkspaceView {
                 return self.toggle_pin(project, rel, cx);
             }
             PaletteCommand::ToggleVerticalTabs => return self.toggle_vertical_tabs(cx),
+            PaletteCommand::UndoTreeOp => return self.undo_tree_op(window, cx),
+            PaletteCommand::RedoTreeOp => return self.redo_tree_op(window, cx),
         };
         window.dispatch_action(action, cx);
     }
