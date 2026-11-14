@@ -87,7 +87,13 @@ impl WorkspaceView {
                 .gap(px(8.))
                 .rounded(size::RADIUS_SM)
                 .bg(bg)
-                .child(icon(IconName::Sparkles, theme.fg_dim))
+                .child(
+                    svg()
+                        .path(crate::assets::CLAUDE_LOGO)
+                        .size(crate::title_row::ICON)
+                        .flex_shrink_0()
+                        .text_color(rgb(crate::assets::CLAUDE_COLOR)),
+                )
                 .child("Claude Code")
                 .on_click(cx.listener(|this, _, _, cx| {
                     if this.shell_menu.as_ref().is_some_and(|m| m.closing()) {

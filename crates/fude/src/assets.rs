@@ -34,18 +34,25 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     Check,
     ListTodo,
     Send,
-    Sparkles,
 ]);
 
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/file_icons.rs"));
 }
 
+/// Claude のロゴ（Simple Icons 14.0.0、CC0-1.0）。＋メニューの「Claude Code」に使う。
+pub const CLAUDE_LOGO: &str = "brand/claude.svg";
+/// Claude のブランドの色（#D97757）。
+pub const CLAUDE_COLOR: u32 = 0xD97757;
+
 /// アプリのアセット。`file-icons/` はファイルアイコン、それ以外は FudeAssets に任せる。
 pub struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
+        if path == CLAUDE_LOGO {
+            return Ok(Some(Cow::Borrowed(include_bytes!("../../../assets/brand/claude.svg"))));
+        }
         if let Some(name) = path.strip_prefix("file-icons/") {
             return Ok(embedded::FILE_ICONS.iter().find(|(n, _)| *n == name).map(|(_, bytes)| Cow::Borrowed(*bytes)));
         }
@@ -73,5 +80,6 @@ mod tests {
         assert!(AppAssets.load("file-icons/none.svg").unwrap().is_none());
         // Lucide のアイコンは今までどおり読める。
         assert!(AppAssets.load("icons/plus.svg").unwrap().is_some());
+        assert!(AppAssets.load(CLAUDE_LOGO).unwrap().is_some());
     }
 }

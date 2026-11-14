@@ -13,7 +13,7 @@ use crate::layout_anim::{tab_close_progress, tab_open_progress, tab_width_estima
 use crate::theme::{Theme, size};
 use crate::workspace_view::WorkspaceView;
 
-const ICON: Pixels = px(14.);
+pub(crate) const ICON: Pixels = px(14.);
 
 pub(crate) fn icon(name: IconName, color: Rgba) -> Svg {
     svg().path(name.path()).size(ICON).flex_shrink_0().text_color(color)
