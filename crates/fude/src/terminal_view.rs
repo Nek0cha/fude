@@ -10,7 +10,8 @@ use fude_core::keymap::Platform;
 use fude_core::keys::{KeyOverrides, KeyRoute, RawKey, encode_key, route_key};
 use fude_core::workspace::{ProjectRoot, ShellKind};
 use fude_term::{
-    GridSize, SelectKind, Session, SessionEvent, WheelAccum, alt_scroll_bytes, alt_scroll_lines, paste_bytes, spawn_spec,
+    GridSize, MouseAction, MouseKey, MouseMods, SelectKind, Session, SessionEvent, WheelAccum, alt_scroll_bytes, alt_scroll_lines,
+    mouse_bytes, paste_bytes, spawn_spec,
 };
 use fude_term::links::{LinkTarget, find_links};
 use futures::StreamExt;
@@ -60,6 +61,10 @@ pub struct TerminalView {
     /// マウスで選択中なら Some（押してから動かしたか）。
     drag: Option<bool>,
     click_count: usize,
+    /// アプリへ押したと報告したボタン（離したときに報告する）。
+    mouse_down: Option<MouseKey>,
+    /// 最後に移動を報告したセル（同じセルの中の移動は送らない）。
+    mouse_cell: Option<(u16, u16)>,
     /// マウスが乗っているリンク（行、始まりの列、終わりの列（含まない）、行き先）。
     hover_link: Option<(u16, u16, u16, LinkTarget)>,
     /// 動きの間は PTY にサイズを送らない（描画の closure から読むため Cell）。
@@ -109,6 +114,8 @@ impl TerminalView {
             hover: HoverFades::default(),
             drag: None,
             click_count: 0,
+            mouse_down: None,
+            mouse_cell: None,
             hover_link: None,
             resize_frozen: Rc::new(Cell::new(false)),
             created_at: Instant::now(),
@@ -264,9 +271,51 @@ impl TerminalView {
         }
     }
 
+    /// アプリ（Claude Code の全画面の表示、vim など）がマウスを求めていて、Shift を押していなければ報告する。
+    /// 報告の対象なら true（ターミナル側の選択やスクロールはしない）。Shift を押せば、いつもどおり選択できる。
+    fn report_mouse(&mut self, key: MouseKey, action: MouseAction, pos: Point<Pixels>, modifiers: &Modifiers) -> bool {
+        let Some(session) = &self.session else { return false };
+        let mode = session.with_state(|st| st.mouse_mode());
+        if !mode.is_on() || modifiers.shift {
+            return false;
+        }
+        let Some((row, col, _)) = self.cell_at(pos) else { return false };
+        if action == MouseAction::Move && self.mouse_cell == Some((row, col)) {
+            return true;
+        }
+        self.mouse_cell = Some((row, col));
+        let mods = MouseMods { shift: false, alt: modifiers.alt, ctrl: modifiers.control };
+        if let Some(bytes) = mouse_bytes(mode, key, action, row, col, mods) {
+            session.write(bytes);
+        }
+        true
+    }
+
+    /// 報告したボタンを離した（ビューの外で離したときも）。
+    fn release_mouse(&mut self, button: MouseKey, pos: Point<Pixels>, modifiers: &Modifiers) -> bool {
+        if self.mouse_down != Some(button) {
+            return false;
+        }
+        self.mouse_down = None;
+        self.mouse_cell = None;
+        // Shift を押して離しても、押したことは報告してあるので離したことも送る。
+        let plain = Modifiers { shift: false, ..*modifiers };
+        self.report_mouse(button, MouseAction::Release, pos, &plain);
+        true
+    }
+
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         cx.emit(TerminalEvent::Focused);
+        self.mouse_cell = None;
+        if self.report_mouse(MouseKey::Left, MouseAction::Press, ev.position, &ev.modifiers) {
+            self.mouse_down = Some(MouseKey::Left);
+            if let Some(s) = &self.session {
+                s.with_state(|st| st.clear_selection());
+            }
+            cx.notify();
+            return;
+        }
         let (Some(session), Some((row, col, right))) = (&self.session, self.cell_at(ev.position)) else { return };
         let kind = match ev.click_count {
             2 => SelectKind::Word,
@@ -296,6 +345,16 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if let Some(key) = self.mouse_down {
+            self.report_mouse(key, MouseAction::Move, ev.position, &ev.modifiers);
+            return;
+        }
+        if ev.pressed_button.is_none() && self.report_mouse(MouseKey::None, MouseAction::Move, ev.position, &ev.modifiers) {
+            if self.hover_link.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
         if ev.pressed_button.is_none() {
             self.update_hover_link(ev.position, cx);
             return;
@@ -309,8 +368,13 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn on_right_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_right_click(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        self.mouse_cell = None;
+        if self.report_mouse(MouseKey::Right, MouseAction::Press, ev.position, &ev.modifiers) {
+            self.mouse_down = Some(MouseKey::Right);
+            return;
+        }
         let Some(session) = self.session.clone() else { return };
         let has_selection = session.with_state(|st| st.selection_text().is_some());
         match right_click_action(has_selection) {
@@ -323,7 +387,10 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn on_mouse_up(&mut self, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, ev: &MouseUpEvent, cx: &mut Context<Self>) {
+        if self.release_mouse(MouseKey::Left, ev.position, &ev.modifiers) {
+            return;
+        }
         // 押して動かさずに離したら、乗っているリンクを開く（ドラッグなら今までどおり選択）。
         if self.drag == Some(false)
             && self.click_count == 1
@@ -353,6 +420,16 @@ impl TerminalView {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => p.y / self.metrics.line_h,
         };
+        let report = session.with_state(|st| st.mouse_mode()).is_on() && !ev.modifiers.shift;
+        if report {
+            // Windows ではホイール 1 段を 1 回の報告にする（代替スクロールと同じ）。
+            let n = self.wheel.feed(alt_scroll_lines(lines, cfg!(windows)));
+            let key = if n > 0 { MouseKey::WheelUp } else { MouseKey::WheelDown };
+            for _ in 0..n.unsigned_abs() {
+                self.report_mouse(key, MouseAction::Press, ev.position, &ev.modifiers);
+            }
+            return;
+        }
         let alt = session.with_state(|st| st.alt_scroll().then(|| st.modes().app_cursor));
         let lines = if alt.is_some() { alt_scroll_lines(lines, cfg!(windows)) } else { lines };
         let n = self.wheel.feed(lines);
@@ -617,9 +694,18 @@ impl Render for TerminalView {
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| this.on_mouse_down(ev, window, cx)),
             )
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _: &MouseDownEvent, window, cx| this.on_right_click(window, cx)))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| this.on_right_click(ev, window, cx)))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| this.on_mouse_move(ev, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_mouse_up(cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, cx| this.on_mouse_up(ev, cx)))
+            .on_mouse_up(MouseButton::Right, cx.listener(|this, ev: &MouseUpEvent, _, _| {
+                this.release_mouse(MouseKey::Right, ev.position, &ev.modifiers);
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, _| {
+                this.release_mouse(MouseKey::Left, ev.position, &ev.modifiers);
+            }))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(|this, ev: &MouseUpEvent, _, _| {
+                this.release_mouse(MouseKey::Right, ev.position, &ev.modifiers);
+            }))
             .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| this.on_scroll(ev, cx)))
             .when(self.hover_link.is_some(), |d| d.cursor_pointer())
             .relative()

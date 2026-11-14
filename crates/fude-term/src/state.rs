@@ -364,6 +364,22 @@ impl TermState {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
+    /// アプリが求めたマウスの報告。
+    pub fn mouse_mode(&self) -> crate::input::MouseMode {
+        use crate::input::{MouseMode, MouseReport};
+        let mode = self.term.mode();
+        let report = if mode.contains(TermMode::MOUSE_MOTION) {
+            MouseReport::Motion
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            MouseReport::Drag
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            MouseReport::Click
+        } else {
+            MouseReport::Off
+        };
+        MouseMode { report, sgr: mode.contains(TermMode::SGR_MOUSE) }
+    }
+
     /// 代替画面で、ホイールを矢印キーとして送るか。
     pub fn alt_scroll(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
@@ -426,6 +442,20 @@ mod tests {
 
     fn snap(t: &TermState) -> Snapshot {
         t.snapshot(&test_palette(), true)
+    }
+
+    /// Claude Code の全画面の表示（tui: fullscreen）が送る組み合わせ。
+    #[test]
+    fn mouse_mode_follows_decset() {
+        use crate::input::{MouseMode, MouseReport};
+        let t = term(20, 5, "");
+        assert_eq!(t.mouse_mode(), MouseMode { report: MouseReport::Off, sgr: false });
+        let t = term(20, 5, "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+        assert_eq!(t.mouse_mode(), MouseMode { report: MouseReport::Motion, sgr: true });
+        let t = term(20, 5, "\x1b[?1002h\x1b[?1006h\x1b[?1006l");
+        assert_eq!(t.mouse_mode(), MouseMode { report: MouseReport::Drag, sgr: false });
+        let t = term(20, 5, "\x1b[?1000h\x1b[?1000l");
+        assert!(!t.mouse_mode().is_on());
     }
 
     #[test]
