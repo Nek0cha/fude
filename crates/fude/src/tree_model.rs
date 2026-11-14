@@ -16,6 +16,36 @@ pub(crate) struct TreeRow {
     pub mark: Option<GitMark>,
 }
 
+/// ツリーに描く 1 行。名前の入力欄（計画8b）も行として並べる。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RowSlot {
+    Entry(TreeRow),
+    Edit { depth: usize, kind: crate::tree_menu::EditKind },
+}
+
+/// rows に名前の入力欄を差し込む。名前の変更は対象の行を置き換え、新規は作り先のフォルダの行のすぐ下
+/// （ルートならいちばん上）に 1 段深く差し込む。対象の行が見えていなければ差し込まない。
+pub(crate) fn rows_with_edit(rows: Vec<TreeRow>, edit: Option<(&crate::tree_menu::EditKind, &RelPath)>) -> Vec<RowSlot> {
+    use crate::tree_menu::EditKind;
+    let Some((&kind, target)) = edit else { return rows.into_iter().map(RowSlot::Entry).collect() };
+    let mut out = Vec::with_capacity(rows.len() + 1);
+    if kind != EditKind::Rename && target.is_root() {
+        out.push(RowSlot::Edit { depth: 0, kind });
+    }
+    for row in rows {
+        if row.rel != *target {
+            out.push(RowSlot::Entry(row));
+        } else if kind == EditKind::Rename {
+            out.push(RowSlot::Edit { depth: row.depth, kind });
+        } else {
+            let depth = row.depth + 1;
+            out.push(RowSlot::Entry(row));
+            out.push(RowSlot::Edit { depth, kind });
+        }
+    }
+    out
+}
+
 #[derive(Default)]
 pub(crate) struct TreeModel {
     /// 読んだフォルダ（相対パス）の子。
@@ -180,7 +210,8 @@ impl TreeModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{TreeModel, TreeRow};
+    use super::{RowSlot, TreeModel, TreeRow, rows_with_edit};
+    use crate::tree_menu::EditKind;
     use fude_fs::git::{GitMark, GitStatus};
     use fude_fs::{DirEntry, RelPath};
 
@@ -273,5 +304,32 @@ mod tests {
         assert!(m.needs_load(&rel("src")));
         // 読み直すまでは古い子を出し続ける（ちらつかないように）。
         assert_eq!(m.rows(None).len(), 2);
+    }
+
+    fn slot_row(p: &str, depth: usize, is_dir: bool) -> TreeRow {
+        let rel = rel(p);
+        TreeRow { name: p.rsplit('/').next().unwrap().into(), rel, depth, is_dir, expanded: is_dir, mark: None }
+    }
+
+    #[test]
+    fn edit_slot_replaces_renamed_row() {
+        let rows = vec![slot_row("docs", 0, true), slot_row("docs/a.md", 1, false), slot_row("docs/b.md", 1, false)];
+        let slots = rows_with_edit(rows, Some((&EditKind::Rename, &rel("docs/a.md"))));
+        assert_eq!(slots.len(), 3);
+        assert!(matches!(slots[1], RowSlot::Edit { depth: 1, kind: EditKind::Rename }));
+        assert!(matches!(&slots[2], RowSlot::Entry(r) if r.rel == rel("docs/b.md")));
+    }
+
+    #[test]
+    fn new_item_slot_goes_under_folder_or_top() {
+        let rows = vec![slot_row("docs", 0, true), slot_row("docs/a.md", 1, false), slot_row("z.md", 0, false)];
+        let slots = rows_with_edit(rows.clone(), Some((&EditKind::NewFile, &rel("docs"))));
+        assert_eq!(slots.len(), 4);
+        assert!(matches!(slots[1], RowSlot::Edit { depth: 1, kind: EditKind::NewFile }));
+        let slots = rows_with_edit(rows.clone(), Some((&EditKind::NewFolder, &RelPath::root())));
+        assert!(matches!(slots[0], RowSlot::Edit { depth: 0, kind: EditKind::NewFolder }));
+        let slots = rows_with_edit(rows, None);
+        assert_eq!(slots.len(), 3);
+        assert!(slots.iter().all(|s| matches!(s, RowSlot::Entry(_))));
     }
 }

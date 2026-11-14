@@ -1,12 +1,13 @@
 //! ツリーの右クリックメニュー（設計書 §4.3。「Claude に渡す」は計画7）。
-//! 新規と名前の変更は、ツリーの上部に 1 行の入力欄を出し、Enter で確定、Esc で取り消す。削除はゴミ箱に送る（計画8b）。
+//! 新規と名前の変更は、ツリーのその行の場所（新規は作り先のフォルダの中の先頭）に入力欄を出し、Enter か
+//! フォーカスが外れたときに確定、Esc で取り消す。削除はゴミ箱に送る（計画8b）。
 
 use std::path::Path;
 use std::time::Instant;
 
 use fude_core::claude::mention;
 use fude_core::keymap::Platform;
-use fude_core::tree_history::{TreeHistory, TreeOp};
+use fude_core::tree_history::{TreeHistory, TreeOp, name_stem_len};
 use fude_core::workspace::ProjectId;
 use fude_fs::{RelPath, TrashTicket};
 use gpui_kit::assets::IconName;
@@ -119,6 +120,8 @@ pub(crate) struct TreeEdit {
     pub kind: EditKind,
     /// 新規は作り先のフォルダ、名前の変更は対象。
     pub target: RelPath,
+    /// 入れる名前がフォルダのものか（アイコンと最初の選択に使う）。
+    pub is_dir: bool,
     pub input: Entity<InputState>,
     _sub: Subscription,
 }
@@ -154,11 +157,15 @@ impl WorkspaceView {
         self.close_tree_menu(window, cx);
         let Some(project) = self.workspace.active_project().map(|p| p.id) else { return };
         match action {
-            TreeAction::NewFile => self.start_tree_edit(project, EditKind::NewFile, new_item_parent(row.as_ref()), "", window, cx),
-            TreeAction::NewFolder => self.start_tree_edit(project, EditKind::NewFolder, new_item_parent(row.as_ref()), "", window, cx),
+            TreeAction::NewFile => {
+                self.start_tree_edit(project, EditKind::NewFile, new_item_parent(row.as_ref()), "", false, window, cx)
+            }
+            TreeAction::NewFolder => {
+                self.start_tree_edit(project, EditKind::NewFolder, new_item_parent(row.as_ref()), "", true, window, cx)
+            }
             TreeAction::Rename => {
                 if let Some(row) = row {
-                    self.start_tree_edit(project, EditKind::Rename, row.rel.clone(), &row.name, window, cx);
+                    self.start_tree_edit(project, EditKind::Rename, row.rel.clone(), &row.name, row.is_dir, window, cx);
                 }
             }
             TreeAction::Delete => {
@@ -189,28 +196,52 @@ impl WorkspaceView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_tree_edit(
         &mut self,
         project: ProjectId,
         kind: EditKind,
         target: RelPath,
         initial: &str,
+        is_dir: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if kind != EditKind::Rename {
+            // 絞り込み中と「変更だけ」の表示ではフォルダを開けないので、ふつうのツリーに戻す。
+            let model = self.tree.models.entry(project).or_default();
+            if model.filtering() || model.changed_only() {
+                model.set_changed_only(false);
+                model.set_filter("", None);
+                if let Some(filter) = self.tree.filter.clone() {
+                    filter.update(cx, |s, cx| s.set_value("", window, cx));
+                }
+            }
+            if !target.is_root() {
+                let model = self.tree.models.entry(project).or_default();
+                model.expand(&target);
+                if model.needs_load(&target) {
+                    self.load_tree_dir(project, target.clone(), cx);
+                }
+            }
+        }
         let initial = initial.to_string();
+        let stem = name_stem_len(&initial, is_dir);
         let input = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
             state.set_value(initial, window, cx);
+            state.set_selected_range(0..stem, cx);
             state
         });
-        let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { .. } = ev {
-                this.commit_tree_edit(window, cx);
-            }
+        let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => this.commit_tree_edit(window, cx),
+            // 欄の外をクリックしたときなど。エラーのダイアログに移ったときは確定しない。
+            InputEvent::Blur if !this.dialog_open() => this.commit_tree_edit(window, cx),
+            _ => {}
         });
         input.update(cx, |s, cx| s.focus(window, cx));
-        self.tree.edit = Some(TreeEdit { project, kind, target, input, _sub: sub });
+        self.tree.edit = Some(TreeEdit { project, kind, target, is_dir, input, _sub: sub });
+        self.tree.scroll_to_edit = true;
         cx.notify();
     }
 
@@ -224,8 +255,14 @@ impl WorkspaceView {
     fn commit_tree_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = self.tree.edit.as_ref() else { return };
         let name = edit.input.read(cx).value().trim().to_string();
+        let unchanged = edit.kind == EditKind::Rename && edit.target.as_str().rsplit('/').next() == Some(name.as_str());
+        if name.is_empty() || unchanged {
+            self.cancel_tree_edit(window, cx);
+            return;
+        }
+        let input_focus = edit.input.read(cx).focus_handle(cx);
         if let Err(why) = validate_name(&name) {
-            self.show_error(format!("{why}: {name}"), window, cx);
+            self.show_error_to(format!("{why}: {name}"), Some(input_focus), window, cx);
             return;
         }
         let (project, kind, target) = (edit.project, edit.kind, edit.target.clone());
@@ -243,7 +280,7 @@ impl WorkspaceView {
             let dirty: Vec<&str> = dirty.iter().map(String::as_str).collect();
             if let Some(blocked) = crate::editor_column::rename_blocked(dest.as_str(), &dirty) {
                 let message = format!("{blocked} に保存していない変更があります。保存するか閉じてから、名前を変えてください。");
-                self.show_error(message, window, cx);
+                self.show_error_to(message, Some(input_focus), window, cx);
                 return;
             }
         }

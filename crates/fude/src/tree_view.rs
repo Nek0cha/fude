@@ -16,7 +16,7 @@ use crate::changes_menu::mark_style;
 use crate::file_icons::{file_icon, icon_for_file, icon_for_folder};
 use crate::theme::{Theme, mono_font, size};
 use crate::title_row::icon;
-use crate::tree_model::{TreeModel, TreeRow};
+use crate::tree_model::{RowSlot, TreeModel, TreeRow, rows_with_edit};
 use crate::workspace_view::WorkspaceView;
 
 gpui_kit::actions!(tree, [ToggleTree, CloseTree, TreeUndo, TreeRedo]);
@@ -48,8 +48,11 @@ pub(crate) struct TreeState {
     pub open: bool,
     pub filter: Option<Entity<InputState>>,
     pub focus: FocusHandle,
-    /// 最後の描画で作った行（一覧の部品が範囲ごとに読む）。
-    pub rows: Vec<TreeRow>,
+    /// 最後の描画で作った行（一覧の部品が範囲ごとに読む）。名前の入力欄も行として入る。
+    pub rows: Vec<RowSlot>,
+    pub scroll: UniformListScrollHandle,
+    /// 次の描画で、名前の入力欄の行が見える位置までスクロールする。
+    pub scroll_to_edit: bool,
     /// 選択中（最後にクリックした）行。
     pub selected: Option<RelPath>,
     /// 右クリックメニューと、その対象の行（None は何も無いところ）。
@@ -71,6 +74,8 @@ impl TreeState {
             filter: None,
             focus: cx.focus_handle(),
             rows: Vec::new(),
+            scroll: UniformListScrollHandle::new(),
+            scroll_to_edit: false,
             selected: None,
             menu: None,
             edit: None,
@@ -204,6 +209,48 @@ impl WorkspaceView {
         }
     }
 
+    /// 名前の入力欄の行（計画8b）。通常の行と同じ字下げと高さで、アイコンと枠付きの入力欄を並べる。
+    fn render_tree_edit_row(&self, ix: usize, depth: usize, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        use crate::tree_menu::EditKind;
+        let Some(e) = self.tree.edit.as_ref() else { return div().into_any_element() };
+        let folder = |expanded| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.))
+                .flex_shrink_0()
+                .child(icon(IconName::ChevronRight, theme.fg_dim))
+                .child(file_icon(icon_for_folder(expanded)))
+                .into_any_element()
+        };
+        let lead = match e.kind {
+            EditKind::NewFolder => folder(false),
+            EditKind::Rename if e.is_dir => folder(true),
+            EditKind::NewFile | EditKind::Rename => {
+                let name = e.input.read(cx).value().to_string();
+                div().pl(px(16.)).flex_shrink_0().child(file_icon(icon_for_file(&name))).into_any_element()
+            }
+        };
+        div()
+            .id(ElementId::Name(format!("tree-row-{ix}").into()))
+            .h(ROW_H)
+            .w_full()
+            .pl(px(7. + INDENT * depth as f32))
+            .pr(px(4.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .rounded(size::RADIUS_SM)
+            .border_1()
+            .border_color(theme.accent)
+            .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| this.cancel_tree_edit(window, cx)))
+            .child(lead)
+            .child(div().flex_1().min_w_0().child(Input::new(&e.input).appearance(false).h(ROW_H - px(4.))))
+            .into_any_element()
+    }
+
     /// 描画のたびに呼ぶ。ツリーの出入りの動きを始める。
     pub(crate) fn observe_tree(&mut self, now: Instant) {
         use crate::theme::motion::{PANEL_IN, PANEL_OUT};
@@ -224,9 +271,15 @@ impl WorkspaceView {
         let theme = *cx.global::<Theme>();
         let status = self.live.get(&project).and_then(|l| l.status.clone());
         let model = self.tree.models.entry(project).or_default();
-        self.tree.rows = model.rows(status.as_ref());
+        let rows = model.rows(status.as_ref());
         let changed_only = model.changed_only();
+        self.tree.rows = rows_with_edit(rows, self.tree.edit.as_ref().map(|e| (&e.kind, &e.target)));
         let count = self.tree.rows.len();
+        if std::mem::take(&mut self.tree.scroll_to_edit)
+            && let Some(ix) = self.tree.rows.iter().position(|s| matches!(s, RowSlot::Edit { .. }))
+        {
+            self.tree.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
 
         let toggle_changed = div()
             .id("tree-changed-only")
@@ -258,7 +311,11 @@ impl WorkspaceView {
                     .iter()
                     .cloned()
                     .enumerate()
-                    .map(|(i, row)| {
+                    .map(|(i, slot)| {
+                        let row = match slot {
+                            RowSlot::Entry(row) => row,
+                            RowSlot::Edit { depth, .. } => return this.render_tree_edit_row(range.start + i, depth, &theme, cx),
+                        };
                         let is_selected = selected.as_ref() == Some(&row.rel);
                         let chevron = if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight };
                         // フォルダは開閉の矢印とフォルダのアイコン、ファイルは拡張子のアイコン（設計書 §5.5）。
@@ -317,30 +374,13 @@ impl WorkspaceView {
                                     this.open_tree_menu(Some(menu_row.clone()), ev.position, window, cx);
                                 }),
                             )
+                            .into_any_element()
                     })
                     .collect::<Vec<_>>()
             }),
         )
+        .track_scroll(&self.tree.scroll)
         .flex_1();
-        let edit_row = self.tree.edit.as_ref().map(|e| {
-            let kind_icon = match e.kind {
-                crate::tree_menu::EditKind::NewFile => IconName::FilePlus,
-                crate::tree_menu::EditKind::NewFolder => IconName::FolderPlus,
-                crate::tree_menu::EditKind::Rename => IconName::Pencil,
-            };
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.))
-                .px(px(4.))
-                .rounded(size::RADIUS_SM)
-                .border_1()
-                .border_color(theme.accent)
-                .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| this.cancel_tree_edit(window, cx)))
-                .child(icon(kind_icon, theme.fg_dim))
-                .child(div().flex_1().child(Input::new(&e.input).appearance(false)))
-        });
 
         Some(
             div()
@@ -361,7 +401,6 @@ impl WorkspaceView {
                 .text_size(px(13.))
                 .text_color(theme.fg_default)
                 .child(div().flex().flex_row().items_center().gap(px(4.)).children(filter.map(|f| div().flex_1().child(f))).child(toggle_changed))
-                .children(edit_row)
                 .child(
                     div()
                         .id("tree-body")
