@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod close;
+pub mod drop_text;
 pub mod editor_tabs;
 pub mod fuzzy;
 pub mod git_head;
