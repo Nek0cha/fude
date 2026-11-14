@@ -291,6 +291,15 @@ impl TerminalView {
         true
     }
 
+    /// 別のボタンを押したまま新しいボタンを押した。前のボタンは離したことにする（アプリに押したままの状態を残さない）。
+    fn release_other(&mut self, pressed: MouseKey, pos: Point<Pixels>, modifiers: &Modifiers) {
+        if let Some(key) = self.mouse_down
+            && key != pressed
+        {
+            self.release_mouse(key, pos, modifiers);
+        }
+    }
+
     /// 報告したボタンを離した（ビューの外で離したときも）。
     fn release_mouse(&mut self, button: MouseKey, pos: Point<Pixels>, modifiers: &Modifiers) -> bool {
         if self.mouse_down != Some(button) {
@@ -307,9 +316,12 @@ impl TerminalView {
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         cx.emit(TerminalEvent::Focused);
+        self.release_other(MouseKey::Left, ev.position, &ev.modifiers);
         self.mouse_cell = None;
         if self.report_mouse(MouseKey::Left, MouseAction::Press, ev.position, &ev.modifiers) {
             self.mouse_down = Some(MouseKey::Left);
+            // アプリ（全画面の Claude Code など）をクリックで操作したので、入力とみなして返事待ちを消す。
+            cx.emit(TerminalEvent::Input);
             if let Some(s) = &self.session {
                 s.with_state(|st| st.clear_selection());
             }
@@ -376,9 +388,11 @@ impl TerminalView {
 
     fn on_right_click(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        self.release_other(MouseKey::Right, ev.position, &ev.modifiers);
         self.mouse_cell = None;
         if self.report_mouse(MouseKey::Right, MouseAction::Press, ev.position, &ev.modifiers) {
             self.mouse_down = Some(MouseKey::Right);
+            cx.emit(TerminalEvent::Input);
             return;
         }
         let Some(session) = self.session.clone() else { return };
@@ -704,10 +718,14 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| this.on_mouse_move(ev, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, cx| this.on_mouse_up(ev, cx)))
             // 中ボタンは、アプリがマウスを求めているときだけ報告する（fude 側の操作は割り当てていない）。
-            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, _| {
+            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                window.focus(&this.focus, cx);
+                cx.emit(TerminalEvent::Focused);
+                this.release_other(MouseKey::Middle, ev.position, &ev.modifiers);
                 this.mouse_cell = None;
                 if this.report_mouse(MouseKey::Middle, MouseAction::Press, ev.position, &ev.modifiers) {
                     this.mouse_down = Some(MouseKey::Middle);
+                    cx.emit(TerminalEvent::Input);
                 }
             }))
             .on_mouse_up(MouseButton::Middle, cx.listener(|this, ev: &MouseUpEvent, _, _| {

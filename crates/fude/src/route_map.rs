@@ -172,7 +172,7 @@ impl WorkspaceView {
         }
         let route = active.and_then(|id| self.project_route(id));
         if route.is_some() {
-            self.route_last = route.clone();
+            self.route_last = active.zip(route.clone());
         }
         let target = route_width(route.is_some(), self.route_collapsed);
         let duration = match (self.reduced_motion, target > self.route_w.target()) {
@@ -208,7 +208,9 @@ impl WorkspaceView {
             return None;
         }
         // 消えていく間（プランも Todo も無くなった直後）は、最後に出したものを描く。
-        let route = self.project_route(project.id).or_else(|| self.route_last.clone())?;
+        // 別のプロジェクトのもの（切り替えた直後）は描かない。駅のクリックが別のフォルダのパスを開いてしまうため。
+        let last = self.route_last.as_ref().filter(|(id, _)| *id == project.id).map(|(_, r)| r.clone());
+        let route = self.project_route(project.id).or(last)?;
         let theme = *cx.global::<Theme>();
         let collapsed = self.route_collapsed;
         let inner = if collapsed {
@@ -353,6 +355,9 @@ mod tests {
     use super::{STATION_H, ledger_removed, plan_location, ring_y, route_width};
     use fude_fs::RelPath;
     use fude_fs::plans::PlanStamp;
+    use fude_core::location::FileLocation;
+    use fude_core::workspace::ProjectRoot;
+    use std::path::PathBuf;
 
     #[test]
     fn finished_plan_is_hidden_when_its_ledger_goes() {
@@ -369,9 +374,6 @@ mod tests {
         assert!(!ledger_removed(None, &stamp("docs/superpowers/plans/p.md", 10, None)));
         assert!(!ledger_removed(Some(&stamp("docs/superpowers/plans/p.md", 10, None)), &running));
     }
-    use fude_core::location::FileLocation;
-    use fude_core::workspace::ProjectRoot;
-    use std::path::PathBuf;
 
     #[test]
     fn widths() {
