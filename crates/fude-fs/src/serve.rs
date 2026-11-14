@@ -210,8 +210,7 @@ mod tests {
     fn plan_files_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("docs/superpowers/plans")).unwrap();
-        std::fs::write(dir.path().join("docs/superpowers/plans/p.md"), "# P
-").unwrap();
+        std::fs::write(dir.path().join("docs/superpowers/plans/p.md"), "# P\n").unwrap();
         let out = run(&[(Request::PlanFiles { root: root_of(&dir), known: None }, vec![])]);
         assert_eq!(out[0].0, Response::Plan);
         let fetch: crate::plans::PlanFetch = serde_json::from_slice(&out[0].1).unwrap();

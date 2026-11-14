@@ -203,7 +203,8 @@ pub fn plan_is_recent(plan_mtime_ms: u64, now_ms: u64) -> bool {
     now_ms.saturating_sub(plan_mtime_ms) < RECENT_PLAN_MS
 }
 
-/// 台帳が無く、印も無いプランは、最近（recent）でなければ None。タスクが 0 個も None。実行中は最初の未完了。
+/// 台帳が無く、印も無いプランと、台帳が無く全部に印が付いた（終わった）プランは、最近（recent）でなければ None。
+/// タスクが 0 個も None。実行中は最初の未完了。
 pub fn plan_route(rel: &str, text: &str, ledger: Option<&str>, recent: bool) -> Option<Route> {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     let name = name.strip_suffix(".md").unwrap_or(name);
@@ -228,7 +229,10 @@ pub fn plan_route(rel: &str, text: &str, ledger: Option<&str>, recent: bool) -> 
             };
             Station { label: t.title, state, line: Some(t.line) }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if ledger.is_none() && !current_set && !recent {
+        return None;
+    }
     Some(Route { title: plan.title, stations, plan_rel: Some(rel.to_string()) })
 }
 
@@ -335,9 +339,15 @@ mod tests {
         let text = "# P\n### Task 1: a\n- [ ] s\n";
         assert_eq!(plan_route("p.md", text, None, false), None);
         assert_eq!(plan_route("p.md", "# P\n本文だけ\n", Some(""), false), None);
-        let all = plan_route("p.md", "# P\n### Task 1: a\n- [x] s\n", None, false).unwrap();
+        // 台帳が無く、全部に印が付いたプランは、終わったプランとして期間のあいだだけ出す。
+        let ticked = "# P\n### Task 1: a\n- [x] s\n";
+        assert_eq!(plan_route("p.md", ticked, None, false), None);
+        let all = plan_route("p.md", ticked, None, true).unwrap();
         assert_eq!(all.progress(), (1, 1));
         assert_eq!(all.current(), None);
+        // 途中まで印が付いたプランは、期間に関わらず出す。
+        let partial = "# P\n### Task 1: a\n- [x] s\n### Task 2: b\n- [ ] s\n";
+        assert_eq!(plan_route("p.md", partial, None, false).unwrap().progress(), (1, 2));
     }
 
     /// 書いた直後のプランや、git の外（Superpowers の台帳ができない）のプランも、最近のものなら 0/N で出す。

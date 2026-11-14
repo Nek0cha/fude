@@ -279,7 +279,6 @@ impl Workspace {
         }
     }
 
-    /// ペインを含むタブの focused をそのペインにする。
     /// ペインの番号（FUDE_TERMINAL_ID の数字）から、そのペインとプロジェクトを探す。
     pub fn pane_by_raw(&self, raw: u64) -> Option<(ProjectId, PaneId)> {
         self.projects
@@ -287,6 +286,7 @@ impl Workspace {
             .find_map(|p| p.tabs.iter().flat_map(|t| &t.panes).find(|pane| pane.id.0 == raw).map(|pane| (p.id, pane.id)))
     }
 
+    /// ペインを含むタブの focused をそのペインにする。
     pub fn focus_pane(&mut self, pane: PaneId) {
         if let Some((p, ti, pi)) = self.find_pane_mut(pane) {
             p.tabs[ti].focused = pi;

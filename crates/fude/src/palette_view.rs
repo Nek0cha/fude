@@ -530,7 +530,7 @@ impl WorkspaceView {
             PaletteCommand::GoToFile => return self.open_palette(Scope::Files, "", window, cx),
             PaletteCommand::FindInFiles => return self.open_find_in_files(window, cx),
             PaletteCommand::LaunchClaude => return self.launch_claude(cx),
-            PaletteCommand::CopyHookConfig => return self.copy_hook_config(cx),
+            PaletteCommand::CopyHookConfig => return self.copy_hook_config(window, cx),
         };
         window.dispatch_action(action, cx);
     }

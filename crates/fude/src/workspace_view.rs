@@ -224,6 +224,8 @@ pub struct WorkspaceView {
     pub(crate) ring_shown: bool,
     /// 前の描画の作業中のプロジェクト（変わったらすぐプランを確かめる）。
     pub(crate) route_project: Option<ProjectId>,
+    /// 最後に出した路線図。消えるときの動き（幅が 0 に戻るまで）の間、これを描く。
+    pub(crate) route_last: Option<fude_core::plan::Route>,
     pub(crate) plan_poll: Option<Task<()>>,
     /// ピル用のブランチ名。開いたときと、ウィンドウが前面に来たときに読み直す。
     pub(crate) branches: HashMap<ProjectId, Option<String>>,
@@ -350,6 +352,7 @@ impl WorkspaceView {
             ring: Fade::settled(0.0),
             ring_shown: false,
             route_project: None,
+            route_last: None,
             plan_poll: None,
             branches: HashMap::new(),
             hover: HoverFades::default(),
@@ -564,13 +567,13 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// 作業中のプロジェクトに合う hook の設定を、settings.json に貼る形でクリップボードに書く。
-    pub(crate) fn copy_hook_config(&mut self, cx: &mut Context<Self>) {
+    /// 作業中のプロジェクトに合う hook の設定を、settings.json に貼る形でクリップボードに書き、貼る場所を知らせる。
+    pub(crate) fn copy_hook_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) else { return };
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(e) => {
-                eprintln!("fude の場所が分からない: {e}");
+                self.show_error(format!("fude の場所が分からないため、hook の設定を作れません: {e}"), window, cx);
                 return;
             }
         };
@@ -579,10 +582,18 @@ impl WorkspaceView {
         #[cfg(not(windows))]
         let wsl_fude = String::new();
         let config = hook_config(&hook_command_for(&root, &exe, &wsl_fude));
-        match serde_json::to_string_pretty(&config) {
-            Ok(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-            Err(e) => eprintln!("hook の設定を書けない: {e}"),
-        }
+        let place = match root {
+            ProjectRoot::Wsl { .. } => "WSL の中の ~/.claude/settings.json",
+            ProjectRoot::Local(_) => "~/.claude/settings.json",
+        };
+        let message = match serde_json::to_string_pretty(&config) {
+            Ok(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                format!("Claude Code の hook の設定をコピーしました。{place} の \"hooks\" に貼り付けてください。")
+            }
+            Err(e) => format!("hook の設定を作れません: {e}"),
+        };
+        self.show_error(message, window, cx);
     }
 
     /// 選択中のペインのターミナルに検索の欄を出す。

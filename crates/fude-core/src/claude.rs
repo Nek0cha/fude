@@ -47,6 +47,8 @@ pub enum HookSignal {
 
 /// タスクの件名の上限（文字数）。
 pub const SUBJECT_MAX_CHARS: usize = 200;
+/// TodoWrite の項目の上限。件名の上限と合わせて、信号が IPC の 1 行（64KB）に収まるようにする。
+pub const TODO_MAX_ITEMS: usize = 50;
 
 /// 返事待ちにする通知の種類。
 const WAITING_NOTIFICATIONS: [&str; 5] =
@@ -108,6 +110,7 @@ fn todo_change(input: &Value) -> Option<TodoChange> {
                     let status = status_of(&t["status"]).flatten()?;
                     Some(TodoItem { id: (i + 1).to_string(), subject: subject(&t["content"])?, status })
                 })
+                .take(TODO_MAX_ITEMS)
                 .collect();
             Some(TodoChange::Replace { items })
         }
@@ -310,7 +313,7 @@ pub fn selected_lines(text: &str, range: std::ops::Range<usize>) -> Option<(u32,
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentState, Agents, HookCommand, HookSignal, SUBJECT_MAX_CHARS, TodoChange, TodoItem, TodoStatus};
+    use super::{AgentState, Agents, HookCommand, HookSignal, SUBJECT_MAX_CHARS, TODO_MAX_ITEMS, TodoChange, TodoItem, TodoStatus};
     use super::{hook_config, mention, parse_terminal_id, selected_lines, signal_from_hook};
     use serde_json::json;
 
@@ -413,6 +416,17 @@ mod tests {
             "tool_input": {"subject": "長".repeat(5000)}, "tool_response": {"task": {"id": "1"}}});
         let Some(HookSignal::Todo { change: TodoChange::Create { subject, .. } }) = signal_from_hook(&v) else { panic!() };
         assert_eq!(subject.chars().count(), SUBJECT_MAX_CHARS);
+    }
+
+    /// TodoWrite の項目が多くても、IPC の 1 行（64KB）に収まるよう項目の数を切る。
+    #[test]
+    fn many_todos_fit_in_one_ipc_line() {
+        let todos: Vec<_> = (0..300).map(|_| json!({"content": "長".repeat(500), "status": "pending"})).collect();
+        let v = json!({"hook_event_name": "PostToolUse", "tool_name": "TodoWrite", "tool_input": {"todos": todos}});
+        let signal = signal_from_hook(&v).unwrap();
+        let Some(HookSignal::Todo { change: TodoChange::Replace { items } }) = Some(signal.clone()) else { panic!() };
+        assert_eq!(items.len(), TODO_MAX_ITEMS);
+        assert!(serde_json::to_string(&signal).unwrap().len() < 64 * 1024);
     }
 
     #[test]

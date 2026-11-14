@@ -42,6 +42,14 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
+/// 同じプラン（同じ rel と更新時刻）の台帳だけが消えた。Superpowers はプランを終えると台帳を消すため、
+/// 終わったプランとみなして隠す（台帳なしで作り直すと、終わったプランが 0/N に見えてしまう）。
+pub(crate) fn ledger_removed(prev: Option<&PlanStamp>, new: &PlanStamp) -> bool {
+    prev.is_some_and(|p| {
+        p.rel == new.rel && p.plan_mtime_ms == new.plan_mtime_ms && p.ledger_mtime_ms.is_some() && new.ledger_mtime_ms.is_none()
+    })
+}
+
 /// 幅の目標。route が無ければ 0、折りたたみなら ROUTE_COLLAPSED_W、それ以外は ROUTE_W。
 pub(crate) fn route_width(has_route: bool, collapsed: bool) -> f32 {
     match (has_route, collapsed) {
@@ -116,6 +124,12 @@ impl WorkspaceView {
     fn apply_plan_fetch(&mut self, project: ProjectId, result: io::Result<PlanFetch>, cx: &mut Context<Self>) {
         match result {
             Ok(PlanFetch::Changed { stamp, plan, ledger }) => {
+                let prev = self.plans.get(&project).and_then(|c| c.stamp.as_ref());
+                if ledger_removed(prev, &stamp) {
+                    self.plans.insert(project, PlanCache { stamp: Some(stamp), route: None, recent_only: false });
+                    cx.notify();
+                    return;
+                }
                 let recent = plan_is_recent(stamp.plan_mtime_ms, now_ms());
                 let started = plan_route(stamp.rel.as_str(), &plan, ledger.as_deref(), false);
                 let recent_only = started.is_none() && recent;
@@ -152,9 +166,14 @@ impl WorkspaceView {
         let active = self.workspace.active_project().map(|p| p.id);
         if active != self.route_project {
             self.route_project = active;
+            // 別のプロジェクトの輪の位置から動かさない。
+            self.ring_shown = false;
             self.check_plan(cx);
         }
         let route = active.and_then(|id| self.project_route(id));
+        if route.is_some() {
+            self.route_last = route.clone();
+        }
         let target = route_width(route.is_some(), self.route_collapsed);
         let duration = match (self.reduced_motion, target > self.route_w.target()) {
             (true, _) => REDUCED,
@@ -184,10 +203,12 @@ impl WorkspaceView {
         let width = self.route_w.value(now);
         let project = self.workspace.active_project()?;
         let root = project.root.clone();
-        let route = self.project_route(project.id)?;
         if width < 0.5 {
+            self.route_last = None;
             return None;
         }
+        // 消えていく間（プランも Todo も無くなった直後）は、最後に出したものを描く。
+        let route = self.project_route(project.id).or_else(|| self.route_last.clone())?;
         let theme = *cx.global::<Theme>();
         let collapsed = self.route_collapsed;
         let inner = if collapsed {
@@ -329,7 +350,25 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{STATION_H, plan_location, ring_y, route_width};
+    use super::{STATION_H, ledger_removed, plan_location, ring_y, route_width};
+    use fude_fs::RelPath;
+    use fude_fs::plans::PlanStamp;
+
+    #[test]
+    fn finished_plan_is_hidden_when_its_ledger_goes() {
+        let stamp = |rel: &str, plan: u64, ledger: Option<u64>| PlanStamp {
+            rel: RelPath::new(rel).unwrap(),
+            plan_mtime_ms: plan,
+            ledger_mtime_ms: ledger,
+        };
+        let running = stamp("docs/superpowers/plans/p.md", 10, Some(20));
+        assert!(ledger_removed(Some(&running), &stamp("docs/superpowers/plans/p.md", 10, None)));
+        // プランが書き換わった、別のプランになった、初めて見た、台帳が増えた、はどれも違う。
+        assert!(!ledger_removed(Some(&running), &stamp("docs/superpowers/plans/p.md", 11, None)));
+        assert!(!ledger_removed(Some(&running), &stamp("docs/superpowers/plans/q.md", 10, None)));
+        assert!(!ledger_removed(None, &stamp("docs/superpowers/plans/p.md", 10, None)));
+        assert!(!ledger_removed(Some(&stamp("docs/superpowers/plans/p.md", 10, None)), &running));
+    }
     use fude_core::location::FileLocation;
     use fude_core::workspace::ProjectRoot;
     use std::path::PathBuf;

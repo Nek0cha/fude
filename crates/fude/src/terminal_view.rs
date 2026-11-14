@@ -345,6 +345,12 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        // 離したことを取りこぼした（ウィンドウの外で離した、ドラッグ中に切り替えた）なら、ここで離したことにする。
+        if let Some(key) = self.mouse_down
+            && ev.pressed_button.is_none()
+        {
+            self.release_mouse(key, ev.position, &ev.modifiers);
+        }
         if let Some(key) = self.mouse_down {
             self.report_mouse(key, MouseAction::Move, ev.position, &ev.modifiers);
             return;
@@ -697,6 +703,19 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| this.on_right_click(ev, window, cx)))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| this.on_mouse_move(ev, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, cx| this.on_mouse_up(ev, cx)))
+            // 中ボタンは、アプリがマウスを求めているときだけ報告する（fude 側の操作は割り当てていない）。
+            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, _| {
+                this.mouse_cell = None;
+                if this.report_mouse(MouseKey::Middle, MouseAction::Press, ev.position, &ev.modifiers) {
+                    this.mouse_down = Some(MouseKey::Middle);
+                }
+            }))
+            .on_mouse_up(MouseButton::Middle, cx.listener(|this, ev: &MouseUpEvent, _, _| {
+                this.release_mouse(MouseKey::Middle, ev.position, &ev.modifiers);
+            }))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(|this, ev: &MouseUpEvent, _, _| {
+                this.release_mouse(MouseKey::Middle, ev.position, &ev.modifiers);
+            }))
             .on_mouse_up(MouseButton::Right, cx.listener(|this, ev: &MouseUpEvent, _, _| {
                 this.release_mouse(MouseKey::Right, ev.position, &ev.modifiers);
             }))

@@ -158,7 +158,8 @@ fn host_exe() -> Option<String> {
 
 fn print_hook_config() {
     let Ok(exe) = std::env::current_exe() else { return };
-    let config = fude_core::claude::hook_config(&fude_core::claude::HookCommand::Exec(exe.to_string_lossy().into_owned()));
+    // WSL は shell 形式にする（§5.8。パレットの「hook の設定をコピー」と同じ形）。
+    let config = fude_core::claude::hook_config(&fude_core::claude::HookCommand::Shell(exe.to_string_lossy().into_owned()));
     println!("{}", serde_json::to_string_pretty(&config).unwrap_or_default());
 }
 
