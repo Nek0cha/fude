@@ -23,7 +23,7 @@ use crate::language::language_for;
 use crate::theme::{Theme, mono_font, popup_shadow, size};
 use crate::title_row::icon;
 
-gpui_kit::actions!(file_view, [SaveFile, LeaveEditor, SendToClaude]);
+gpui_kit::actions!(file_view, [SaveFile, LeaveEditor, SendToClaude, ToggleMarkdownMode]);
 
 /// Esc でターミナルへ戻る（FileView の文脈）。エディタ列は閉じない。
 pub fn bind_file_view_keys(cx: &mut App) {

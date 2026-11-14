@@ -52,13 +52,14 @@ gpui_kit::actions!(
 
 /// Command と文脈を GPUI のキーバインドにする。
 fn binding(key: &'static str, command: Command, context: Option<&'static str>) -> KeyBinding {
-    use crate::file_view::{SaveFile, SendToClaude};
+    use crate::file_view::{SaveFile, SendToClaude, ToggleMarkdownMode};
     use crate::tree_view::ToggleTree;
     match command {
         Command::Close => KeyBinding::new(key, CloseItem, context),
         Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
         Command::Save => KeyBinding::new(key, SaveFile, context),
         Command::SendToClaude => KeyBinding::new(key, SendToClaude, context),
+        Command::ToggleMarkdownMode => KeyBinding::new(key, ToggleMarkdownMode, context),
         Command::OpenPalette => KeyBinding::new(key, OpenPalette, context),
         Command::GoToFile => KeyBinding::new(key, GoToFile, context),
         Command::FindInFiles => KeyBinding::new(key, FindInFiles, context),
@@ -101,6 +102,7 @@ fn default_binding(key: &'static str, command: Command) -> KeyBinding {
         | Command::ToggleTree
         | Command::Save
         | Command::SendToClaude
+        | Command::ToggleMarkdownMode
         | Command::OpenPalette
         | Command::GoToFile
         | Command::FindInFiles
@@ -640,7 +642,7 @@ impl WorkspaceView {
         let Some(path) = self.session_path.clone() else { return };
         let geom = geom_from_bounds(window.window_bounds());
         self.last_geom = Some(geom.clone());
-        let data = SessionData::capture_keeping(&self.workspace, Some(geom), self.last_session.as_ref());
+        let data = SessionData::capture_keeping(&self.workspace, Some(geom), false, self.last_session.as_ref());
         if data.has_projects() {
             self.last_session = Some(data.clone());
         }
@@ -669,7 +671,7 @@ impl WorkspaceView {
         let Some(path) = self.session_path.as_ref() else { return };
         self.save_task = None;
         self.pending = None;
-        let data = SessionData::capture_keeping(&self.workspace, self.last_geom.clone(), self.last_session.as_ref());
+        let data = SessionData::capture_keeping(&self.workspace, self.last_geom.clone(), false, self.last_session.as_ref());
         if self.saved.as_ref() == Some(&data) {
             return;
         }

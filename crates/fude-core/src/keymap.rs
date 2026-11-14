@@ -42,6 +42,8 @@ pub enum Command {
     ToggleRouteMap,
     /// 開いているファイル（選んでいれば行の範囲）を、最後に使ったターミナルに `@` で入力する。ファイルの中だけで効く。
     SendToClaude,
+    /// Markdown の表示モードとソースモードの切り替え。ファイルの中だけで効く。
+    ToggleMarkdownMode,
 }
 
 /// ターミナル以外にフォーカスがあるときだけ効かせる文脈。
@@ -111,6 +113,7 @@ pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'sta
         Platform::MacOs => vec![
             ("cmd-s", Command::Save, FILE_VIEW),
             ("cmd-shift-l", Command::SendToClaude, FILE_VIEW),
+            ("cmd-e", Command::ToggleMarkdownMode, FILE_VIEW),
             ("cmd-f", Command::FindInTerminal, TERMINAL),
             // gpui-kit の入力欄は ⌘⇧F を置換に割り当てているため、全体検索を優先させる（置換は ⌘⌥F）。
             ("cmd-shift-f", Command::FindInFiles, INPUT),
@@ -120,6 +123,8 @@ pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'sta
             ("ctrl-b", Command::ToggleTree, NOT_TERMINAL),
             ("ctrl-s", Command::Save, FILE_VIEW),
             ("ctrl-shift-l", Command::SendToClaude, FILE_VIEW),
+            // Ctrl+E はシェル（行末へ）に渡すため、ファイルの中だけで効かせる。
+            ("ctrl-e", Command::ToggleMarkdownMode, FILE_VIEW),
             ("ctrl-k", Command::OpenPalette, NOT_TERMINAL),
             ("ctrl-p", Command::GoToFile, NOT_TERMINAL),
             ("ctrl-\\", Command::ToggleRouteMap, NOT_TERMINAL),
@@ -222,12 +227,12 @@ mod tests {
     }
 
     #[test]
-    fn file_view_has_only_save_and_send() {
-        // 計画5の右パネルの履歴のキー（戻る／進む）は無くした。ファイルの中で効くのは保存と「Claude に渡す」だけ。
+    fn file_view_has_only_save_send_and_markdown() {
+        // 計画5の右パネルの履歴のキー（戻る／進む）は無くした。ファイルの中で効くのは保存、「Claude に渡す」、表示／ソースの切り替えだけ。
         for platform in BOTH {
             for (key, command, context) in context_bindings(platform) {
                 if context == FILE_VIEW {
-                    assert!(matches!(command, Command::Save | Command::SendToClaude), "{key}");
+                    assert!(matches!(command, Command::Save | Command::SendToClaude | Command::ToggleMarkdownMode), "{key}");
                 }
             }
         }
@@ -277,5 +282,12 @@ mod tests {
             let unique: HashSet<&str> = bindings.iter().map(|(k, _)| *k).collect();
             assert_eq!(unique.len(), bindings.len());
         }
+    }
+
+    #[test]
+    fn markdown_toggle_is_file_view_only() {
+        assert!(context_bindings(Platform::MacOs).contains(&("cmd-e", Command::ToggleMarkdownMode, FILE_VIEW)));
+        assert!(context_bindings(Platform::Windows).contains(&("ctrl-e", Command::ToggleMarkdownMode, FILE_VIEW)));
+        assert!(!default_bindings(Platform::Windows).iter().any(|(k, _)| *k == "ctrl-e"));
     }
 }

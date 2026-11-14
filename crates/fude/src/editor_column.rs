@@ -564,9 +564,7 @@ impl WorkspaceView {
 
     /// ツリーで from の名前が to に変わった。タブ、表のキー、FileView の相対パスを合わせる。
     pub(crate) fn editor_renamed(&mut self, project: ProjectId, from: &str, to: &str, cx: &mut Context<Self>) {
-        if let Some(tabs) = self.workspace.editor_mut(project) {
-            tabs.rename(from, to);
-        }
+        self.workspace.rename_paths(project, from, to);
         let Some(slot) = self.editors.get_mut(&project) else { return };
         slot.rename(from, to);
         for (rel, view) in &slot.views {

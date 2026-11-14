@@ -84,6 +84,8 @@ pub struct Project {
     pub shell: Option<ShellKind>,
     /// エディタ列のファイルのタブの並び。ビューが更新する。
     pub editor: EditorTabs,
+    /// ピン列に留めた Markdown（相対パス）。
+    pub pin: Option<String>,
 }
 
 impl Project {
@@ -157,7 +159,7 @@ impl Workspace {
         };
         let name = root.name();
         let active_tab = tabs.first().map(|t| t.id);
-        self.projects.push(Project { id, root, name, active_tab, tabs, shell, editor: EditorTabs::default() });
+        self.projects.push(Project { id, root, name, active_tab, tabs, shell, editor: EditorTabs::default(), pin: None });
         self.active = Some(id);
         id
     }
@@ -171,6 +173,7 @@ impl Workspace {
         active_tab: Option<usize>,
         shell: Option<ShellKind>,
         editor: EditorTabs,
+        pin: Option<String>,
     ) -> ProjectId {
         let id = ProjectId(self.alloc());
         let mut built = Vec::new();
@@ -181,7 +184,7 @@ impl Workspace {
         }
         let active = built.get(active_tab.unwrap_or(0)).or(built.first()).map(|t| t.id);
         let name = root.name();
-        self.projects.push(Project { id, root, name, tabs: built, active_tab: active, shell, editor });
+        self.projects.push(Project { id, root, name, tabs: built, active_tab: active, shell, editor, pin });
         id
     }
 
@@ -189,6 +192,22 @@ impl Workspace {
     pub(crate) fn select_restored(&mut self, index: Option<usize>) {
         let i = index.filter(|&i| i < self.projects.len()).unwrap_or(0);
         self.active = self.projects.get(i).map(|p| p.id);
+    }
+
+    /// ピン列に留める Markdown を替える（None で外す）。
+    pub fn set_pin(&mut self, id: ProjectId, rel: Option<String>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
+            p.pin = rel;
+        }
+    }
+
+    /// ツリーで from の名前が to に変わった。エディタのタブとピンを合わせる（from がフォルダならその下も）。
+    pub fn rename_paths(&mut self, id: ProjectId, from: &str, to: &str) {
+        let Some(p) = self.projects.iter_mut().find(|p| p.id == id) else { return };
+        p.editor.rename(from, to);
+        if let Some(new) = p.pin.as_deref().and_then(|pin| renamed_path(pin, from, to)) {
+            p.pin = Some(new);
+        }
     }
 
     pub fn editor_mut(&mut self, id: ProjectId) -> Option<&mut EditorTabs> {
@@ -341,6 +360,15 @@ fn remove_tab(p: &mut Project, id: TabId) {
 
 /// OSC の題名を表示用に整える。前後の空白を除き、空なら None。
 /// 絶対パスなら、ファイル名から拡張子を除いたものにする（pwsh が自分の exe のパスを題名にするため）。
+/// path が from そのものか from の下なら、to に置き換えたもの。
+fn renamed_path(path: &str, from: &str, to: &str) -> Option<String> {
+    if path == from {
+        return Some(to.to_string());
+    }
+    let rest = path.strip_prefix(from)?.strip_prefix('/')?;
+    Some(format!("{to}/{rest}"))
+}
+
 pub fn display_title(raw: &str) -> Option<String> {
     let title = raw.trim();
     if title.is_empty() {
@@ -686,5 +714,19 @@ mod tests {
         assert_eq!(again, a);
         assert_eq!(ws.projects().len(), 1);
         assert_eq!(active(&ws).default_shell(), ubuntu);
+    }
+
+    #[test]
+    fn rename_moves_pin() {
+        let mut ws = Workspace::default();
+        let id = ws.open_project(ProjectRoot::Local(PathBuf::from("/w")));
+        ws.set_pin(id, Some("docs/a.md".into()));
+        ws.rename_paths(id, "docs", "notes");
+        assert_eq!(ws.projects()[0].pin.as_deref(), Some("notes/a.md"));
+        ws.rename_paths(id, "notes/a.md", "notes/b.md");
+        assert_eq!(ws.projects()[0].pin.as_deref(), Some("notes/b.md"));
+        // 名前が前方だけ同じものは動かさない。
+        ws.rename_paths(id, "note", "x");
+        assert_eq!(ws.projects()[0].pin.as_deref(), Some("notes/b.md"));
     }
 }
