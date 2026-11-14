@@ -18,6 +18,7 @@ fn main() {
     let id = std::fs::read_to_string(&id_file).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let code = match (windows, id) {
         (true, Some(id)) if bin.is_file() => {
+            warn_if_stale(&bin, &manifest);
             let bin = bin.canonicalize().unwrap();
             format!("pub const LINUX_BIN: Option<(&[u8], &str)> = Some((include_bytes!({:?}), {id:?}));\n", bin)
         }
@@ -28,6 +29,34 @@ fn main() {
         (false, _) => "pub const LINUX_BIN: Option<(&[u8], &str)> = None;\n".to_string(),
     };
     std::fs::write(out, code).unwrap();
+}
+
+/// fude-linux の元のソース（fude-wsl と、それが使う fude-core、fude-fs）。
+const LINUX_SOURCES: [&str; 3] = ["fude-wsl", "fude-core", "fude-fs"];
+
+/// fude-linux がソースより古ければ警告する。古いまま埋め込むと、WSL に置く fude が新しい機能
+/// （fude hook など）を知らず、版の印も変わらないため置き直されない。
+fn warn_if_stale(bin: &std::path::Path, manifest: &std::path::Path) {
+    let Ok(built) = std::fs::metadata(bin).and_then(|m| m.modified()) else { return };
+    for name in LINUX_SOURCES {
+        let src = manifest.join("..").join(name).join("src");
+        println!("cargo:rerun-if-changed={}", src.display());
+        if newest_mtime(&src).is_some_and(|t| t > built) {
+            println!("cargo:warning=target/linux/fude-linux が crates/{name} より古い（WSL の中で scripts/build-linux.sh を実行する）");
+            return;
+        }
+    }
+}
+
+fn newest_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            if meta.is_dir() { newest_mtime(&e.path()) } else { meta.modified().ok() }
+        })
+        .max()
 }
 
 /// assets/file-icons/*.svg を (ファイル名, 中身) の表にする。
