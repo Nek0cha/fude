@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod git;
 mod local;
+pub mod plans;
 pub mod procs;
 mod remote;
 pub mod search;
@@ -142,6 +143,8 @@ pub trait ProjectFs: Send + Sync {
     fn git_diff(&self, rel: &RelPath) -> io::Result<String>;
     /// 全体検索（search::search_dir と同じ規則）。正しくない条件は InvalidInput。
     fn search(&self, query: &search::SearchQuery) -> io::Result<search::SearchResults>;
+    /// 最も新しいプランと台帳（plans::plan_files と同じ規則）。印が known と同じなら Unchanged。
+    fn plan_files(&self, known: Option<&plans::PlanStamp>) -> io::Result<plans::PlanFetch>;
 }
 
 #[cfg(test)]

@@ -65,6 +65,10 @@ fn handle(req: Request, payload: &[u8], build_id: &str) -> (Response, Vec<u8>) {
             let json = serde_json::to_vec(&results).map_err(io::Error::other)?;
             Ok((Response::Matches, json))
         }),
+        Request::PlanFiles { root, known } => local(&root).and_then(|fs| fs.plan_files(known.as_ref())).and_then(|fetch| {
+            let json = serde_json::to_vec(&fetch).map_err(io::Error::other)?;
+            Ok((Response::Plan, json))
+        }),
         Request::Busy { terminal_id } => crate::procs::terminal_busy(Path::new("/proc"), &terminal_id)
             .map(|busy| (Response::Busy { busy }, Vec::new())),
     };
@@ -200,5 +204,17 @@ mod tests {
         let results: SearchResults = serde_json::from_slice(&out[0].1).unwrap();
         assert_eq!(results.files[0].rel.as_str(), "a.txt");
         assert!(matches!(out[1].0, Response::Error { invalid_input: true, .. }), "{:?}", out[1]);
+    }
+
+    #[test]
+    fn plan_files_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs/superpowers/plans")).unwrap();
+        std::fs::write(dir.path().join("docs/superpowers/plans/p.md"), "# P
+").unwrap();
+        let out = run(&[(Request::PlanFiles { root: root_of(&dir), known: None }, vec![])]);
+        assert_eq!(out[0].0, Response::Plan);
+        let fetch: crate::plans::PlanFetch = serde_json::from_slice(&out[0].1).unwrap();
+        assert!(matches!(fetch, crate::plans::PlanFetch::Changed { .. }));
     }
 }
