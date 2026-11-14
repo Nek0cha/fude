@@ -6,6 +6,7 @@ pub mod git_head;
 pub mod keymap;
 pub mod keys;
 pub mod location;
+pub mod markdown;
 pub mod motion;
 pub mod panel;
 pub mod palette;
