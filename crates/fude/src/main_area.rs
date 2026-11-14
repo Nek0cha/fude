@@ -59,13 +59,15 @@ pub(crate) fn render_main_area(
         // ターミナルが 0 枚なら、列の出入りの途中にできる隙間を右端に寄せる。
         None => row = row.child(div().flex_1()),
     }
-    let mut overlays: Vec<Div> = Vec::new();
-    // 重ねるツリーは、エディタ列（並べていても重ねていても）の左隣に置く。並べたエディタ列の右にはピン列がある。
-    let pin_w = pin.as_ref().filter(|p| p.place == Place::Inline).map_or(px(0.), |p| p.w);
+    // 重ねた列は (順位, 要素) で集め、最後に順位順に描く。順位は、ピン列 0、ツリー 1、エディタ列 2（一番上）。
+    let mut overlays: Vec<(u8, Div)> = Vec::new();
+    // 重ねるツリーは、エディタ列の左隣に置く。エディタ列を並べているときは、その右にピン列（並べていれば）がある。
+    // ピン列を重ねているときも、ツリーはピン列の左に置く（ピン列の幅は w で取る）。
+    let pin_span = pin.as_ref().map_or(px(0.), |p| p.w);
     let editor_right = match editor.as_ref().map(|e| e.place) {
-        Some(Place::Inline) => editor.as_ref().map_or(px(0.), |e| e.w) + pin_w,
+        Some(Place::Inline) => editor.as_ref().map_or(px(0.), |e| e.w) + pin_span,
         Some(Place::Overlay) => editor.as_ref().map_or(px(0.), |e| e.w),
-        _ => pin_w,
+        _ => pin_span,
     };
     let overlay = |c: ColumnEl, right: Pixels| {
         div()
@@ -82,7 +84,8 @@ pub(crate) fn render_main_area(
             .shadow(popup_shadow())
             .child(c.el)
     };
-    for (c, is_tree) in [(tree, true), (editor, false), (pin, false)] {
+    // 並べる列は左から、ツリー、エディタ列、ピン列の順。rank は重ねるときの上下の順（大きいほど上）。
+    for (c, rank) in [(tree, 1u8), (editor, 2), (pin, 0)] {
         let Some(c) = c else { continue };
         let place = c.place;
         match place {
@@ -93,12 +96,16 @@ pub(crate) fn render_main_area(
                 }
                 row = row.child(div().w(c.w).flex_shrink_0().h_full().overflow_hidden().opacity(c.opacity).child(c.el));
             }
-            Place::Overlay => overlays.push(overlay(c, if is_tree { editor_right } else { px(0.) })),
+            Place::Overlay => {
+                let right = if rank == 1 { editor_right } else { px(0.) };
+                overlays.push((rank, overlay(c, right)));
+            }
         }
         if place == Place::Inline {
             first = false;
         }
     }
-    // エディタ列を後に描き、ツリーより上に出す。
-    row.children(overlays)
+    // ピン列の上にツリー、その上にエディタ列を出す。
+    overlays.sort_by_key(|(rank, _)| *rank);
+    row.children(overlays.into_iter().map(|(_, d)| d))
 }

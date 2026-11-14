@@ -71,6 +71,9 @@ enum ScrollLeader {
 /// ホイールやキーのあと、動きが続く間は描き直してスクロールを揃え続ける。
 const SYNC_FOLLOW: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// 打ち終わるまで待ってから、ブロックの位置を裏で数える（打っている間は数えない）。
+const SYNC_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// スクロールを揃えるために、テキストが変わるまで覚えておくもの。
 struct SyncText {
     /// 最上位のブロックの開始行（0 始まり）。
@@ -79,6 +82,12 @@ struct SyncText {
     total: u32,
     /// 各行の頭のバイト位置。
     starts: Vec<usize>,
+}
+
+/// テキストから SyncText を作る（重いので裏で呼ぶ）。
+fn sync_text(text: &str) -> SyncText {
+    let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    SyncText { blocks: block_lines(text), total: starts.len() as u32, starts }
 }
 
 /// ソースの見えている所。
@@ -121,14 +130,20 @@ fn source_view(e: &EditorState, starts: &[usize]) -> Option<SourceView> {
     Some(SourceView { top, viewport_top, per_line })
 }
 
-/// side の上でホイールを回したら、side をスクロールの先導役にする。エディタもプレビューも
-/// ホイールの出来事を止めるため、キャプチャの段階で見る。キャプチャは登録の順に呼ばれ、プレビューは
+/// side の上でホイールを回したり押したりしたら、side をスクロールの先導役にする。エディタもプレビューも
+/// これらの出来事を止めるため、キャプチャの段階で見る。キャプチャは登録の順に呼ばれ、プレビューは
 /// キャプチャの段階でも止めるので、中身より先に描いて先に登録する。
 fn scroll_watch(view: WeakEntity<FileView>, side: ScrollLeader) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
+            let on_scroll = view.clone();
             window.on_mouse_event(move |ev: &ScrollEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture && bounds.contains(&ev.position) {
+                    on_scroll.update(cx, |this, cx| this.lead(side, cx)).ok();
+                }
+            });
+            window.on_mouse_event(move |ev: &MouseDownEvent, phase, _, cx| {
                 if phase == DispatchPhase::Capture && bounds.contains(&ev.position) {
                     view.update(cx, |this, cx| this.lead(side, cx)).ok();
                 }
@@ -236,6 +251,8 @@ pub struct FileView {
     leader: ScrollLeader,
     /// 先導役が変わったか動いた時刻。SYNC_FOLLOW の間は描き直し続ける。
     lead_at: Option<std::time::Instant>,
+    /// ブロックの位置を裏で数える仕事。新しい変更が来ると捨てられ（取り消され）、数え直す。
+    sync_task: Option<Task<()>>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -266,6 +283,7 @@ impl FileView {
             blocks: None,
             leader: ScrollLeader::Source,
             lead_at: None,
+            sync_task: None,
             focus: cx.focus_handle(),
             _subs: Vec::new(),
         };
@@ -388,10 +406,29 @@ impl FileView {
             return;
         }
         let text = editor.read(cx).value().to_string();
+        // 数え直すまでは揃えない（古い位置で揃えると跳ねるため）。
         self.blocks = None;
         match &self.preview {
             Some(p) => p.set_text(&text, cx),
             None => self.preview = Some(MdPreview::new(&text, self.root.clone(), self.rel.clone(), cx)),
+        }
+        let counted = text.clone();
+        self.sync_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SYNC_DEBOUNCE).await;
+            let sync = cx.background_executor().spawn(async move { sync_text(&counted) }).await;
+            this.update(cx, |this, cx| {
+                this.blocks = Some(sync);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// ソースにフォーカスがあるか。キーで先導役を決めるときに使う。
+    fn source_focused(&self, window: &Window, cx: &App) -> bool {
+        match &self.body {
+            Body::Text { editor, .. } => editor.read(cx).focus_handle(cx).is_focused(window),
+            _ => false,
         }
     }
 
@@ -416,11 +453,7 @@ impl FileView {
         if items == 0 {
             return;
         }
-        if self.blocks.is_none() {
-            let text = editor.read(cx).value().to_string();
-            let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
-            self.blocks = Some(SyncText { blocks: block_lines(&text), total: starts.len() as u32, starts });
-        }
+        // 数え直しの最中（blocks が無い）は、今回は揃えない。数え終わったら notify で描き直す。
         let Some(sync) = self.blocks.as_ref() else { return };
         let Some(source) = source_view(editor.read(cx), &sync.starts) else { return };
         let matched = sync.blocks.len() == items;
@@ -1059,8 +1092,11 @@ impl Render for FileView {
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_from_key(cx)))
             .on_action(cx.listener(|this, _: &SendToClaude, _, cx| this.send_to_claude(cx)))
             .on_action(cx.listener(|this, _: &ToggleMarkdownMode, _, cx| this.toggle_md_mode(cx)))
-            // キーで動かしたら、ソースがスクロールを先導する。
-            .on_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
+            // ソースにフォーカスがあるキーで動かしたら、ソースがスクロールを先導する（プレビューを読んでいるキーでは奪わない）。
+            .on_key_down(cx.listener(|this, _: &KeyDownEvent, window, cx| {
+                if !this.source_focused(window, cx) {
+                    return;
+                }
                 if this.leader != ScrollLeader::Source || this.lead_at.is_none() {
                     this.lead(ScrollLeader::Source, cx);
                 } else {

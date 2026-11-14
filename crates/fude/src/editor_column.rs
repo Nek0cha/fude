@@ -228,12 +228,16 @@ impl WorkspaceView {
             Place::Inline => TREE_W * tree_presence.travel(now),
             _ => TREE_W,
         };
+        // 重ねたピン列は幅を取らないので、並べたときの取り分だけ引く。ピン列の表示の幅は重ねても PIN_W。
         let pin_w = match c.pin {
             Place::Inline => PIN_W * pin_presence.travel(now),
-            _ => 0.0,
+            _ => PIN_W,
         };
-        let editor_target = {
-            let fill = main - pin_w - if c.tree == Place::Inline { tree_w } else { 0.0 };
+        let pin_inline_w = if c.pin == Place::Inline { pin_w } else { 0.0 };
+        let editor_target = if c.editor == Place::Overlay {
+            c.editor_w
+        } else {
+            let fill = main - pin_inline_w - if c.tree == Place::Inline { tree_w } else { 0.0 };
             with_terms.editor_w + (fill - with_terms.editor_w) * share.clamp(0.0, 1.0)
         };
         let editor_w = match c.editor {
