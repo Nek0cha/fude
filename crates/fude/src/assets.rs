@@ -30,6 +30,7 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     Pencil,
     Trash,
     Replace,
+    Bell,
 ]);
 
 mod embedded {

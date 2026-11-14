@@ -191,6 +191,10 @@ pub struct WorkspaceView {
     pub(crate) workspace: Workspace,
     /// ペインごとの Claude Code の状態（返事待ち、タスク）。hook の信号で変わる。
     pub(crate) agents: Agents,
+    /// 返事待ちの枠の濃さ（0〜1）。
+    pub(crate) wait_frame: Fade,
+    /// 最後に OS に出したバッジの数。
+    last_badge: usize,
     /// ピル用のブランチ名。開いたときと、ウィンドウが前面に来たときに読み直す。
     pub(crate) branches: HashMap<ProjectId, Option<String>>,
     pub(crate) hover: HoverFades,
@@ -305,6 +309,8 @@ impl WorkspaceView {
         let mut this = Self {
             workspace,
             agents: Agents::default(),
+            wait_frame: Fade::settled(0.0),
+            last_badge: 0,
             branches: HashMap::new(),
             hover: HoverFades::default(),
             should_move: false,
@@ -438,9 +444,44 @@ impl WorkspaceView {
     }
 
     /// Claude Code の hook の信号をペインに当てる。新しく返事待ちになったら true。知らないペインは無視する。
-    pub(crate) fn on_hook(&mut self, terminal: &str, signal: HookSignal, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+    pub(crate) fn on_hook(&mut self, terminal: &str, signal: HookSignal, window: &mut Window, _cx: &mut Context<Self>) -> bool {
         let Some((_, pane)) = parse_terminal_id(terminal).and_then(|raw| self.workspace.pane_by_raw(raw)) else { return false };
-        self.agents.apply(pane.raw(), signal)
+        let became = self.agents.apply(pane.raw(), signal);
+        if crate::attention::should_request_attention(became, window.is_window_active()) {
+            crate::attention::request_attention(window);
+        }
+        became
+    }
+
+    /// 返事待ちの枠を動かし、タスクバー／Dock のバッジを数に合わせる。
+    fn observe_waiting(&mut self, window: &mut Window, now: Instant) {
+        use crate::theme::motion::{REDUCED, WAIT_IN, WAIT_OUT, ease_in_out};
+        let count = self.agents.waiting_count();
+        let (target, duration) = if count > 0 { (1.0, WAIT_IN) } else { (0.0, WAIT_OUT) };
+        let duration = if self.reduced_motion { REDUCED } else { duration };
+        self.wait_frame.animate_to(target, duration, ease_in_out, now);
+        if self.wait_frame.is_animating(now) {
+            window.request_animation_frame();
+        }
+        if count != self.last_badge {
+            self.last_badge = count;
+            crate::attention::set_badge(window, count);
+        }
+    }
+
+    /// どこかに返事待ちがある間、ウィンドウの縁に出す warn の枠（にじませない）。
+    fn render_wait_frame(&self, theme: &Theme, now: Instant) -> Option<Div> {
+        let v = self.wait_frame.value(now);
+        (v > 0.0).then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .rounded(crate::theme::size::WINDOW_CORNER)
+                .border(crate::theme::size::WAIT_FRAME_W)
+                .border_color(Rgba { a: theme.warn.a * v, ..theme.warn })
+        })
     }
 
     pub(crate) fn pane_waiting(&self, pane: PaneId) -> bool {
@@ -795,6 +836,7 @@ impl Render for WorkspaceView {
         }
         self.freeze_terminals(self.layout_animating(now), cx);
         self.schedule_save(window, cx);
+        self.observe_waiting(window, now);
         let home = self.workspace.projects().is_empty();
         if self.showing_home != Some(home) {
             // 最初の描画ではフェードしない。
@@ -830,6 +872,7 @@ impl Render for WorkspaceView {
         let tree_menu = self.render_tree_menu(window, cx, now);
         let dialog = self.render_dialog(window, cx, now);
         let palette = self.render_palette(window, cx, now);
+        let wait_frame = self.render_wait_frame(&theme, now);
 
         div()
             .id("workspace")
@@ -890,6 +933,7 @@ impl Render for WorkspaceView {
             .children(tree_menu)
             .children(palette)
             .children(dialog)
+            .children(wait_frame)
     }
 }
 

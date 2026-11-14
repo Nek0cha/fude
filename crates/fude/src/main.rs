@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod anim;
+mod attention;
 mod assets;
 mod changes_menu;
 mod cli;

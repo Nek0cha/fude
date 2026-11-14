@@ -186,7 +186,7 @@ impl WorkspaceView {
             .bg(bg)
             .text_color(fg)
             .text_size(px(13.))
-            .child(icon(IconName::Terminal, fg))
+            .child(if self.tab_waiting(tab) { icon(IconName::Bell, theme.warn) } else { icon(IconName::Terminal, fg) })
             .child(div().min_w_0().overflow_hidden().whitespace_nowrap().child(tab.title()))
             .child(close)
             .on_click(cx.listener(move |this, _, _, cx| {

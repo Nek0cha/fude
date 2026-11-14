@@ -81,6 +81,20 @@ impl WorkspaceView {
                     .bg(self.hover_bg(key, theme.bg_hover, now)),
             )
             .child(marker)
+            // 返事待ちの点（§5.8）。アイコンの大きさは変えない。
+            .when(self.project_waiting(project), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(-2.))
+                        .right(px(-2.))
+                        .size(px(8.))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(theme.bg_window)
+                        .bg(theme.warn),
+                )
+            })
             .child(
                 div()
                     .text_size(px(14.))
