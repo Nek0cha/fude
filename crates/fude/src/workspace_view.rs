@@ -46,6 +46,7 @@ gpui_kit::actions!(
         GoToFile,
         FindInFiles,
         FindInTerminal,
+        ToggleRouteMap,
     ]
 );
 
@@ -77,6 +78,7 @@ pub fn bind_keys(cx: &mut App) {
 fn default_binding(key: &'static str, command: Command) -> KeyBinding {
     match command {
         Command::NewTab => KeyBinding::new(key, NewTab, None),
+        Command::ToggleRouteMap => KeyBinding::new(key, ToggleRouteMap, None),
         Command::SplitTab => KeyBinding::new(key, SplitTab, None),
         Command::NextTab => KeyBinding::new(key, NextTab, None),
         Command::PrevTab => KeyBinding::new(key, PrevTab, None),
@@ -195,6 +197,20 @@ pub struct WorkspaceView {
     pub(crate) wait_frame: Fade,
     /// 最後に OS に出したバッジの数。
     last_badge: usize,
+    /// プロジェクトごとのプランの読み取り（路線図）。
+    pub(crate) plans: HashMap<ProjectId, crate::route_map::PlanCache>,
+    /// プランを確かめている最中のプロジェクト。
+    pub(crate) plan_checking: HashSet<ProjectId>,
+    /// 路線図の折りたたみ（全プロジェクトで 1 つ。保存しない）。
+    pub(crate) route_collapsed: bool,
+    /// 路線図の幅（px）と、実行中の輪の位置（駅の番号）。
+    pub(crate) route_w: Fade,
+    pub(crate) ring: Fade,
+    /// 前の描画で輪を出していたか（初めて出るときは動かさない）。
+    pub(crate) ring_shown: bool,
+    /// 前の描画の作業中のプロジェクト（変わったらすぐプランを確かめる）。
+    pub(crate) route_project: Option<ProjectId>,
+    pub(crate) plan_poll: Option<Task<()>>,
     /// ピル用のブランチ名。開いたときと、ウィンドウが前面に来たときに読み直す。
     pub(crate) branches: HashMap<ProjectId, Option<String>>,
     pub(crate) hover: HoverFades,
@@ -311,6 +327,14 @@ impl WorkspaceView {
             agents: Agents::default(),
             wait_frame: Fade::settled(0.0),
             last_badge: 0,
+            plans: HashMap::new(),
+            plan_checking: HashSet::new(),
+            route_collapsed: false,
+            route_w: Fade::settled(0.0),
+            ring: Fade::settled(0.0),
+            ring_shown: false,
+            route_project: None,
+            plan_poll: None,
             branches: HashMap::new(),
             hover: HoverFades::default(),
             should_move: false,
@@ -358,6 +382,7 @@ impl WorkspaceView {
         }
         this.refresh_active_branch(cx);
         this.load_distros(cx);
+        this.start_plan_poll(cx);
         this
     }
 
@@ -837,6 +862,7 @@ impl Render for WorkspaceView {
         self.freeze_terminals(self.layout_animating(now), cx);
         self.schedule_save(window, cx);
         self.observe_waiting(window, now);
+        self.observe_route_map(window, now, cx);
         let home = self.workspace.projects().is_empty();
         if self.showing_home != Some(home) {
             // 最初の描画ではフェードしない。
@@ -856,7 +882,7 @@ impl Render for WorkspaceView {
             self.render_home(cx, now)
         } else {
             let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
-            let main_w = window.viewport_size().width - crate::theme::size::RAIL_W;
+            let main_w = window.viewport_size().width - crate::theme::size::RAIL_W - px(self.route_map_width(now));
             let (tree, editor) = self.render_columns(main_w, now, cx);
             let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
             let share = active_tab.map_or(1.0, |t| self.anims.split_share(t.id, now));
@@ -865,6 +891,7 @@ impl Render for WorkspaceView {
         let main = main.opacity(self.screen_fade.value(now));
         let title_row = self.render_title_row(window, cx, now);
         let rail = self.render_rail(cx, now);
+        let route_map = self.render_route_map(now, cx);
         let menu = self.render_shell_menu(window, cx, now);
         let project_menu = self.render_project_menu(window, cx, now);
         let home_menu = self.render_home_menu(window, cx, now);
@@ -888,6 +915,7 @@ impl Render for WorkspaceView {
             }))
             .on_action(cx.listener(|this, _: &FindInFiles, window, cx| this.open_find_in_files(window, cx)))
             .on_action(cx.listener(|this, _: &FindInTerminal, window, cx| this.find_in_terminal(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleRouteMap, _, cx| this.toggle_route_map(cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.new_default_tab();
                 cx.notify();
@@ -924,6 +952,7 @@ impl Render for WorkspaceView {
                     .min_h_0()
                     .relative()
                     .child(rail)
+                    .children(route_map)
                     .child(div().flex_1().min_w_0().h_full().child(main)),
             )
             .children(menu)

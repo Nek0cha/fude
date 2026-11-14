@@ -45,10 +45,11 @@ pub enum PaletteCommand {
     FindInTerminal,
     NextTab,
     PrevTab,
+    ToggleRouteMap,
 }
 
 impl PaletteCommand {
-    pub const ALL: [PaletteCommand; 11] = [
+    pub const ALL: [PaletteCommand; 12] = [
         PaletteCommand::NewTerminal,
         PaletteCommand::SplitTerminal,
         PaletteCommand::ToggleTree,
@@ -60,6 +61,7 @@ impl PaletteCommand {
         PaletteCommand::FindInTerminal,
         PaletteCommand::NextTab,
         PaletteCommand::PrevTab,
+        PaletteCommand::ToggleRouteMap,
     ];
 
     /// 表示名。
@@ -76,6 +78,7 @@ impl PaletteCommand {
             PaletteCommand::FindInTerminal => "ターミナル内を検索",
             PaletteCommand::NextTab => "次のタブ",
             PaletteCommand::PrevTab => "前のタブ",
+            PaletteCommand::ToggleRouteMap => "路線図の表示切り替え",
         }
     }
 
@@ -93,6 +96,7 @@ impl PaletteCommand {
             PaletteCommand::FindInTerminal => "find search in terminal",
             PaletteCommand::NextTab => "next tab",
             PaletteCommand::PrevTab => "previous tab",
+            PaletteCommand::ToggleRouteMap => "toggle route map plan tasks",
         }
     }
 
@@ -111,6 +115,7 @@ impl PaletteCommand {
             PaletteCommand::Save => Some(Command::Save),
             PaletteCommand::NextTab => Some(Command::NextTab),
             PaletteCommand::PrevTab => Some(Command::PrevTab),
+            PaletteCommand::ToggleRouteMap => Some(Command::ToggleRouteMap),
             PaletteCommand::GoToFile => Some(Command::GoToFile),
             PaletteCommand::FindInFiles => Some(Command::FindInFiles),
             PaletteCommand::FindInTerminal => Some(Command::FindInTerminal),
@@ -203,6 +208,13 @@ mod tests {
         assert_eq!(key_label("cmd-}", Platform::MacOs), "⌘⇧]");
         assert_eq!(key_label("ctrl-{", Platform::Windows), "Ctrl+Shift+[");
         assert_eq!(key_hint(Command::NewTab, Platform::Windows).as_deref(), Some("Ctrl+Shift+T"));
+    }
+
+    #[test]
+    fn route_map_command() {
+        assert!(PaletteCommand::ALL.contains(&PaletteCommand::ToggleRouteMap));
+        assert_eq!(PaletteCommand::ToggleRouteMap.keymap_command(), Some(Command::ToggleRouteMap));
+        assert_eq!(key_label("ctrl-\\", Platform::Windows), "Ctrl+\\");
     }
 
     #[test]

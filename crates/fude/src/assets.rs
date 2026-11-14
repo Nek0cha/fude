@@ -31,6 +31,8 @@ gpui_kit::assets::icon_assets!(pub FudeAssets, [
     Trash,
     Replace,
     Bell,
+    Check,
+    ListTodo,
 ]);
 
 mod embedded {

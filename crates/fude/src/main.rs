@@ -25,6 +25,7 @@ mod popup;
 mod project_state;
 mod project_menu;
 mod rail;
+mod route_map;
 mod search_view;
 mod reduced_motion;
 mod shell_menu;

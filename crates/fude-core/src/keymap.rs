@@ -38,6 +38,8 @@ pub enum Command {
     FindInFiles,
     /// ターミナル内の検索欄を開く。ターミナルの中だけで効く。
     FindInTerminal,
+    /// 路線図の折りたたみの切り替え。
+    ToggleRouteMap,
 }
 
 /// ターミナル以外にフォーカスがあるときだけ効かせる文脈。
@@ -71,6 +73,7 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("cmd-k", Command::OpenPalette),
                 ("cmd-p", Command::GoToFile),
                 ("cmd-shift-f", Command::FindInFiles),
+                ("cmd-\\", Command::ToggleRouteMap),
             ],
             PROJECT_KEYS_MAC,
         ),
@@ -90,6 +93,7 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("ctrl-shift-k", Command::OpenPalette),
                 ("ctrl-shift-p", Command::GoToFile),
                 ("ctrl-shift-f", Command::FindInFiles),
+                ("ctrl-\\", Command::ToggleRouteMap),
             ],
             PROJECT_KEYS_WIN,
         ),
@@ -125,6 +129,12 @@ mod tests {
     use std::collections::HashSet;
 
     const BOTH: [Platform; 2] = [Platform::MacOs, Platform::Windows];
+
+    #[test]
+    fn route_map_key() {
+        assert!(default_bindings(Platform::MacOs).contains(&("cmd-\\", Command::ToggleRouteMap)));
+        assert!(default_bindings(Platform::Windows).contains(&("ctrl-\\", Command::ToggleRouteMap)));
+    }
 
     #[test]
     fn mac_new_tab_is_cmd_t() {

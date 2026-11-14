@@ -146,6 +146,8 @@ pub mod motion {
     /// 返事待ちの枠が出るときと消えるとき（§6.3）。
     pub const WAIT_IN: Duration = Duration::from_millis(300);
     pub const WAIT_OUT: Duration = Duration::from_millis(200);
+    /// 路線図の「実行中」の輪が次の駅へ動く時間（§6.3）。
+    pub const RING_MOVE: Duration = Duration::from_millis(240);
 
     pub fn ease_in_out(t: f32) -> f32 {
         if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0 }

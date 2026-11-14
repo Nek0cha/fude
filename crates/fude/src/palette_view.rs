@@ -519,6 +519,7 @@ impl WorkspaceView {
             PaletteCommand::NextTab => Box::new(NextTab),
             PaletteCommand::PrevTab => Box::new(PrevTab),
             PaletteCommand::FindInTerminal => Box::new(FindInTerminal),
+            PaletteCommand::ToggleRouteMap => Box::new(crate::workspace_view::ToggleRouteMap),
             PaletteCommand::Save => {
                 // 保存はファイルの中で効くので、選択中のファイルへフォーカスを移してから送る。
                 let Some(view) = self.active_editor_view() else { return };
