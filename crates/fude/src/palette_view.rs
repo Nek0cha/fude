@@ -548,6 +548,8 @@ impl WorkspaceView {
             PaletteCommand::ToggleVerticalTabs => return self.toggle_vertical_tabs(cx),
             PaletteCommand::UndoTreeOp => return self.undo_tree_op(window, cx),
             PaletteCommand::RedoTreeOp => return self.redo_tree_op(window, cx),
+            // 中身は計画9c の Task 7 で入れる。
+            PaletteCommand::ShowTutorial => return,
         };
         window.dispatch_action(action, cx);
     }

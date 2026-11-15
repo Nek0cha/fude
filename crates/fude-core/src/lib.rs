@@ -20,5 +20,6 @@ pub mod settings;
 pub mod settings_edit;
 pub mod settings_panel;
 pub mod text;
+pub mod tutorial;
 pub mod tree_history;
 pub mod workspace;
