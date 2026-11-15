@@ -37,9 +37,29 @@ gpui_kit::actions!(
         TreeOpen,
         TreeRename,
         TreeDelete,
-        TreeMenu
+        TreeMenu,
+        TreeFilterDown,
+        TreeFilterCancel
     ]
 );
+
+/// 絞り込み欄の中の文脈。
+const TREE_FILTER_INPUT: &str = "TreeFilter > Input";
+
+/// ツリーの本体で打った文字。修飾キーが Shift だけか無しで、空白でない 1 文字のときだけ返す。
+pub(crate) fn typed_char(keystroke: &Keystroke) -> Option<&str> {
+    let m = &keystroke.modifiers;
+    if m.control || m.alt || m.platform || m.function {
+        return None;
+    }
+    let ch = keystroke.key_char.as_deref()?;
+    let mut chars = ch.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() || c.is_whitespace() || c.is_control() {
+        return None;
+    }
+    Some(ch)
+}
 
 /// ツリーの取り消しとやり直しが効く文脈。入力欄と絞り込み欄の中では、入力欄の取り消しを優先する。
 const TREE_NOT_INPUT: &str = "Tree && !Input";
@@ -69,6 +89,9 @@ pub fn bind_tree_keys(cx: &mut App) {
         KeyBinding::new("f2", TreeRename, Some(TREE_NOT_INPUT)),
         KeyBinding::new(delete, TreeDelete, Some(TREE_NOT_INPUT)),
         KeyBinding::new("shift-f10", TreeMenu, Some(TREE_NOT_INPUT)),
+        // 絞り込み欄の中。同じ深さで後から登録したものが、gpui-kit の入力欄のキーより勝つ。
+        KeyBinding::new("down", TreeFilterDown, Some(TREE_FILTER_INPUT)),
+        KeyBinding::new("escape", TreeFilterCancel, Some(TREE_FILTER_INPUT)),
     ]);
     // Windows のメニューキー（VK_APPS）は GPUI では "menu" として届く。
     if fude_core::keymap::Platform::current() == fude_core::keymap::Platform::Windows {
@@ -136,11 +159,19 @@ impl WorkspaceView {
         self.tree.open = true;
         if self.tree.filter.is_none() {
             let state = cx.new(|cx| InputState::new(window, cx));
-            let sub = cx.subscribe(&state, |this, state, ev: &InputEvent, cx| {
-                if matches!(ev, InputEvent::Change) {
+            let sub = cx.subscribe_in(&state, window, |this, state, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => {
                     let query = state.read(cx).value().to_string();
                     this.set_tree_filter(query, cx);
                 }
+                // 絞り込み欄の Enter は、先頭のファイルの候補を開く。
+                InputEvent::PressEnter { .. } => {
+                    let first = crate::tree_nav::first_file(&this.tree.rows);
+                    if let (Some(rel), Some(project)) = (first, this.workspace.active_project().map(|p| p.id)) {
+                        this.open_tree_file(project, rel, window, cx);
+                    }
+                }
+                _ => {}
             });
             self.tree.filter = Some(state);
             self.tree._filter_sub = Some(sub);
@@ -228,6 +259,40 @@ impl WorkspaceView {
         } else if let Some(project) = self.workspace.active_project().map(|p| p.id) {
             self.open_tree_file(project, row.rel, window, cx);
         }
+    }
+
+    /// 本体で打った文字を絞り込み欄の末尾に足し、欄へ移る。本体にフォーカスがあるときだけ（入力欄の中の
+    /// 打鍵は入力欄が受け取る）。
+    fn type_into_tree_filter(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tree.focus.is_focused(window) {
+            return;
+        }
+        let (Some(ch), Some(filter)) = (typed_char(&ev.keystroke), self.tree.filter.clone()) else { return };
+        let ch = ch.to_string();
+        filter.update(cx, |s, cx| {
+            // replace_all はカーソルを末尾に置き、Change を出す（絞り込みが動く）。
+            let value = format!("{}{ch}", s.value());
+            s.replace_all(value, window, cx);
+            s.focus(window, cx);
+        });
+        cx.stop_propagation();
+    }
+
+    /// 絞り込み欄からリストへ戻る。↓ は先頭の行を選ぶ。Esc は欄が空でなければ空にし、空ならツリーを閉じる。
+    fn leave_tree_filter(&mut self, cancel: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if cancel {
+            let Some(filter) = self.tree.filter.clone() else { return };
+            if filter.read(cx).value().is_empty() {
+                self.close_tree(window, cx);
+                return;
+            }
+            filter.update(cx, |s, cx| s.replace_all("", window, cx));
+        } else {
+            let first = crate::tree_nav::move_selection(&self.tree.rows, None, crate::tree_nav::NavKey::Down, 1);
+            self.select_tree_row(first, cx);
+        }
+        window.focus(&self.tree.focus, cx);
+        cx.notify();
     }
 
     fn tree_action_on_selected(&mut self, action: crate::tree_menu::TreeAction, window: &mut Window, cx: &mut Context<Self>) {
@@ -547,6 +612,10 @@ impl WorkspaceView {
                     this.tree_action_on_selected(crate::tree_menu::TreeAction::Delete, window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &TreeMenu, window, cx| this.open_tree_menu_by_key(window, cx)))
+                .on_action(cx.listener(|this, _: &TreeFilterDown, window, cx| this.leave_tree_filter(false, window, cx)))
+                .on_action(cx.listener(|this, _: &TreeFilterCancel, window, cx| this.leave_tree_filter(true, window, cx)))
+                // 本体で文字を打ったら、その文字から絞り込み欄に入る。
+                .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.type_into_tree_filter(ev, window, cx)))
                 // 絞り込み欄は、消すものが無いときに Esc を親へ回す。
                 .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| this.close_tree(window, cx)))
                 // 重ねて出したとき、下のターミナルにクリックを渡さない。
@@ -557,7 +626,15 @@ impl WorkspaceView {
                 .p(px(6.))
                 .text_size(px(13.))
                 .text_color(theme.fg_default)
-                .child(div().flex().flex_row().items_center().gap(px(4.)).children(filter.map(|f| div().flex_1().child(f))).child(toggle_changed))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .children(filter.map(|f| div().key_context("TreeFilter").flex_1().child(f)))
+                        .child(toggle_changed),
+                )
                 .child(
                     div()
                         .id("tree-body")
@@ -574,5 +651,31 @@ impl WorkspaceView {
                         .child(list),
                 ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::typed_char;
+    use gpui_kit::Keystroke;
+
+    fn key(spec: &'static str, ch: Option<&str>) -> Keystroke {
+        let mut k = Keystroke::parse(spec).unwrap();
+        k.key_char = ch.map(str::to_string);
+        k
+    }
+
+    #[test]
+    fn typed_char_accepts_plain_and_shift() {
+        assert_eq!(typed_char(&key("a", Some("a"))), Some("a"));
+        assert_eq!(typed_char(&key("shift-a", Some("A"))), Some("A"));
+    }
+
+    #[test]
+    fn typed_char_rejects_modifiers_and_space() {
+        assert_eq!(typed_char(&key("ctrl-a", Some("a"))), None);
+        assert_eq!(typed_char(&key("alt-a", Some("a"))), None);
+        assert_eq!(typed_char(&key("space", Some(" "))), None);
+        assert_eq!(typed_char(&key("f2", None)), None);
     }
 }
