@@ -177,6 +177,68 @@ pub fn settings_path(env: &dyn Fn(&str) -> Option<String>, home: Option<PathBuf>
     home.map(|h| h.join(".claude").join("settings.json"))
 }
 
+/// `fude hook --install / --uninstall / --status`（fude と fude-wsl で同じものを使う）。
+/// command は登録する hook の command の上書き（`--command <s>`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HookAdmin {
+    Install { command: Option<String> },
+    Uninstall,
+    Status { command: Option<String> },
+}
+
+/// `hook` の後ろの引数。最初が `--install`、`--uninstall`、`--status` のどれでもなければ None。
+pub fn parse_admin(args: &[String]) -> Option<Result<HookAdmin, String>> {
+    const USAGE: &str = "使い方: fude hook --install [--command <コマンド>] | --uninstall | --status [--command <コマンド>]";
+    let (first, rest) = args.split_first()?;
+    let command = || match rest {
+        [] => Ok(None),
+        [flag, c] if flag == "--command" => Ok(Some(c.clone())),
+        _ => Err(USAGE.to_string()),
+    };
+    Some(match first.as_str() {
+        "--install" => command().map(|command| HookAdmin::Install { command }),
+        "--status" => command().map(|command| HookAdmin::Status { command }),
+        "--uninstall" if rest.is_empty() => Ok(HookAdmin::Uninstall),
+        "--uninstall" => Err(USAGE.to_string()),
+        _ => return None,
+    })
+}
+
+/// ホームのフォルダ（HOME、無ければ USERPROFILE）。
+pub fn home_from_env(env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    env("HOME").or_else(|| env("USERPROFILE")).filter(|h| !h.is_empty()).map(PathBuf::from)
+}
+
+/// admin を実行し、そのあとの状態を返す。make_cmd は `--command` の値（無ければ None）から HookCommand を作る。
+pub fn run_admin(admin: &HookAdmin, path: Option<&Path>, make_cmd: &dyn Fn(Option<String>) -> HookCommand) -> HookStatus {
+    let Some(path) = path else { return HookStatus::Unreadable("ホームのフォルダがわかりません".to_string()) };
+    let text = match std::fs::read(path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(t) => Some(t),
+            Err(_) => return HookStatus::Unreadable("UTF-8 として読めません".to_string()),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return HookStatus::Unreadable(format!("読めません: {e}")),
+    };
+    let (cmd, edited) = match admin {
+        HookAdmin::Status { command } => return status(text.as_deref(), &make_cmd(command.clone())),
+        HookAdmin::Install { command } => {
+            let cmd = make_cmd(command.clone());
+            let edited = install(text.as_deref(), &cmd);
+            (cmd, edited)
+        }
+        HookAdmin::Uninstall => (make_cmd(None), uninstall(text.as_deref())),
+    };
+    match edited {
+        Err(e) => HookStatus::Unreadable(e),
+        Ok(None) => status(text.as_deref(), &cmd),
+        Ok(Some(new_text)) => match write_with_backup(path, &new_text) {
+            Ok(()) => status(Some(&new_text), &cmd),
+            Err(e) => HookStatus::Unreadable(format!("書けません: {e}")),
+        },
+    }
+}
+
 /// 元があれば `<名前>.bak` に写してから、同じフォルダの一時ファイルに書いて置き換える。フォルダが無ければ作る。
 pub fn write_with_backup(path: &Path, new_text: &str) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| io::Error::other("settings.json のフォルダが無い"))?;
@@ -344,6 +406,39 @@ mod tests {
         assert_eq!(settings_path(&env, home.clone()), Some(std::path::PathBuf::from("/c").join("settings.json")));
         assert_eq!(settings_path(&|_| None, home), Some(std::path::PathBuf::from("/h").join(".claude").join("settings.json")));
         assert_eq!(settings_path(&|_| Some(String::new()), None), None);
+    }
+
+    #[test]
+    fn parses_admin_args() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_admin(&a(&["--install"])), Some(Ok(HookAdmin::Install { command: None })));
+        assert_eq!(
+            parse_admin(&a(&["--install", "--command", "C:/a/fude.exe"])),
+            Some(Ok(HookAdmin::Install { command: Some("C:/a/fude.exe".into()) }))
+        );
+        assert_eq!(parse_admin(&a(&["--uninstall"])), Some(Ok(HookAdmin::Uninstall)));
+        assert_eq!(parse_admin(&a(&["--status"])), Some(Ok(HookAdmin::Status { command: None })));
+        assert!(matches!(parse_admin(&a(&["--install", "--status"])), Some(Err(_))));
+        assert!(matches!(parse_admin(&a(&["--uninstall", "--command", "x"])), Some(Err(_))));
+        assert_eq!(parse_admin(&a(&["--signal"])), None);
+        assert_eq!(parse_admin(&a(&[])), None);
+    }
+
+    #[test]
+    fn run_admin_install_status_uninstall() {
+        let dir = std::env::temp_dir().join(format!("fude-claude-admin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let make = |c: Option<String>| HookCommand::Exec(c.unwrap_or_else(|| "C:/f/fude.exe".into()));
+        assert_eq!(run_admin(&HookAdmin::Status { command: None }, Some(&path), &make), HookStatus::NotRegistered);
+        assert_eq!(run_admin(&HookAdmin::Install { command: None }, Some(&path), &make), HookStatus::Registered);
+        assert_eq!(run_admin(&HookAdmin::Status { command: Some("C:/g/fude.exe".into()) }, Some(&path), &make), HookStatus::Outdated);
+        assert_eq!(run_admin(&HookAdmin::Uninstall, Some(&path), &make), HookStatus::NotRegistered);
+        std::fs::write(&path, "{").unwrap();
+        assert!(matches!(run_admin(&HookAdmin::Install { command: None }, Some(&path), &make), HookStatus::Unreadable(_)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{");
+        assert!(matches!(run_admin(&HookAdmin::Status { command: None }, None, &make), HookStatus::Unreadable(_)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

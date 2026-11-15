@@ -16,7 +16,14 @@ enum Cli {
     Version,
     /// Claude Code の hook。信号に縮めて Windows の fude.exe に渡す。print_config なら設定例を出す。
     Hook { print_config: bool },
+    /// settings.json への登録・解除・状態（9b の設計書 §5.6）。そのあとの状態を 1 行の JSON で書く。
+    HookAdmin(HookAdmin),
 }
+
+use fude_core::claude_settings::HookAdmin;
+
+/// Windows の fude がこのコマンドを置く既定の場所（fude_fs::wsl::DEFAULT_BIN と同じ。あちらは Windows だけでビルドされる）。
+const DEFAULT_BIN: &str = "~/.local/bin/fude";
 
 /// hook の標準入力を読む上限。
 const HOOK_STDIN_MAX: u64 = 8 * 1024 * 1024;
@@ -40,12 +47,15 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         [cmd] if cmd == "version" => Ok(Cli::Version),
         [cmd] if cmd == "hook" => Ok(Cli::Hook { print_config: false }),
         [cmd, flag] if cmd == "hook" && flag == "--print-config" => Ok(Cli::Hook { print_config: true }),
+        [cmd, rest @ ..] if cmd == "hook" && fude_core::claude_settings::parse_admin(rest).is_some() => {
+            fude_core::claude_settings::parse_admin(rest).expect("確かめた").map(Cli::HookAdmin)
+        }
         [cmd, root] if cmd == "watch" => Ok(Cli::Watch(PathBuf::from(root), Default::default())),
         [cmd, root, heavy] if cmd == "watch" => serde_json::from_str(heavy)
             .map(|h| Cli::Watch(PathBuf::from(root), h))
             .map_err(|e| format!("隠すフォルダの指定を読めない: {e}")),
         [path] => Ok(Cli::Open(PathBuf::from(path))),
-        _ => Err("使い方: fude [フォルダ | ファイル] | fude serve | fude watch <フォルダ> | fude hook [--print-config] | fude version".to_string()),
+        _ => Err("使い方: fude [フォルダ | ファイル] | fude serve | fude watch <フォルダ> | fude hook [--print-config | --install | --uninstall | --status] | fude version".to_string()),
     }
 }
 
@@ -104,6 +114,17 @@ fn main() {
         }
         Ok(Cli::Hook { print_config: false }) => {
             hook();
+            0
+        }
+        Ok(Cli::HookAdmin(admin)) => {
+            use fude_core::claude_settings::{home_from_env, run_admin, settings_path};
+            // WSL の中では CLAUDE_CONFIG_DIR を見ない（9b の設計書 §5.4）。
+            let path = settings_path(&|_| None, home_from_env(&|k| std::env::var(k).ok()));
+            let make = |c: Option<String>| {
+                fude_core::claude::HookCommand::Shell(c.unwrap_or_else(|| DEFAULT_BIN.to_string()))
+            };
+            let status = run_admin(&admin, path.as_deref(), &make);
+            println!("{}", serde_json::to_string(&status).unwrap_or_default());
             0
         }
         Ok(Cli::Open(path)) => open(&path).unwrap_or_else(|message| {
@@ -272,6 +293,13 @@ mod tests {
     fn parse_hook() {
         assert_eq!(parse(&["hook"]), Ok(Cli::Hook { print_config: false }));
         assert_eq!(parse(&["hook", "--print-config"]), Ok(Cli::Hook { print_config: true }));
+        assert_eq!(parse(&["hook", "--install"]), Ok(Cli::HookAdmin(HookAdmin::Install { command: None })));
+        assert_eq!(
+            parse(&["hook", "--status", "--command", "~/.local/bin/fude"]),
+            Ok(Cli::HookAdmin(HookAdmin::Status { command: Some("~/.local/bin/fude".into()) }))
+        );
+        assert_eq!(parse(&["hook", "--uninstall"]), Ok(Cli::HookAdmin(HookAdmin::Uninstall)));
+        assert!(parse(&["hook", "--install", "--x"]).is_err());
     }
 
     #[test]
