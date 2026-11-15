@@ -32,6 +32,7 @@ mod project_menu;
 mod rail;
 mod route_map;
 mod search_view;
+mod settings_sections;
 mod settings_view;
 mod reduced_motion;
 mod shell_menu;
