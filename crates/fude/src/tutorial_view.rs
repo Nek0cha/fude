@@ -128,6 +128,8 @@ pub(crate) struct TutorialView {
     /// 動く絵の時刻の起点。
     started: Instant,
     reduced_motion: bool,
+    /// キーの表示。2 ページ目は毎フレーム描くので、設定が変わったときだけ作る。
+    hints: Hints,
     appearance: Entity<AppearanceSection>,
     text: Entity<TextSection>,
     hooks: Entity<HookSection>,
@@ -140,7 +142,11 @@ impl TutorialView {
         let text = cx.new(|cx| TextSection::new(SectionMode::FirstRun, window, cx));
         let hooks = cx.new(|cx| HookSection::new(board, SectionMode::FirstRun, cx));
         // キーの表示は今の割り当てから作るので、設定が変われば描き直す。
-        let subs = vec![cx.observe_global::<ConfigState>(|_, cx| cx.notify())];
+        let subs = vec![cx.observe_global::<ConfigState>(|this, cx| {
+            this.hints = Hints::from_settings(&cx.global::<ConfigState>().settings);
+            cx.notify();
+        })];
+        let hints = Hints::from_settings(&cx.global::<ConfigState>().settings);
         TutorialView {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
@@ -148,6 +154,7 @@ impl TutorialView {
             uses_claude: None,
             started: Instant::now(),
             reduced_motion: crate::reduced_motion::reduced_motion(),
+            hints,
             appearance,
             text,
             hooks,
@@ -169,10 +176,13 @@ impl TutorialView {
         self.focus.clone()
     }
 
-    fn go(&mut self, nav: Nav, cx: &mut Context<Self>) {
+    fn go(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
         match step(self.page, nav) {
             Some(page) => {
                 self.page = page;
+                // 前のページの入力欄（書体の検索など）にフォーカスがあると、欄が消えてフォーカスが宙に浮き、
+                // ← → が届かなくなる。ページを移ったら本体に戻す。
+                window.focus(&self.focus, cx);
                 self.started = Instant::now();
                 self.scroll.set_offset(point(px(0.), px(0.)));
                 cx.notify();
@@ -231,10 +241,10 @@ impl TutorialView {
 
     fn render_claude(&self, hints: &Hints, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let answer = |id: &'static str, label: &'static str, value: bool| {
-            chip(id, label, self.uses_claude == Some(value), theme).on_click(cx.listener(move |this, _, _, cx| {
+            chip(id, label, self.uses_claude == Some(value), theme).on_click(cx.listener(move |this, _, window, cx| {
                 this.uses_claude = Some(value);
                 if !value {
-                    this.go(Nav::Next, cx);
+                    this.go(Nav::Next, window, cx);
                 }
                 cx.notify();
             }))
@@ -322,14 +332,14 @@ fn primary_button(id: &'static str, label: &'static str, theme: &Theme) -> State
 impl Render for TutorialView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.global::<Theme>();
-        let hints = Hints::from_settings(&cx.global::<ConfigState>().settings);
+        let hints = &self.hints;
         if self.page == Page::Basics && !self.reduced_motion {
             window.request_animation_frame();
         }
         let page = match self.page {
-            Page::Look => self.render_look(&hints, &theme),
-            Page::Basics => self.render_basics(&hints, &theme),
-            Page::Claude => self.render_claude(&hints, &theme, cx),
+            Page::Look => self.render_look(hints, &theme),
+            Page::Basics => self.render_basics(hints, &theme),
+            Page::Claude => self.render_claude(hints, &theme, cx),
             Page::Ready => self.render_ready(&theme),
         };
         let skip = small_button("tutorial-skip", "スキップ", &theme)
@@ -339,9 +349,9 @@ impl Render for TutorialView {
         }));
         let last = self.page == Page::Ready;
         let next = primary_button("tutorial-next", if last { "はじめる" } else { "次へ" }, &theme)
-            .on_click(cx.listener(|this, _, _, cx| this.go(Nav::Next, cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.go(Nav::Next, window, cx)));
         let back = (self.page != Page::Look).then(|| {
-            small_button("tutorial-back", "戻る", &theme).on_click(cx.listener(|this, _, _, cx| this.go(Nav::Back, cx)))
+            small_button("tutorial-back", "戻る", &theme).on_click(cx.listener(|this, _, window, cx| this.go(Nav::Back, window, cx)))
         });
         let column = div()
             .w_full()
@@ -384,8 +394,8 @@ impl Render for TutorialView {
                     return;
                 }
                 match ev.keystroke.key.as_str() {
-                    "left" => this.go(Nav::Back, cx),
-                    "right" | "enter" => this.go(Nav::Next, cx),
+                    "left" => this.go(Nav::Back, window, cx),
+                    "right" | "enter" => this.go(Nav::Next, window, cx),
                     _ => return,
                 }
                 cx.stop_propagation();
