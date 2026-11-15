@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod claude_settings;
 pub mod close;
 pub mod drop_text;
 pub mod editor_tabs;
