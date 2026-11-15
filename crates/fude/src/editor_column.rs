@@ -189,6 +189,12 @@ impl WorkspaceView {
             Some(v) => v.clone(),
             None => {
                 let v = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
+                cx.subscribe_in(&v, window, |this, _, ev: &crate::settings_view::SettingsViewEvent, window, cx| match ev {
+                    crate::settings_view::SettingsViewEvent::OpenConfig(path) => {
+                        this.open_file(fude_core::location::FileLocation::Local(path.clone()), None, None, window, cx)
+                    }
+                })
+                .detach();
                 self.settings_view = Some(v.clone());
                 v
             }
