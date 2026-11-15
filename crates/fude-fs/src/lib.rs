@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod git;
+pub mod ignored;
 mod local;
 pub mod plans;
 pub mod procs;
@@ -105,6 +106,9 @@ impl From<PathError> for io::Error {
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
+    /// gitignore などで外されている（外したフォルダの中も含む）。ツリーでは薄く描く。
+    #[serde(default)]
+    pub ignored: bool,
 }
 
 /// ゴミ箱から戻すための札。id が空なら、ゴミ箱には入ったが戻す手がかりが取れなかった（取り消しには使えない）。
@@ -122,19 +126,32 @@ pub struct FileMeta {
     pub modified_ms: u64,
 }
 
-/// walk_files で返す件数の上限。
+/// walk_files で返す件数の上限（外していないもの）。
 pub const WALK_MAX: usize = 200_000;
 
+/// walk_files で返す、外したファイルの件数の上限。外したもので上限に達しても、外していないものは減らさない。
+pub const IGNORED_FILES_MAX: usize = 20_000;
+
+/// walk_files の結果。各々名前順。⌘P では tracked の後ろに ignored を続ける（同じ点数なら外したものが後ろ）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalkedFiles {
+    /// 外していないファイル（.git を除く）。WALK_MAX 件まで。
+    pub tracked: Vec<RelPath>,
+    /// 外したファイル（隠す名前のフォルダの中は除く）。IGNORED_FILES_MAX 件まで。
+    pub ignored: Vec<RelPath>,
+}
+
 pub trait ProjectFs: Send + Sync {
-    /// rel の直下。gitignore を尊重し、隠しファイルは出し、.git は出さない。ディレクトリが先、各々名前順。
+    /// rel の直下。外したもの（gitignore など）も ignored の印を付けて出し、隠しファイルも出し、.git と
+    /// 外された重いフォルダ（ignored::HIDDEN_DIRS）は出さない。ディレクトリが先、各々名前順。
     fn list_dir(&self, rel: &RelPath) -> io::Result<Vec<DirEntry>>;
     fn read(&self, rel: &RelPath) -> io::Result<Vec<u8>>;
     /// 同じディレクトリの一時ファイルに書いてから rename する。
     fn write(&self, rel: &RelPath, data: &[u8]) -> io::Result<()>;
     /// ブランチ名（fude_core::git_head::read_branch と同じ規則）。
     fn branch(&self) -> io::Result<Option<String>>;
-    /// gitignore を尊重した全ファイル（.git を除く）。名前順。WALK_MAX 件で打ち切る。
-    fn walk_files(&self) -> io::Result<Vec<RelPath>>;
+    /// 全ファイルを、外していないものと外したものに分けて返す（WalkedFiles を参照）。
+    fn walk_files(&self) -> io::Result<WalkedFiles>;
     /// 空のファイルを作る。あれば AlreadyExists。
     fn create_file(&self, rel: &RelPath) -> io::Result<()>;
     /// フォルダを作る（途中のフォルダも）。最後の段が既にあれば AlreadyExists。

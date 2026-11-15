@@ -124,7 +124,7 @@ mod tests {
 
     fn entry(path: &str, depth: usize, is_dir: bool, expanded: bool) -> RowSlot {
         let name = path.rsplit('/').next().unwrap().to_string();
-        RowSlot::Entry(TreeRow { rel: rel(path), name, depth, is_dir, expanded, mark: None })
+        RowSlot::Entry(TreeRow { rel: rel(path), name, depth, is_dir, expanded, mark: None, ignored: false })
     }
 
     /// d（開いている）、d/x、d/y、e（閉じている）、a.txt、b.txt。
