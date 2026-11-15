@@ -144,11 +144,6 @@ fn main() {
         let window_background = config_runtime::background_appearance(&config.settings.window);
         cx.set_global(config);
         config_runtime::start_watching(cx);
-        file_view::bind_file_view_keys(cx);
-        tree_view::bind_tree_keys(cx);
-        palette_view::bind_palette_keys(cx);
-        term_search::bind_term_search_keys(cx);
-        search_view::bind_search_view_keys(cx);
         // ウィンドウは 1 枚なので、閉じたらアプリも終える（macOS でアプリだけ残らないように）。
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {

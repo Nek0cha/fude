@@ -51,6 +51,15 @@ pub enum TerminalEvent {
 /// カーソルの点滅の間隔。
 const CURSOR_BLINK: std::time::Duration = std::time::Duration::from_millis(530);
 
+/// 点滅の 1 歩。戻り値は（点けるか、描き直すか）。フォーカスが無ければ点けたままで描き直さない（裏のタブや
+/// ほかのペインのターミナルが、窓を描き直し続けないため）。打った直後は点けたまま。
+fn blink_step(focused: bool, since_input: std::time::Duration, cursor_on: bool) -> (bool, bool) {
+    if !focused {
+        return (true, false);
+    }
+    if since_input < CURSOR_BLINK { (true, true) } else { (!cursor_on, true) }
+}
+
 pub struct TerminalView {
     pub(crate) session: Option<Arc<Session>>,
     /// 起動の失敗や異常終了のときに、ペインに出す文。
@@ -149,11 +158,11 @@ impl TerminalView {
         if let Some(s) = &self.session {
             s.with_state(|st| st.set_default_cursor(settings.cursor.shape));
         }
-        self.set_blink(settings.cursor.blink, cx);
+        self.set_blink(settings.cursor.blink, window, cx);
         cx.notify();
     }
 
-    fn set_blink(&mut self, on: bool, cx: &mut Context<Self>) {
+    fn set_blink(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.cursor_on = true;
         if !on {
             self._blink = None;
@@ -162,13 +171,15 @@ impl TerminalView {
         if self._blink.is_some() {
             return;
         }
-        self._blink = Some(cx.spawn(async move |this, cx| {
+        self._blink = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(CURSOR_BLINK).await;
-                let alive = this.update(cx, |this, cx| {
-                    // 打った直後は点けたまま、間隔を最初から数え直す。
-                    this.cursor_on = if this.last_input.elapsed() < CURSOR_BLINK { true } else { !this.cursor_on };
-                    cx.notify();
+                let alive = this.update_in(cx, |this, window, cx| {
+                    let (on, redraw) = blink_step(this.focus.is_focused(window), this.last_input.elapsed(), this.cursor_on);
+                    this.cursor_on = on;
+                    if redraw {
+                        cx.notify();
+                    }
                 });
                 if alive.is_err() {
                     break;
@@ -829,6 +840,20 @@ impl Render for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blink_only_when_focused() {
+        use super::{CURSOR_BLINK, blink_step};
+        use std::time::Duration;
+        // フォーカスが無ければ点けたままで、描き直さない。
+        assert_eq!(blink_step(false, Duration::from_secs(9), false), (true, false));
+        assert_eq!(blink_step(false, Duration::from_secs(9), true), (true, false));
+        // 打った直後は点けたまま。
+        assert_eq!(blink_step(true, CURSOR_BLINK / 2, false), (true, true));
+        // しばらく打っていなければ切り替える。
+        assert_eq!(blink_step(true, CURSOR_BLINK * 2, true), (false, true));
+        assert_eq!(blink_step(true, CURSOR_BLINK * 2, false), (true, true));
+    }
+
     // gpui_kit の glob は test 属性マクロを含むため、必要な名前だけを取り込む。
     use super::{CellMetrics, GridSize, RightClick, made_selection, point_to_cell, right_click_action};
     use gpui_kit::{point, px};

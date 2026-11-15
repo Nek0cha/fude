@@ -372,7 +372,7 @@ fn parse_hex(s: &str) -> Option<u32> {
 
 /// バイト位置の行番号（1 始まり）。
 fn line_at(text: &str, offset: usize) -> usize {
-    text[..offset.min(text.len())].matches('\n').count() + 1
+    text.as_bytes()[..offset.min(text.len())].iter().filter(|&&b| b == b'\n').count() + 1
 }
 
 /// 表 section（None は先頭の表）の中で key を書いた行（1 始まり）。単純な `[名前]` の見出しだけを見る。
@@ -609,6 +609,14 @@ mod tests {
         assert_eq!(s.tree.heavy_dirs, Some(vec!["target-dev".to_string()]));
         assert_eq!(s.keybindings.windows, vec![("close".to_string(), vec!["ctrl-q".to_string()]), ("toggle_tree".to_string(), vec![])]);
         assert_eq!(s.keybindings.macos, vec![("close".to_string(), vec!["cmd-q".to_string()])]);
+    }
+
+    #[test]
+    fn line_at_never_panics_inside_a_character() {
+        let text = "a = \"あ\"\nb = 1\n";
+        let inside = text.find('あ').unwrap() + 1;
+        assert_eq!(line_at(text, inside), 1);
+        assert_eq!(line_at(text, text.len() + 10), 3);
     }
 
     #[test]

@@ -223,8 +223,15 @@ pub fn bindings(platform: Platform, overrides: &KeybindingOverrides) -> (Vec<Bin
         } else {
             contexts.iter().find(|&&(_, c, _)| c == command).map(|&(_, _, ctx)| ctx)
         };
+        // Windows で既定に「ターミナル以外」の行がある Command は、Shift も Alt も付かない Ctrl キーを既定と同じく
+        // ターミナルの外だけで効かせる（Ctrl+K、Ctrl+W などのシェルのキー操作を奪わないため）。
+        let has_not_terminal = contexts.iter().any(|&(_, c, ctx)| c == command && ctx == NOT_TERMINAL);
+        let context_for = |key: &str| {
+            let shell_key = key.starts_with("ctrl-") && !key.contains("shift-") && !key.contains("alt-");
+            if platform == Platform::Windows && has_not_terminal && shell_key { Some(NOT_TERMINAL) } else { context }
+        };
         list.retain(|b| b.command != command);
-        list.extend(keys.iter().map(|k| Binding { key: k.clone(), command, context }));
+        list.extend(keys.iter().map(|k| Binding { key: k.clone(), command, context: context_for(k) }));
     }
     (list, issues)
 }
@@ -426,7 +433,7 @@ mod tests {
     #[test]
     fn override_replaces_all_rows_of_command() {
         let (list, _) = bindings(Platform::Windows, &overrides(&[("close", &["ctrl-q"])], &[]));
-        assert_eq!(rows_of(&list, Command::Close), vec![("ctrl-q".to_string(), None)]);
+        assert_eq!(rows_of(&list, Command::Close), vec![("ctrl-q".to_string(), Some(NOT_TERMINAL))]);
     }
 
     #[test]
@@ -439,6 +446,23 @@ mod tests {
     fn copy_keeps_terminal_context() {
         let (list, _) = bindings(Platform::MacOs, &overrides(&[], &[("copy", &["cmd-shift-c"])]));
         assert_eq!(rows_of(&list, Command::Copy), vec![("cmd-shift-c".to_string(), Some(TERMINAL))]);
+    }
+
+    /// Windows でシェルと重なる Shift なしの Ctrl キーは、既定と同じく「ターミナル以外」でだけ効かせる。
+    #[test]
+    fn shell_keys_stay_out_of_terminal() {
+        let (list, _) = bindings(Platform::Windows, &overrides(&[("open_palette", &["ctrl-shift-k", "ctrl-k"]), ("close", &["ctrl-w"])], &[]));
+        assert_eq!(
+            rows_of(&list, Command::OpenPalette),
+            vec![("ctrl-shift-k".to_string(), None), ("ctrl-k".to_string(), Some(NOT_TERMINAL))]
+        );
+        assert_eq!(rows_of(&list, Command::Close), vec![("ctrl-w".to_string(), Some(NOT_TERMINAL))]);
+        // 「ターミナル以外」の行を持たない Command はそのまま。
+        let (list, _) = bindings(Platform::Windows, &overrides(&[("new_tab", &["ctrl-n"])], &[]));
+        assert_eq!(rows_of(&list, Command::NewTab), vec![("ctrl-n".to_string(), None)]);
+        // macOS は ⌘ なのでシェルと重ならない。
+        let (list, _) = bindings(Platform::MacOs, &overrides(&[], &[("open_palette", &["ctrl-k"])]));
+        assert_eq!(rows_of(&list, Command::OpenPalette), vec![("ctrl-k".to_string(), None)]);
     }
 
     #[test]

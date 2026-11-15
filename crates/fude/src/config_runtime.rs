@@ -77,10 +77,16 @@ pub fn apply_global(cx: &mut App, old: Option<&Settings>, new: &Settings) -> Vec
     crate::theme::set_fonts(&new.font);
     cx.set_global(crate::themes::build_theme(new));
     crate::theme::apply_component_theme(cx);
-    match old {
-        Some(old) => crate::workspace_view::rebind_keys(cx, old, new),
-        None => crate::workspace_view::bind_keys(cx, new),
+    if old.is_some_and(|old| old.keybindings == new.keybindings) {
+        return crate::workspace_view::valid_bindings(new).1;
     }
+    crate::workspace_view::install_keys(cx, new)
+}
+
+/// 値が変わらなかったときの問題: 読み込みの問題と、キーの問題（設定から作り直すので重ならない）。
+pub fn unchanged_issues(mut parse_issues: Vec<ConfigIssue>, settings: &Settings) -> Vec<ConfigIssue> {
+    parse_issues.extend(crate::workspace_view::valid_bindings(settings).1);
+    parse_issues
 }
 
 /// 見張りを捨てないために持つ。
@@ -134,8 +140,7 @@ pub fn reload_now(cx: &mut App) {
         Err(e) => (state.settings.clone(), vec![ConfigIssue { line: None, message: format!("設定ファイルを読めません: {e}") }]),
     };
     if settings == state.settings {
-        // キーの問題は値が同じなら変わらないので、前回のものを残す。
-        issues.extend(state.issues.iter().filter(|i| i.message.starts_with("keybindings")).cloned());
+        let issues = unchanged_issues(issues, &settings);
         if issues != state.issues {
             cx.set_global(ConfigState { issues, ..state });
             cx.refresh_windows();

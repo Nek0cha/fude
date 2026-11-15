@@ -109,30 +109,39 @@ pub(crate) fn valid_bindings(settings: &Settings) -> (Vec<Binding>, Vec<ConfigIs
     (ok, issues)
 }
 
-/// fude_core の割り当て表（設定の上書きを当てたもの）を GPUI のキーバインドに変換して登録する。
-pub fn bind_keys(cx: &mut App, settings: &Settings) -> Vec<ConfigIssue> {
-    let (list, issues) = valid_bindings(settings);
-    let keys: Vec<KeyBinding> = list.iter().filter_map(|b| load_binding(&b.key, command_action(b.command), b.context, cx)).collect();
-    cx.bind_keys(keys);
-    issues
+/// GPUI Kit の部品（入力欄など）が init で登録した割り当て。fude の割り当てを足す前に写しておき、
+/// 設定を読み直すたびに入れ直す。
+struct BaseKeymap(Vec<KeyBinding>);
+
+impl Global for BaseKeymap {}
+
+/// base のあとに list を足した割り当ての全部（読み直すたびに作り直すので増えない）。
+pub(crate) fn keymap_with(base: &[KeyBinding], list: &[Binding], make: impl Fn(&Binding) -> Option<KeyBinding>) -> Vec<KeyBinding> {
+    base.iter().cloned().chain(list.iter().filter_map(make)).collect()
 }
 
-/// 設定が変わったときに割り当てを登録し直す。gpui-kit の部品のキーを消さないよう clear_key_bindings は使わず、
-/// 使わなくなったキーは NoAction で外し、新しい表を後から足す（後から足したものが優先される）。
-pub fn rebind_keys(cx: &mut App, old: &Settings, new: &Settings) -> Vec<ConfigIssue> {
-    let (new_list, issues) = valid_bindings(new);
-    if old.keybindings == new.keybindings {
-        return issues;
+/// 画面ごとの固定のキー（Escape など）。
+fn register_fixed_keys(cx: &mut App) {
+    crate::file_view::bind_file_view_keys(cx);
+    crate::tree_view::bind_tree_keys(cx);
+    crate::palette_view::bind_palette_keys(cx);
+    crate::term_search::bind_term_search_keys(cx);
+    crate::search_view::bind_search_view_keys(cx);
+}
+
+/// 割り当てを全部入れ直す: GPUI Kit の割り当て、設定の上書きを当てた fude の割り当て、画面ごとの固定のキーの順。
+/// 最初の呼び出しのときに、それまでに登録されていたもの（GPUI Kit の init）を写しておく。
+/// 外したキーを NoAction で上書きすると、同じキーの文脈付きの割り当てまで消えるため、消してから入れ直す。
+pub fn install_keys(cx: &mut App, settings: &Settings) -> Vec<ConfigIssue> {
+    if !cx.has_global::<BaseKeymap>() {
+        let base: Vec<KeyBinding> = cx.key_bindings().borrow().bindings().cloned().collect();
+        cx.set_global(BaseKeymap(base));
     }
-    let (old_list, _) = valid_bindings(old);
-    let removed: Vec<KeyBinding> = old_list
-        .iter()
-        .filter(|o| !new_list.iter().any(|n| n.key == o.key && n.context == o.context))
-        .filter_map(|o| load_binding(&o.key, Box::new(NoAction), o.context, cx))
-        .collect();
-    cx.bind_keys(removed);
-    let added: Vec<KeyBinding> = new_list.iter().filter_map(|b| load_binding(&b.key, command_action(b.command), b.context, cx)).collect();
-    cx.bind_keys(added);
+    let (list, issues) = valid_bindings(settings);
+    let all = keymap_with(&cx.global::<BaseKeymap>().0, &list, |b| load_binding(&b.key, command_action(b.command), b.context, cx));
+    cx.clear_key_bindings();
+    cx.bind_keys(all);
+    register_fixed_keys(cx);
     issues
 }
 
@@ -1191,6 +1200,50 @@ impl Render for WorkspaceView {
 
 #[cfg(test)]
 mod tests {
+    /// 読み直しで、外したキーが同じキーの文脈付きの割り当てまで消さないこと。読み直しを重ねても増えないこと。
+    #[test]
+    fn reloaded_keymap_resolves_new_binding_in_context() {
+        use super::{CloseItem, keymap_with};
+        use crate::file_view::SaveFile;
+        use fude_core::keymap::{Binding, Command, FILE_VIEW};
+        use gpui_kit::{KeyBinding, KeyContext, Keymap, Keystroke};
+        let make = |b: &Binding| -> Option<KeyBinding> {
+            let key: &'static str = Box::leak(b.key.clone().into_boxed_str());
+            Some(match b.command {
+                Command::Save => KeyBinding::new(key, SaveFile, b.context),
+                _ => KeyBinding::new(key, CloseItem, b.context),
+            })
+        };
+        let base = vec![KeyBinding::new("escape", CloseItem, Some("Input"))];
+        let a = vec![Binding { key: "ctrl-q".into(), command: Command::Close, context: None }];
+        let b = vec![Binding { key: "ctrl-q".into(), command: Command::Save, context: Some(FILE_VIEW) }];
+        let first = keymap_with(&base, &a, make);
+        assert_eq!(first.len(), 2);
+        let second = keymap_with(&base, &b, make);
+        assert_eq!(second.len(), 2, "読み直しで増えない");
+        let keymap = Keymap::new(second);
+        let contexts = [KeyContext::parse("Workspace").unwrap(), KeyContext::parse("FileView").unwrap(), KeyContext::parse("Input").unwrap()];
+        let (found, _) = keymap.bindings_for_input(&[Keystroke::parse("ctrl-q").unwrap()], &contexts);
+        assert!(found.first().is_some_and(|k| k.action().partial_eq(&SaveFile)), "ctrl-q が保存にならない");
+        let (found, _) = keymap.bindings_for_input(&[Keystroke::parse("escape").unwrap()], &contexts);
+        assert!(!found.is_empty(), "基礎の割り当てが残る");
+    }
+
+    #[test]
+    fn unchanged_reload_does_not_grow_issues() {
+        use super::valid_bindings;
+        use fude_core::settings::Settings;
+        let mut s = Settings::default();
+        let row = vec![("nope".to_string(), vec!["ctrl-1".to_string()])];
+        s.keybindings.windows = row.clone();
+        s.keybindings.macos = row;
+        let once = crate::config_runtime::unchanged_issues(Vec::new(), &s);
+        let twice = crate::config_runtime::unchanged_issues(Vec::new(), &s);
+        assert_eq!(once.len(), 1);
+        assert_eq!(once, twice);
+        assert_eq!(once, valid_bindings(&s).1);
+    }
+
     #[test]
     fn key_notation_is_checked() {
         use super::valid_key;
