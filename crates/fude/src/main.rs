@@ -16,6 +16,7 @@ mod file_icons;
 mod file_view;
 mod home;
 mod hook_cli;
+mod hook_targets;
 mod hover;
 mod instance;
 mod language;

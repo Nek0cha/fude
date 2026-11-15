@@ -70,7 +70,19 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(15);
 /// 版の確認を待つ時間。止まっている WSL の起動を含む。
 const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 /// 配置を待つ時間。
-const DEPLOY_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DEPLOY_TIMEOUT: Duration = Duration::from_secs(60);
+/// 置いてある fude に hook の状態を聞くのを待つ時間（版の確認で WSL はもう起きている）。
+pub const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+/// run_fude で、置いてある fude が無い（実行できない）ときの終了コード。
+pub const RUN_NOT_INSTALLED: i32 = NOT_INSTALLED;
+
+/// 置いてある fude（bin）を args で実行して、終わるまで待つ。fude が無ければ終了コード RUN_NOT_INSTALLED。
+pub fn run_fude(distro: &str, bin: &str, args: &[&str], timeout: Duration) -> io::Result<Output> {
+    let script = format!(r#"{RESOLVE}b=$(r "$1"); shift; [ -x "$b" ] || exit {NOT_INSTALLED}; exec "$b" "$@""#);
+    let mut all = vec![bin];
+    all.extend_from_slice(args);
+    output_with_timeout(wsl_command(distro, &script, &all), &[], timeout)
+}
 
 /// cmd を起動し、stdin を流して、終わるまで待つ。timeout を過ぎたら子プロセスを終わらせて Err(TimedOut)。
 /// スリープ復帰のあとなどに wsl.exe が固まっても、呼び出し側が待ち続けないようにする（検証4の申し送り5）。

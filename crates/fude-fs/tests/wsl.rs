@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fude_fs::wsl::{WslConnector, default_bin, deploy, installed_version};
+use fude_fs::wsl::{RUN_NOT_INSTALLED, STATUS_TIMEOUT, WslConnector, default_bin, deploy, installed_version, run_fude};
 use fude_fs::{ProjectFs, RelPath, RemoteClient, RemoteFs};
 
 #[test]
@@ -36,7 +36,11 @@ fn deploy_and_serve_on_real_wsl() {
 
     assert_eq!(installed_version(&distro, &bin).unwrap(), None);
     deploy(&distro, &bin, &bytes, &std::env::current_exe().unwrap()).unwrap();
-    assert_eq!(installed_version(&distro, &bin).unwrap(), Some(id));
+    assert_eq!(installed_version(&distro, &bin).unwrap(), Some(id.clone()));
+    let out = run_fude(&distro, &bin, &["version"], STATUS_TIMEOUT).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), id);
+    let missing = run_fude(&distro, &format!("{dir}/nope"), &["version"], STATUS_TIMEOUT).unwrap();
+    assert_eq!(missing.status.code(), Some(RUN_NOT_INSTALLED));
 
     let connector = WslConnector { distro: distro.clone(), bin: bin.clone() };
     let client = Arc::new(RemoteClient::new(Box::new(connector), Duration::from_secs(30)));
