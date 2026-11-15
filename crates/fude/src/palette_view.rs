@@ -531,6 +531,7 @@ impl WorkspaceView {
             PaletteCommand::FindInFiles => return self.open_find_in_files(window, cx),
             PaletteCommand::LaunchClaude => return self.launch_claude(cx),
             PaletteCommand::CopyHookConfig => return self.copy_hook_config(window, cx),
+            PaletteCommand::OpenSettings => return self.open_settings(window, cx),
             // 中身は計画8 の後のタスクで入れる。
             PaletteCommand::ToggleMarkdownMode => {
                 let Some(view) = self.active_editor_view() else { return };

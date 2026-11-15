@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use fude_core::editor_tabs::SEARCH_TAB;
+use fude_core::editor_tabs::{SEARCH_TAB, SETTINGS_TAB};
 use fude_core::workspace::ProjectId;
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -22,6 +22,7 @@ struct TabLook {
     index: usize,
     /// 全体検索の結果のタブ。
     search: bool,
+    settings: bool,
     name: String,
     parent: Option<String>,
     selected: bool,
@@ -48,11 +49,15 @@ impl WorkspaceView {
             .get(&project)
             .and_then(|(v, _)| v.read(cx).query.as_ref().map(|q| crate::search_view::tab_title(&q.pattern)))
             .unwrap_or_else(|| "検索".into());
-        let file_rels: Vec<&str> = rels.iter().map(String::as_str).filter(|r| *r != SEARCH_TAB).collect();
+        let file_rels: Vec<&str> = rels.iter().map(String::as_str).filter(|r| !r.starts_with('\0')).collect();
         let mut file_labels = tab_labels(&file_rels).into_iter();
         let labels: Vec<(String, Option<String>)> = rels
             .iter()
-            .map(|r| if r == SEARCH_TAB { (search_title.clone(), None) } else { file_labels.next().unwrap_or_default() })
+            .map(|r| match r.as_str() {
+                SEARCH_TAB => (search_title.clone(), None),
+                SETTINGS_TAB => ("設定".to_string(), None),
+                _ => file_labels.next().unwrap_or_default(),
+            })
             .collect();
         let mut tabs: Vec<AnyElement> = labels
             .into_iter()
@@ -61,7 +66,8 @@ impl WorkspaceView {
                 let dirty = slot.and_then(|s| s.views.get(&rels[index])).is_some_and(|v| v.read(cx).is_dirty());
                 let width = tab_width_estimate(&name);
                 let search = rels[index] == SEARCH_TAB;
-                let el = self.render_editor_tab(project, TabLook { index, search, name, parent, selected: active == Some(index), dirty }, cx, now);
+                let settings = rels[index] == SETTINGS_TAB;
+                let el = self.render_editor_tab(project, TabLook { index, search, settings, name, parent, selected: active == Some(index), dirty }, cx, now);
                 // 出てきたタブは幅を広げながら、文字をフェードインする（ターミナルのタブと同じ。設計書 §6.3）。
                 match self.anims.editor_opened.get(&rels[index]) {
                     Some(start) => {
@@ -75,7 +81,11 @@ impl WorkspaceView {
         // 閉じたタブは、文字を消してから幅を縮める。
         for c in &self.anims.editor_closing {
             let (text, width, _) = tab_close_progress(now.saturating_duration_since(c.started), self.reduced_motion);
-            let name = if c.title == SEARCH_TAB { "検索".to_string() } else { c.title.rsplit('/').next().unwrap_or_default().to_string() };
+            let name = match c.title.as_str() {
+                SEARCH_TAB => "検索".to_string(),
+                SETTINGS_TAB => "設定".to_string(),
+                _ => c.title.rsplit('/').next().unwrap_or_default().to_string(),
+            };
             let ghost = div()
                 .h(size::TAB_H)
                 .w(px(tab_width_estimate(&name) * width))
@@ -141,6 +151,8 @@ impl WorkspaceView {
             }));
         let icon: AnyElement = if look.search {
             crate::title_row::icon(IconName::Search, theme.fg_dim).into_any_element()
+        } else if look.settings {
+            crate::title_row::icon(IconName::Settings, theme.fg_dim).into_any_element()
         } else {
             file_icon(icon_for_file(&look.name)).into_any_element()
         };

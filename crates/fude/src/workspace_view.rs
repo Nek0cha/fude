@@ -47,6 +47,7 @@ gpui_kit::actions!(
         FindInFiles,
         FindInTerminal,
         ToggleRouteMap,
+        OpenSettings,
     ]
 );
 
@@ -65,6 +66,7 @@ fn command_action(command: Command) -> Box<dyn Action> {
         Command::FindInFiles => Box::new(FindInFiles),
         Command::FindInTerminal => Box::new(FindInTerminal),
         Command::ToggleRouteMap => Box::new(ToggleRouteMap),
+        Command::OpenSettings => Box::new(OpenSettings),
         Command::NewTab => Box::new(NewTab),
         Command::SplitTab => Box::new(SplitTab),
         Command::NextTab => Box::new(NextTab),
@@ -338,6 +340,10 @@ pub struct WorkspaceView {
     pub(crate) dialog: Option<crate::dialog::OpenDialog>,
     /// プロジェクトごとの全体検索の結果のタブ。
     pub(crate) searches: HashMap<ProjectId, (Entity<crate::search_view::SearchView>, Subscription)>,
+    /// 設定パネル（初めて開いたときに作り、捨てない。9b の設計書 §5.1）。
+    pub(crate) settings_view: Option<Entity<crate::settings_view::SettingsView>>,
+    /// プロジェクトが無いとき、ホーム画面の代わりに設定パネルを出している。
+    pub(crate) settings_on_home: bool,
     /// コマンドパレット。
     pub(crate) palette: Option<crate::palette_view::PaletteState>,
     /// ホーム画面の「最近」の右クリックメニュー。
@@ -425,6 +431,8 @@ impl WorkspaceView {
             home_menu: None,
             palette: None,
             searches: HashMap::new(),
+            settings_view: None,
+            settings_on_home: false,
             dialog: None,
             allow_close: false,
             reduced_motion: crate::reduced_motion::reduced_motion(),
@@ -1108,7 +1116,13 @@ impl Render for WorkspaceView {
         if self.screen_fade.is_animating(now) {
             window.request_animation_frame();
         }
-        let main = if home {
+        if !home {
+            self.settings_on_home = false;
+        }
+        let settings_on_home = home && self.settings_on_home;
+        let main = if settings_on_home {
+            div().size_full().children(self.settings_view.clone())
+        } else if home {
             self.render_home(cx, now)
         } else {
             let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
@@ -1151,6 +1165,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(|this, _: &FindInFiles, window, cx| this.open_find_in_files(window, cx)))
             .on_action(cx.listener(|this, _: &FindInTerminal, window, cx| this.find_in_terminal(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleRouteMap, _, cx| this.toggle_route_map(cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
                 this.new_default_tab();
                 cx.notify();

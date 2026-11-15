@@ -200,7 +200,7 @@ impl WorkspaceView {
     /// 開いているファイルの行を選ぶ。親フォルダが閉じていれば開いて読む。絞り込み中と「変更だけ」の表示では、
     /// 並びにあるときだけ選ぶ。全体検索のタブやタブが無いときは、今の選択のまま（並びに無ければ ↓ で先頭へ）。
     fn select_active_file(&mut self, project: ProjectId, cx: &mut Context<Self>) {
-        let active = self.workspace.active_project().and_then(|p| p.editor.active()).filter(|i| !i.is_search());
+        let active = self.workspace.active_project().and_then(|p| p.editor.active()).filter(|i| !i.is_virtual());
         let Some(rel) = active.and_then(|i| RelPath::new(&i.rel).ok()) else { return };
         let model = self.tree.models.entry(project).or_default();
         if model.filtering() || model.changed_only() {
