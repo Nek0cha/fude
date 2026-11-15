@@ -245,7 +245,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>) + 'static,
     ) {
-        if !self.settings.confirm_close_running || panes.is_empty() {
+        if !self.settings.close.confirm_running || panes.is_empty() {
             then(self, window, cx);
             return;
         }

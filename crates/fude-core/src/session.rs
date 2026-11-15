@@ -159,18 +159,18 @@ impl Workspace {
 /// Windows: %APPDATA%\fude\session.json。macOS: $HOME/.config/fude/session.json（設定ファイルと同じ場所）。
 /// FUDE_INSTANCE=x のときは session-x.json。環境変数が無ければ None。
 pub fn session_path(os: Platform, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    data_file(os, env, "session")
+    data_file(os, env, "session", "json")
 }
 
-/// fude のデータのディレクトリの `<stem>.json`（FUDE_INSTANCE=x なら `<stem>-x.json`）。
-pub(crate) fn data_file(os: Platform, env: &dyn Fn(&str) -> Option<String>, stem: &str) -> Option<PathBuf> {
+/// fude のデータのディレクトリの `<stem>.<ext>`（FUDE_INSTANCE=x なら `<stem>-x.<ext>`）。
+pub(crate) fn data_file(os: Platform, env: &dyn Fn(&str) -> Option<String>, stem: &str, ext: &str) -> Option<PathBuf> {
     let dir = match os {
         Platform::Windows => PathBuf::from(env("APPDATA").filter(|v| !v.is_empty())?).join("fude"),
         Platform::MacOs => PathBuf::from(env("HOME").filter(|v| !v.is_empty())?).join(".config").join("fude"),
     };
     let name = match env("FUDE_INSTANCE").filter(|v| !v.is_empty()) {
-        Some(instance) => format!("{stem}-{instance}.json"),
-        None => format!("{stem}.json"),
+        Some(instance) => format!("{stem}-{instance}.{ext}"),
+        None => format!("{stem}.{ext}"),
     };
     Some(dir.join(name))
 }

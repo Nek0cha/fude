@@ -142,7 +142,7 @@ pub(crate) enum AfterClose {
 
 /// remaining は閉じたあとのプロジェクトの数。
 pub(crate) fn last_project_closed_action(settings: &Settings, remaining: usize) -> AfterClose {
-    match (remaining, settings.on_last_project_closed) {
+    match (remaining, settings.close.on_last_project) {
         (1.., _) => AfterClose::Stay,
         (0, LastProjectClosed::Home) => AfterClose::ShowHome,
         (0, LastProjectClosed::Quit) => AfterClose::Quit,
@@ -1112,7 +1112,8 @@ mod tests {
         use super::{AfterClose, last_project_closed_action};
         use fude_core::settings::{LastProjectClosed, Settings};
         let home = Settings::default();
-        let quit = Settings { on_last_project_closed: LastProjectClosed::Quit, ..Settings::default() };
+        let mut quit = Settings::default();
+        quit.close.on_last_project = LastProjectClosed::Quit;
         assert_eq!(last_project_closed_action(&home, 1), AfterClose::Stay);
         assert_eq!(last_project_closed_action(&quit, 2), AfterClose::Stay);
         assert_eq!(last_project_closed_action(&home, 0), AfterClose::ShowHome);
