@@ -282,8 +282,11 @@ pub struct WorkspaceView {
     save_task: Option<Task<()>>,
     /// 最後に見たウィンドウの位置と大きさ（アプリの終了時はウィンドウに触れないため）。
     last_geom: Option<WindowGeom>,
-    /// 設定（段階 9 までは既定値）。
+    /// 設定の写し（ConfigState と同じ値。変化を見比べるために持つ）。
     pub(crate) settings: Settings,
+    /// 閉じた書き損じの知らせ（同じ内容なら出し直さない）。
+    notice_dismissed: Option<Vec<ConfigIssue>>,
+    _config: Subscription,
     /// 最近開いたプロジェクトと、その保存先。
     pub(crate) recent: RecentList,
     recent_path: Option<PathBuf>,
@@ -399,7 +402,9 @@ impl WorkspaceView {
             wsl_hosts: Arc::new(WslHosts::new()),
             focus,
             session_path,
-            settings: Settings::default(),
+            settings: cx.global::<crate::config_runtime::ConfigState>().settings.clone(),
+            notice_dismissed: None,
+            _config: cx.observe_global_in::<crate::config_runtime::ConfigState>(window, |this, window, cx| this.on_config_changed(window, cx)),
             recent,
             recent_path,
             last_session,
@@ -431,6 +436,7 @@ impl WorkspaceView {
             _bounds: bounds,
             _quit: quit,
         };
+        this.workspace.set_local_shell(&this.settings.terminal);
         match open {
             InitialOpen::Project { root, shell } => this.open_project(root, shell, cx),
             InitialOpen::File { file, root_hint } => this.open_file(file, root_hint, None, window, cx),
@@ -595,6 +601,79 @@ impl WorkspaceView {
         // 次の描画の sync_terminals がそのペインへフォーカスを当てる。
         self.refocus_pane();
         cx.notify();
+    }
+
+    /// 設定ファイルを読み直した（ConfigState が変わった）。ウィンドウとターミナルとプロジェクトに効くものを反映する。
+    /// テーマ、フォント、キーは config_runtime::apply_global が反映済み。
+    fn on_config_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let new = cx.global::<crate::config_runtime::ConfigState>().settings.clone();
+        if new == self.settings {
+            cx.notify();
+            return;
+        }
+        let old = std::mem::replace(&mut self.settings, new.clone());
+        if old.window != new.window {
+            window.set_background_appearance(crate::config_runtime::background_appearance(&new.window));
+        }
+        self.workspace.set_local_shell(&new.terminal);
+        for (view, _) in self.terminals.values() {
+            view.update(cx, |v, cx| v.apply_settings(&new, window, cx));
+        }
+        if old.tree != new.tree {
+            // 隠すフォルダが変わったら、ファイルへのアクセスと監視を作り直し、ツリーを読み直す。
+            self.live.clear();
+            self.tree.models.clear();
+            self.sync_live(cx);
+        }
+        cx.notify();
+    }
+
+    /// 隠すフォルダの設定。
+    pub(crate) fn heavy_dirs(&self) -> fude_fs::ignored::HeavyDirs {
+        fude_fs::ignored::HeavyDirs::from_settings(self.settings.tree.heavy_dirs.clone(), self.settings.tree.show_heavy_dirs)
+    }
+
+    /// 設定ファイルの書き損じの知らせ（最下部の 1 行）。最初の 1 件と、ほかの件数、「開く」、閉じる。
+    fn render_config_notice(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
+        let state = cx.global::<crate::config_runtime::ConfigState>();
+        let first = state.issues.first()?;
+        if self.notice_dismissed.as_ref() == Some(&state.issues) {
+            return None;
+        }
+        let rest = state.issues.len() - 1;
+        let text = if rest > 0 {
+            format!("{}（ほかに {rest} 件）", crate::config_runtime::issue_text(first))
+        } else {
+            crate::config_runtime::issue_text(first)
+        };
+        let path = state.path.clone();
+        let issues = state.issues.clone();
+        let button = |label: &'static str| {
+            div().px(px(8.)).py(px(2.)).rounded(crate::theme::size::RADIUS_SM).cursor_pointer().hover(|s| s.bg(theme.bg_hover)).child(label)
+        };
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(4.))
+                .bg(theme.bg_panel)
+                .border_t_1()
+                .border_color(theme.border_subtle)
+                .text_size(px(12.))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.warn).child(text))
+                .children(path.map(|path| {
+                    button("開く").id("config-notice-open").on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_file(fude_core::location::FileLocation::Local(path.clone()), None, None, window, cx);
+                    }))
+                }))
+                .child(button("閉じる").id("config-notice-close").on_click(cx.listener(move |this, _, _, cx| {
+                    this.notice_dismissed = Some(issues.clone());
+                    cx.notify();
+                }))),
+        )
     }
 
     /// 既定のシェルで新しいタブを開き、`claude` と Enter を入力する。
@@ -847,6 +926,8 @@ impl WorkspaceView {
             }
             let terminal_id = terminal_id(id);
             let view = cx.new(|cx| TerminalView::new(&kind, &root, &terminal_id, window, cx));
+            let settings = self.settings.clone();
+            view.update(cx, |v, cx| v.apply_settings(&settings, window, cx));
             let link_kind = kind.clone();
             let link_root = root.clone();
             let sub = cx.subscribe_in(&view, window, move |this, view, event: &TerminalEvent, window, cx| {
@@ -1039,6 +1120,7 @@ impl Render for WorkspaceView {
         let dialog = self.render_dialog(window, cx, now);
         let palette = self.render_palette(window, cx, now);
         let wait_frame = self.render_wait_frame(&theme, now);
+        let config_notice = self.render_config_notice(&theme, cx);
 
         div()
             .id("workspace")
@@ -1095,6 +1177,7 @@ impl Render for WorkspaceView {
                     .children(vertical_tabs)
                     .child(div().flex_1().min_w_0().h_full().child(main)),
             )
+            .children(config_notice)
             .children(menu)
             .children(project_menu)
             .children(home_menu)

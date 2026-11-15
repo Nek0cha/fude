@@ -72,9 +72,15 @@ impl WorkspaceView {
     /// ProjectFs を裏で用意し（WSL は配置の確認を待つ）、監視を始め、Git の状態を読む。
     fn start_live(&mut self, project: ProjectId, root: ProjectRoot, cx: &mut Context<Self>) {
         let hosts = self.wsl_hosts.clone();
-        let task = cx.background_spawn(async move { project_fs(&root, &hosts).map(|fs| (fs, root, hosts)) });
+        let heavy = self.heavy_dirs();
+        let task = cx.background_spawn(async move {
+            project_fs(&root, &hosts).map(|fs| {
+                fs.set_heavy_dirs(heavy.clone());
+                (fs, root, hosts, heavy)
+            })
+        });
         cx.spawn(async move |this, cx| {
-            let (fs, root, hosts) = match task.await {
+            let (fs, root, hosts, heavy) = match task.await {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("プロジェクトのファイルを扱えない: {e}");
@@ -82,7 +88,7 @@ impl WorkspaceView {
                 }
             };
             let (tx, mut rx) = futures::channel::mpsc::unbounded::<WatchBatch>();
-            let watcher = match start_watcher(&root, &hosts, fude_fs::ignored::HeavyDirs::default(), Box::new(move |b| {
+            let watcher = match start_watcher(&root, &hosts, heavy, Box::new(move |b| {
                 let _ = tx.unbounded_send(b);
             })) {
                 Ok(w) => Some(w),

@@ -93,7 +93,10 @@ impl TerminalView {
     /// terminal_id は FUDE_TERMINAL_ID として渡す（`p<ペインの番号>`）。
     pub fn new(kind: &ShellKind, root: &ProjectRoot, terminal_id: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<SessionEvent>();
-        let spec = spawn_spec(kind, root, terminal_id, &fude_core::settings::NativeShell::Auto, &|k| std::env::var(k).ok());
+        let native = cx
+            .try_global::<crate::config_runtime::ConfigState>()
+            .map_or(fude_core::settings::NativeShell::Auto, |c| c.settings.terminal.shell.clone());
+        let spec = spawn_spec(kind, root, terminal_id, &native, &|k| std::env::var(k).ok());
         let on_event = Arc::new(move |ev| {
             let _ = tx.unbounded_send(ev);
         });
