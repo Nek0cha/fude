@@ -238,7 +238,7 @@ mod tests {
     }
 
     fn entry(name: &str, is_dir: bool) -> DirEntry {
-        DirEntry { name: name.into(), is_dir }
+        DirEntry { name: name.into(), is_dir, ignored: false }
     }
 
     fn shape(rows: &[TreeRow]) -> Vec<(String, usize, bool)> {

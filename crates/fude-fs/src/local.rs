@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fude_core::git_head::read_branch;
 use ignore::WalkBuilder;
 
-use crate::{DirEntry, FileMeta, ProjectFs, RelPath, TrashTicket, WALK_MAX};
+use crate::{DirEntry, FileMeta, ProjectFs, RelPath, TrashTicket, WALK_MAX, ignored};
 
 /// 一時ファイルの名前を、同じプロセスの中の同時の書き込みで重ねないための通し番号。
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -30,25 +30,28 @@ impl ProjectFs for LocalFs {
         if !fs::metadata(&dir)?.is_dir() {
             return Err(io::Error::new(io::ErrorKind::NotADirectory, format!("フォルダではない: {}", rel.as_str())));
         }
-        // parents(true) で、上位のディレクトリの .gitignore も効かせる。
-        let walker = WalkBuilder::new(&dir)
-            .max_depth(Some(1))
-            .hidden(false)
-            .parents(true)
-            .filter_entry(|e| e.file_name() != ".git")
-            .build();
+        // 外したものも出して印を付ける。外されずに残る名前は、上位のフォルダの規則も効かせて求める。
+        let kept = ignored::kept_names(&dir)?;
+        let dir_ignored = ignored::is_ignored_path(&self.root, rel);
+        let in_repo = ignored::in_git_repo(&self.root);
         let mut entries = Vec::new();
-        for entry in walker {
+        for entry in fs::read_dir(&dir)? {
             let Ok(entry) = entry else { continue };
-            if entry.depth() == 0 {
+            let name = entry.file_name();
+            if name == ".git" {
                 continue;
             }
             let is_dir = match entry.file_type() {
-                Some(t) if t.is_symlink() => entry.path().is_dir(),
-                Some(t) => t.is_dir(),
-                None => false,
+                Ok(t) if t.is_symlink() => entry.path().is_dir(),
+                Ok(t) => t.is_dir(),
+                Err(_) => false,
             };
-            entries.push(DirEntry { name: entry.file_name().to_string_lossy().into_owned(), is_dir });
+            let is_ignored = dir_ignored || !kept.contains(&name);
+            let name = name.to_string_lossy().into_owned();
+            if is_dir && ignored::hides_dir(&name, is_ignored, in_repo) {
+                continue;
+            }
+            entries.push(DirEntry { name, is_dir, ignored: is_ignored });
         }
         entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
         Ok(entries)
@@ -237,7 +240,9 @@ mod tests {
         fs::write(root.join("README.md"), "").unwrap();
         let fs_ = LocalFs::new(root.to_path_buf());
         let entries = fs_.list_dir(&RelPath::root()).unwrap();
-        assert_eq!(names(&entries), vec![("src", true), (".env", false), (".gitignore", false), ("README.md", false)]);
+        // 外した a.log は印を付けて出す。外された target（隠す名前）と .git は出さない。
+        assert_eq!(names(&entries), vec![("src", true), (".env", false), (".gitignore", false), ("README.md", false), ("a.log", false)]);
+        assert!(entries.iter().all(|e| e.ignored == (e.name == "a.log")));
     }
 
     #[test]
@@ -250,7 +255,8 @@ mod tests {
         fs::write(root.join("src").join("x.tmp"), "").unwrap();
         fs::write(root.join("src").join("y.rs"), "").unwrap();
         let entries = LocalFs::new(root.to_path_buf()).list_dir(&rel("src")).unwrap();
-        assert_eq!(names(&entries), vec![("y.rs", false)]);
+        let got: Vec<(&str, bool)> = entries.iter().map(|e| (e.name.as_str(), e.ignored)).collect();
+        assert_eq!(got, vec![("x.tmp", true), ("y.rs", false)]);
     }
 
     #[test]
@@ -258,6 +264,80 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = LocalFs::new(dir.path().to_path_buf()).list_dir(&rel("none")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// git のリポジトリの形のフォルダを作り、files を書く（"/" で終わるものはフォルダ）。
+    fn repo(git: bool, files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        if git {
+            fs::create_dir_all(dir.path().join(".git")).unwrap();
+        }
+        for (path, body) in files {
+            let p = dir.path().join(path);
+            if path.ends_with('/') {
+                fs::create_dir_all(&p).unwrap();
+            } else {
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(&p, body).unwrap();
+            }
+        }
+        dir
+    }
+
+    fn marks(fs_: &LocalFs, at: &str) -> Vec<(String, bool)> {
+        let rel = if at.is_empty() { RelPath::root() } else { rel(at) };
+        fs_.list_dir(&rel).unwrap().into_iter().map(|e| (e.name, e.ignored)).collect()
+    }
+
+    fn pair(name: &str, ignored: bool) -> (String, bool) {
+        (name.to_string(), ignored)
+    }
+
+    #[test]
+    fn list_dir_marks_ignored_entries() {
+        let dir = repo(true, &[(".gitignore", "docs/\n*.log\n"), ("docs/plan.md", ""), ("src/a.rs", ""), ("a.log", ""), ("README.md", "")]);
+        let got = marks(&LocalFs::new(dir.path().to_path_buf()), "");
+        assert_eq!(got, vec![pair("docs", true), pair("src", false), pair(".gitignore", false), pair("README.md", false), pair("a.log", true)]);
+    }
+
+    #[test]
+    fn list_dir_hides_heavy_ignored_dirs() {
+        let dir = repo(true, &[(".gitignore", "node_modules/\ntarget/\n"), ("node_modules/x.js", ""), ("target/y", ""), ("src/a.rs", "")]);
+        let got = marks(&LocalFs::new(dir.path().to_path_buf()), "");
+        assert_eq!(got, vec![pair("src", false), pair(".gitignore", false)]);
+    }
+
+    #[test]
+    fn list_dir_keeps_tracked_vendor() {
+        let dir = repo(true, &[("vendor/lib.go", "")]);
+        assert_eq!(marks(&LocalFs::new(dir.path().to_path_buf()), ""), vec![pair("vendor", false)]);
+    }
+
+    #[test]
+    fn list_dir_without_git_hides_by_name() {
+        let dir = repo(false, &[("node_modules/x.js", ""), ("src/a.rs", "")]);
+        assert_eq!(marks(&LocalFs::new(dir.path().to_path_buf()), ""), vec![pair("src", false)]);
+    }
+
+    #[test]
+    fn list_dir_inside_ignored_dir_marks_children() {
+        let dir = repo(true, &[(".gitignore", "docs/\n"), ("docs/a.md", ""), ("docs/sub/b.md", ""), ("docs/node_modules/x.js", "")]);
+        let got = marks(&LocalFs::new(dir.path().to_path_buf()), "docs");
+        assert_eq!(got, vec![pair("sub", true), pair("a.md", true)]);
+    }
+
+    #[test]
+    fn negated_file_inside_ignored_dir_is_tracked() {
+        let dir = repo(true, &[(".gitignore", "docs/*\n!docs/keep.md\n"), ("docs/keep.md", ""), ("docs/other.md", "")]);
+        let got = marks(&LocalFs::new(dir.path().to_path_buf()), "docs");
+        assert_eq!(got, vec![pair("keep.md", false), pair("other.md", true)]);
+    }
+
+    #[test]
+    fn dot_ignore_counts_as_ignored() {
+        let dir = repo(true, &[(".ignore", "notes/\n"), ("notes/a.md", ""), ("src/a.rs", "")]);
+        let got = marks(&LocalFs::new(dir.path().to_path_buf()), "");
+        assert_eq!(got, vec![pair("notes", true), pair("src", false), pair(".ignore", false)]);
     }
 
     #[test]

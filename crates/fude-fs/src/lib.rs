@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod git;
+pub mod ignored;
 mod local;
 pub mod plans;
 pub mod procs;
@@ -105,6 +106,9 @@ impl From<PathError> for io::Error {
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
+    /// gitignore などで外されている（外したフォルダの中も含む）。ツリーでは薄く描く。
+    #[serde(default)]
+    pub ignored: bool,
 }
 
 /// ゴミ箱から戻すための札。id が空なら、ゴミ箱には入ったが戻す手がかりが取れなかった（取り消しには使えない）。
@@ -126,7 +130,8 @@ pub struct FileMeta {
 pub const WALK_MAX: usize = 200_000;
 
 pub trait ProjectFs: Send + Sync {
-    /// rel の直下。gitignore を尊重し、隠しファイルは出し、.git は出さない。ディレクトリが先、各々名前順。
+    /// rel の直下。外したもの（gitignore など）も ignored の印を付けて出し、隠しファイルも出し、.git と
+    /// 外された重いフォルダ（ignored::HIDDEN_DIRS）は出さない。ディレクトリが先、各々名前順。
     fn list_dir(&self, rel: &RelPath) -> io::Result<Vec<DirEntry>>;
     fn read(&self, rel: &RelPath) -> io::Result<Vec<u8>>;
     /// 同じディレクトリの一時ファイルに書いてから rename する。

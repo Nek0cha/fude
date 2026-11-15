@@ -311,7 +311,7 @@ mod tests {
         let data = vec![0u8, b'\n', 255];
         fs.write(&rel("a/b.bin"), &data).unwrap();
         assert_eq!(fs.read(&rel("a/b.bin")).unwrap(), data);
-        assert_eq!(fs.list_dir(&RelPath::root()).unwrap(), vec![DirEntry { name: "a".into(), is_dir: true }]);
+        assert_eq!(fs.list_dir(&RelPath::root()).unwrap(), vec![DirEntry { name: "a".into(), is_dir: true, ignored: false }]);
         assert_eq!(fs.branch().unwrap(), Some("dev".into()));
     }
 
