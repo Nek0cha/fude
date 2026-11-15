@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::config_runtime::{ConfigState, apply_edit};
-use crate::hook_targets::{HookOp, HookTarget, TargetState};
+use crate::hook_targets::{HookBoard, TargetState, target_label, target_row};
 use fude_core::claude_settings::HookStatus;
 use crate::theme::{Theme, size};
 
@@ -79,57 +79,13 @@ pub struct SettingsView {
     mono_query: Entity<InputState>,
     /// 入っている書体（初めて描くときに一度だけ取る）。
     fonts: Option<Vec<String>>,
-    /// Claude Code の hook の登録先と、その状態（設計書 §5.4）。
-    targets: Vec<(HookTarget, TargetState)>,
-    /// WSL 側の fude の置き場所。
-    wsl_bin: String,
+    /// Claude Code の hook の登録先と、その状態（チュートリアルと共有する。9c §5.4）。
+    board: Entity<HookBoard>,
     _subs: Vec<Subscription>,
 }
 
-/// 登録先の状態の文と、押せるボタン（何をするか、文言）。
-pub(crate) fn target_row(state: &TargetState) -> (String, Vec<(HookOp, &'static str)>) {
-    match state {
-        TargetState::Unchecked => ("まだ調べていません".into(), vec![(HookOp::Check, "調べる")]),
-        TargetState::Checking => ("調べています…".into(), vec![]),
-        TargetState::Known(HookStatus::Registered) => {
-            ("登録済み".into(), vec![(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")])
-        }
-        TargetState::Known(HookStatus::NotRegistered) => ("まだ登録していません".into(), vec![(HookOp::Install, "登録する")]),
-        TargetState::Known(HookStatus::Outdated) => {
-            ("登録し直してください".into(), vec![(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")])
-        }
-        TargetState::Known(HookStatus::Unreadable(r)) => (format!("読めません: {r}"), vec![(HookOp::Check, "調べ直す")]),
-        TargetState::NotInstalled => {
-            ("まだ登録していません（登録するときに fude を WSL に置きます）".into(), vec![(HookOp::Install, "登録する")])
-        }
-    }
-}
-
-/// パネルを開き直したときに調べ直す登録先（設計書 §5.4）。この PC と、一度調べた WSL。
-/// まだ調べていない WSL は起こさないため、調べている最中のものは二重に走らせないため除く。
-pub(crate) fn rows_to_recheck(targets: &[(HookTarget, TargetState)]) -> Vec<HookTarget> {
-    targets
-        .iter()
-        .filter(|(t, s)| match s {
-            TargetState::Checking => false,
-            TargetState::Unchecked => *t == HookTarget::ThisPc,
-            TargetState::Known(_) | TargetState::NotInstalled => true,
-        })
-        .map(|(t, _)| t.clone())
-        .collect()
-}
-
-/// 登録先の名前。
-fn target_label(target: &HookTarget) -> String {
-    match target {
-        HookTarget::ThisPc if cfg!(target_os = "macos") => "この Mac".to_string(),
-        HookTarget::ThisPc => "Windows（この PC）".to_string(),
-        HookTarget::Wsl(d) => format!("WSL: {d}"),
-    }
-}
-
 impl SettingsView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> SettingsView {
+    pub fn new(board: Entity<HookBoard>, window: &mut Window, cx: &mut Context<Self>) -> SettingsView {
         let settings = cx.global::<ConfigState>().settings.clone();
         let opacity = cx.new(|_| {
             SliderState::new().min(OPACITY_MIN).max(OPACITY_MAX).step(0.01).default_value(settings.window.background_opacity)
@@ -154,6 +110,7 @@ impl SettingsView {
                 }
             }),
             cx.observe_global_in::<ConfigState>(window, |this, window, cx| this.sync_from_config(window, cx)),
+            cx.observe(&board, |_, _, cx| cx.notify()),
         ];
         for input in [&ui_query, &mono_query] {
             subs.push(cx.subscribe(input, |_, _, ev: &InputEvent, cx| {
@@ -162,11 +119,7 @@ impl SettingsView {
                 }
             }));
         }
-        #[cfg(windows)]
-        let wsl_bin = fude_fs::wsl::default_bin(&|k| std::env::var(k).ok());
-        #[cfg(not(windows))]
-        let wsl_bin = String::new();
-        let mut view = SettingsView {
+        SettingsView {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             opacity,
@@ -174,69 +127,14 @@ impl SettingsView {
             ui_query,
             mono_query,
             fonts: None,
-            targets: vec![(HookTarget::ThisPc, TargetState::Unchecked)],
-            wsl_bin,
+            board,
             _subs: subs,
-        };
-        view.run_target(HookTarget::ThisPc, HookOp::Check, cx);
-        view.reload_distros(cx);
-        view
+        }
     }
 
     /// パネルを開き直した。hook の状態を調べ直す。
     pub fn reopened(&mut self, cx: &mut Context<Self>) {
-        for target in rows_to_recheck(&self.targets) {
-            self.run_target(target, HookOp::Check, cx);
-        }
-    }
-
-    /// target に op を裏で行い、終わったら状態を差し替える。
-    fn run_target(&mut self, target: HookTarget, op: HookOp, cx: &mut Context<Self>) {
-        let Some(slot) = self.targets.iter_mut().find(|(t, _)| *t == target) else { return };
-        if slot.1 == TargetState::Checking {
-            return;
-        }
-        slot.1 = TargetState::Checking;
-        cx.notify();
-        let bin = self.wsl_bin.clone();
-        let job_target = target.clone();
-        let task = cx.background_spawn(async move { crate::hook_targets::run(&job_target, op, &bin) });
-        cx.spawn(async move |this, cx| {
-            let state = task.await;
-            this.update(cx, |this, cx| {
-                if let Some(slot) = this.targets.iter_mut().find(|(t, _)| *t == target) {
-                    slot.1 = state;
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// WSL のディストリビューションの一覧を読み直す（Windows だけ）。調べた状態は、同じ名前なら残す。
-    fn reload_distros(&mut self, cx: &mut Context<Self>) {
-        if !cfg!(windows) {
-            return;
-        }
-        let task = cx.background_spawn(async { fude_term::list_distros() });
-        cx.spawn(async move |this, cx| {
-            let Ok(distros) = task.await else { return };
-            this.update(cx, |this, cx| {
-                let old = std::mem::take(&mut this.targets);
-                let state_of = |t: &HookTarget| old.iter().find(|(o, _)| o == t).map(|(_, s)| s.clone());
-                let mut targets = vec![(HookTarget::ThisPc, state_of(&HookTarget::ThisPc).unwrap_or(TargetState::Unchecked))];
-                for d in distros {
-                    let t = HookTarget::Wsl(d);
-                    let s = state_of(&t).unwrap_or(TargetState::Unchecked);
-                    targets.push((t, s));
-                }
-                this.targets = targets;
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.board.update(cx, |b, cx| b.recheck(cx));
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -483,7 +381,8 @@ impl SettingsView {
     }
 
     fn render_hooks(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let rows = self.targets.iter().enumerate().map(|(i, (target, state))| {
+        let board = self.board.read(cx).targets().to_vec();
+        let rows = board.iter().enumerate().map(|(i, (target, state))| {
             let (text, actions) = target_row(state);
             let color = match state {
                 TargetState::Known(HookStatus::Registered) => theme.fg_default,
@@ -493,7 +392,7 @@ impl SettingsView {
             let buttons = actions.into_iter().enumerate().map(|(j, (op, label))| {
                 let target = target.clone();
                 small_button(SharedString::from(format!("hook-{i}-{j}")), label, theme)
-                    .on_click(cx.listener(move |this, _, _, cx| this.run_target(target.clone(), op, cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.board.update(cx, |b, cx| b.run(target.clone(), op, cx))))
             });
             div()
                 .flex()
@@ -525,7 +424,7 @@ impl SettingsView {
                 d.child(
                     div().pt(px(6.)).flex().child(
                         small_button("hook-reload-distros", "WSL の一覧を読み直す", theme)
-                            .on_click(cx.listener(|this, _, _, cx| this.reload_distros(cx))),
+                            .on_click(cx.listener(|this, _, _, cx| this.board.update(cx, |b, cx| b.reload_distros(cx)))),
                     ),
                 )
             })
@@ -582,9 +481,7 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     // super::* は gpui の test 属性も持ち込むので、名前を挙げる。
-    use super::{filter_fonts, font_list, line_height_label, parse_hex_input, percent_label, rows_to_recheck, target_row};
-    use crate::hook_targets::{HookOp, HookTarget, TargetState};
-    use fude_core::claude_settings::HookStatus;
+    use super::{filter_fonts, font_list, line_height_label, parse_hex_input, percent_label};
 
     #[test]
     fn opacity_percent_label() {
@@ -620,43 +517,5 @@ mod tests {
         assert_eq!(parse_hex_input(" FF0080 "), Some(0xff0080));
         assert_eq!(parse_hex_input("#ff008"), None);
         assert_eq!(parse_hex_input("red"), None);
-    }
-
-    #[test]
-    fn row_texts_for_each_state() {
-        let ops = |st: &TargetState| target_row(st).1.into_iter().map(|(op, label)| (op, label)).collect::<Vec<_>>();
-        assert_eq!(target_row(&TargetState::Unchecked).0, "まだ調べていません");
-        assert_eq!(ops(&TargetState::Unchecked), [(HookOp::Check, "調べる")]);
-        assert_eq!(target_row(&TargetState::Checking).0, "調べています…");
-        assert!(ops(&TargetState::Checking).is_empty());
-        let reg = TargetState::Known(HookStatus::Registered);
-        assert_eq!(target_row(&reg).0, "登録済み");
-        assert_eq!(ops(&reg), [(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")]);
-        let not = TargetState::Known(HookStatus::NotRegistered);
-        assert_eq!(target_row(&not).0, "まだ登録していません");
-        assert_eq!(ops(&not), [(HookOp::Install, "登録する")]);
-        let old = TargetState::Known(HookStatus::Outdated);
-        assert_eq!(target_row(&old).0, "登録し直してください");
-        assert_eq!(ops(&old), [(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")]);
-        let bad = TargetState::Known(HookStatus::Unreadable("x".into()));
-        assert_eq!(target_row(&bad).0, "読めません: x");
-        assert_eq!(ops(&bad), [(HookOp::Check, "調べ直す")]);
-        assert_eq!(target_row(&TargetState::NotInstalled).0, "まだ登録していません（登録するときに fude を WSL に置きます）");
-        assert_eq!(ops(&TargetState::NotInstalled), [(HookOp::Install, "登録する")]);
-    }
-
-    #[test]
-    fn reopening_rechecks_this_pc_and_checked_wsl() {
-        let targets = vec![
-            (HookTarget::ThisPc, TargetState::Known(HookStatus::NotRegistered)),
-            (HookTarget::Wsl("A".into()), TargetState::Unchecked),
-            (HookTarget::Wsl("B".into()), TargetState::Known(HookStatus::Registered)),
-            (HookTarget::Wsl("C".into()), TargetState::NotInstalled),
-            (HookTarget::Wsl("D".into()), TargetState::Checking),
-        ];
-        assert_eq!(
-            rows_to_recheck(&targets),
-            [HookTarget::ThisPc, HookTarget::Wsl("B".into()), HookTarget::Wsl("C".into())]
-        );
     }
 }

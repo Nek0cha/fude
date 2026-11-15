@@ -3,6 +3,7 @@
 //! どの関数も WSL の起動や配置を待つことがあるので、裏のスレッドから呼ぶ。
 
 use fude_core::claude::HookCommand;
+use gpui_kit::AppContext as _;
 use fude_core::claude_settings::{HookAdmin, HookStatus, home_from_env, run_admin, settings_path};
 
 /// 登録先。
@@ -115,10 +116,152 @@ pub(crate) fn run(target: &HookTarget, op: HookOp, wsl_bin: &str) -> TargetState
     }
 }
 
+/// 登録先の状態の文と、押せるボタン（何をするか、文言）。
+pub(crate) fn target_row(state: &TargetState) -> (String, Vec<(HookOp, &'static str)>) {
+    match state {
+        TargetState::Unchecked => ("まだ調べていません".into(), vec![(HookOp::Check, "調べる")]),
+        TargetState::Checking => ("調べています…".into(), vec![]),
+        TargetState::Known(HookStatus::Registered) => {
+            ("登録済み".into(), vec![(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")])
+        }
+        TargetState::Known(HookStatus::NotRegistered) => ("まだ登録していません".into(), vec![(HookOp::Install, "登録する")]),
+        TargetState::Known(HookStatus::Outdated) => {
+            ("登録し直してください".into(), vec![(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")])
+        }
+        TargetState::Known(HookStatus::Unreadable(r)) => (format!("読めません: {r}"), vec![(HookOp::Check, "調べ直す")]),
+        TargetState::NotInstalled => {
+            ("まだ登録していません（登録するときに fude を WSL に置きます）".into(), vec![(HookOp::Install, "登録する")])
+        }
+    }
+}
+
+/// パネルを開き直したときに調べ直す登録先（9b の設計書 §5.4）。この PC と、一度調べた WSL。
+/// まだ調べていない WSL は起こさないため、調べている最中のものは二重に走らせないため除く。
+pub(crate) fn rows_to_recheck(targets: &[(HookTarget, TargetState)]) -> Vec<HookTarget> {
+    targets
+        .iter()
+        .filter(|(t, s)| match s {
+            TargetState::Checking => false,
+            TargetState::Unchecked => *t == HookTarget::ThisPc,
+            TargetState::Known(_) | TargetState::NotInstalled => true,
+        })
+        .map(|(t, _)| t.clone())
+        .collect()
+}
+
+/// 登録先の名前。
+pub(crate) fn target_label(target: &HookTarget) -> String {
+    match target {
+        HookTarget::ThisPc if cfg!(target_os = "macos") => "この Mac".to_string(),
+        HookTarget::ThisPc => "Windows（この PC）".to_string(),
+        HookTarget::Wsl(d) => format!("WSL: {d}"),
+    }
+}
+
+/// target の行を「調べている」にする。調べている最中か、行が無ければ false（走らせない）。
+fn begin(targets: &mut [(HookTarget, TargetState)], target: &HookTarget) -> bool {
+    match targets.iter_mut().find(|(t, _)| t == target) {
+        Some(slot) if slot.1 != TargetState::Checking => {
+            slot.1 = TargetState::Checking;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// hook の登録先の一覧と状態（アプリに 1 つ）。設定パネルとチュートリアルが同じものを見る（9c §5.4）。
+pub(crate) struct HookBoard {
+    targets: Vec<(HookTarget, TargetState)>,
+    /// WSL 側の fude の置き場所。
+    wsl_bin: String,
+}
+
+impl HookBoard {
+    /// この PC を調べ、WSL の一覧を読む。
+    pub fn new(cx: &mut gpui_kit::Context<Self>) -> Self {
+        #[cfg(windows)]
+        let wsl_bin = fude_fs::wsl::default_bin(&|k| std::env::var(k).ok());
+        #[cfg(not(windows))]
+        let wsl_bin = String::new();
+        let mut board = HookBoard { targets: vec![(HookTarget::ThisPc, TargetState::Unchecked)], wsl_bin };
+        board.run(HookTarget::ThisPc, HookOp::Check, cx);
+        board.reload_distros(cx);
+        board
+    }
+
+    pub fn targets(&self) -> &[(HookTarget, TargetState)] {
+        &self.targets
+    }
+
+    /// target に op を裏で行い、終わったら状態を差し替える。調べている最中なら何もしない。
+    pub fn run(&mut self, target: HookTarget, op: HookOp, cx: &mut gpui_kit::Context<Self>) {
+        if !begin(&mut self.targets, &target) {
+            return;
+        }
+        cx.notify();
+        let bin = self.wsl_bin.clone();
+        let job_target = target.clone();
+        let task = cx.background_spawn(async move { run(&job_target, op, &bin) });
+        cx.spawn(async move |this, cx| {
+            let state = task.await;
+            this.update(cx, |this, cx| {
+                if let Some(slot) = this.targets.iter_mut().find(|(t, _)| *t == target) {
+                    slot.1 = state;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// WSL のディストリビューションの一覧を読み直す（Windows だけ）。調べた状態は、同じ名前なら残す。
+    pub fn reload_distros(&mut self, cx: &mut gpui_kit::Context<Self>) {
+        if !cfg!(windows) {
+            return;
+        }
+        let task = cx.background_spawn(async { fude_term::list_distros() });
+        cx.spawn(async move |this, cx| {
+            let Ok(distros) = task.await else { return };
+            this.update(cx, |this, cx| {
+                let old = std::mem::take(&mut this.targets);
+                let state_of = |t: &HookTarget| old.iter().find(|(o, _)| o == t).map(|(_, s)| s.clone());
+                let mut targets = vec![(HookTarget::ThisPc, state_of(&HookTarget::ThisPc).unwrap_or(TargetState::Unchecked))];
+                for d in distros {
+                    let t = HookTarget::Wsl(d);
+                    let s = state_of(&t).unwrap_or(TargetState::Unchecked);
+                    targets.push((t, s));
+                }
+                this.targets = targets;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 開き直したときに調べ直す（rows_to_recheck）。
+    pub fn recheck(&mut self, cx: &mut gpui_kit::Context<Self>) {
+        for target in rows_to_recheck(&self.targets) {
+            self.run(target, HookOp::Check, cx);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fude_core::claude_settings::HookStatus;
+
+    #[test]
+    fn board_skips_duplicate_run() {
+        let mut targets = vec![(HookTarget::ThisPc, TargetState::Checking), (HookTarget::Wsl("A".into()), TargetState::Unchecked)];
+        assert!(!begin(&mut targets, &HookTarget::ThisPc), "調べている最中は二重に走らせない");
+        assert_eq!(targets[0].1, TargetState::Checking);
+        assert!(begin(&mut targets, &HookTarget::Wsl("A".into())));
+        assert_eq!(targets[1].1, TargetState::Checking);
+        assert!(!begin(&mut targets, &HookTarget::Wsl("B".into())), "無い登録先は何もしない");
+    }
 
     #[test]
     fn status_output_parses() {
@@ -142,5 +285,43 @@ mod tests {
             TargetState::Known(HookStatus::Unreadable(r)) => assert!(r.contains("秒以内に終わらない"), "{r}"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn row_texts_for_each_state() {
+        let ops = |st: &TargetState| target_row(st).1.into_iter().map(|(op, label)| (op, label)).collect::<Vec<_>>();
+        assert_eq!(target_row(&TargetState::Unchecked).0, "まだ調べていません");
+        assert_eq!(ops(&TargetState::Unchecked), [(HookOp::Check, "調べる")]);
+        assert_eq!(target_row(&TargetState::Checking).0, "調べています…");
+        assert!(ops(&TargetState::Checking).is_empty());
+        let reg = TargetState::Known(HookStatus::Registered);
+        assert_eq!(target_row(&reg).0, "登録済み");
+        assert_eq!(ops(&reg), [(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")]);
+        let not = TargetState::Known(HookStatus::NotRegistered);
+        assert_eq!(target_row(&not).0, "まだ登録していません");
+        assert_eq!(ops(&not), [(HookOp::Install, "登録する")]);
+        let old = TargetState::Known(HookStatus::Outdated);
+        assert_eq!(target_row(&old).0, "登録し直してください");
+        assert_eq!(ops(&old), [(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")]);
+        let bad = TargetState::Known(HookStatus::Unreadable("x".into()));
+        assert_eq!(target_row(&bad).0, "読めません: x");
+        assert_eq!(ops(&bad), [(HookOp::Check, "調べ直す")]);
+        assert_eq!(target_row(&TargetState::NotInstalled).0, "まだ登録していません（登録するときに fude を WSL に置きます）");
+        assert_eq!(ops(&TargetState::NotInstalled), [(HookOp::Install, "登録する")]);
+    }
+
+    #[test]
+    fn reopening_rechecks_this_pc_and_checked_wsl() {
+        let targets = vec![
+            (HookTarget::ThisPc, TargetState::Known(HookStatus::NotRegistered)),
+            (HookTarget::Wsl("A".into()), TargetState::Unchecked),
+            (HookTarget::Wsl("B".into()), TargetState::Known(HookStatus::Registered)),
+            (HookTarget::Wsl("C".into()), TargetState::NotInstalled),
+            (HookTarget::Wsl("D".into()), TargetState::Checking),
+        ];
+        assert_eq!(
+            rows_to_recheck(&targets),
+            [HookTarget::ThisPc, HookTarget::Wsl("B".into()), HookTarget::Wsl("C".into())]
+        );
     }
 }

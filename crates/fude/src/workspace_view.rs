@@ -344,6 +344,8 @@ pub struct WorkspaceView {
     pub(crate) searches: HashMap<ProjectId, (Entity<crate::search_view::SearchView>, Subscription)>,
     /// 設定パネル（初めて開いたときに作り、捨てない。9b の設計書 §5.1）。
     pub(crate) settings_view: Option<Entity<crate::settings_view::SettingsView>>,
+    /// hook の登録先の状態（設定パネルとチュートリアルで共有する。初めて要るときに作る）。
+    pub(crate) hook_board: Option<Entity<crate::hook_targets::HookBoard>>,
     /// プロジェクトが無いとき、ホーム画面の代わりに設定パネルを出している。
     pub(crate) settings_on_home: bool,
     /// コマンドパレット。
@@ -434,6 +436,7 @@ impl WorkspaceView {
             palette: None,
             searches: HashMap::new(),
             settings_view: None,
+            hook_board: None,
             settings_on_home: false,
             dialog: None,
             allow_close: false,
@@ -747,6 +750,11 @@ impl WorkspaceView {
         let Some((view, _)) = self.terminals.get(&id) else { return };
         self.focused_pane = Some(id);
         view.update(cx, |v, cx| v.open_search(window, cx));
+    }
+
+    /// hook の登録先の状態を返す（無ければ作る）。
+    pub(crate) fn hook_board(&mut self, cx: &mut Context<Self>) -> Entity<crate::hook_targets::HookBoard> {
+        self.hook_board.get_or_insert_with(|| cx.new(crate::hook_targets::HookBoard::new)).clone()
     }
 
     /// 次の描画で、選択中のペインへフォーカスを当て直す。

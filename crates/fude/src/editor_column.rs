@@ -191,7 +191,8 @@ impl WorkspaceView {
                 v.clone()
             }
             None => {
-                let v = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
+                let board = self.hook_board(cx);
+                let v = cx.new(|cx| crate::settings_view::SettingsView::new(board, window, cx));
                 // 設定ファイルはどのプロジェクトの中にも無いので、エディタ列には開けない（open_file は設定のフォルダを
                 // プロジェクトとして開いてしまう）。OS の既定のアプリで開く。
                 cx.subscribe_in(&v, window, |_, _, ev: &crate::settings_view::SettingsViewEvent, _, cx| match ev {
