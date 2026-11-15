@@ -2,9 +2,36 @@
 //! 描画コードには色や寸法の値を直接書かず、ここを通す。
 
 use fude_term::Palette;
-use gpui_kit::{BoxShadow, Font, FontFallbacks, Global, Rgba, font, hsla, point, px, rgb, rgba};
+use fude_core::settings::{FontSettings, Settings};
+use gpui_kit::{BoxShadow, Font, FontFallbacks, Global, Pixels, Rgba, font, hsla, point, px};
 
-pub const MONO_FAMILY: &str = "HackGen Console NF";
+/// ターミナルとエディタの書体と大きさ（設定の [font]）。描画のたびに読むので、Global ではなく静的な値に置く
+/// （mono_font() などは cx を受けない箇所からも呼ばれるため）。None は既定値。
+static FONTS: std::sync::RwLock<Option<FontSettings>> = std::sync::RwLock::new(None);
+
+fn fonts() -> FontSettings {
+    FONTS.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| Settings::default().font)
+}
+
+/// 設定の [font] を反映する。描き直しは呼び出し側が行う。
+pub fn set_fonts(font: &FontSettings) {
+    *FONTS.write().unwrap_or_else(|e| e.into_inner()) = Some(font.clone());
+}
+
+/// 文字の大きさと行の高さ。
+fn term_metrics(font: &FontSettings) -> (Pixels, Pixels) {
+    (px(font.size), px(font.line_height))
+}
+
+/// ターミナルとエディタの文字の大きさ。
+pub fn term_font_size() -> Pixels {
+    term_metrics(&fonts()).0
+}
+
+/// ターミナルとエディタの行の高さ。
+pub fn term_line_height() -> Pixels {
+    term_metrics(&fonts()).1
+}
 
 #[derive(Clone, Copy)]
 #[allow(dead_code)] // bg_panel、warn、danger は後続の計画（パネル、返事待ち）で使う
@@ -32,45 +59,8 @@ pub struct Theme {
     /// ターミナル内の検索の一致（warn の 30%）と、選んだ一致（warn の 70%）。
     pub search_match: Rgba,
     pub search_current: Rgba,
-}
-
-impl Theme {
-    pub fn dark() -> Self {
-        Self {
-            bg_window: rgba(0x0e0e149e),
-            bg_panel: rgba(0x1e1e2aeb),
-            bg_hover: rgba(0xffffff12),
-            border_subtle: rgba(0xffffff1f),
-            fg_default: rgb(0xd8d8e2),
-            fg_dim: rgb(0x7b7d90),
-            accent: rgb(0xb9a8ff),
-            warn: rgb(0xffd28a),
-            danger: rgb(0xff8a8a),
-            window_close_hover: rgba(0xff8a8a38),
-            project_colors: [
-                rgba(0x8fa7ff47),
-                rgba(0x7fd1c747),
-                rgba(0xe6b07a47),
-                rgba(0xd99ad647),
-                rgba(0x9fd38a47),
-                rgba(0xe59a9a47),
-            ],
-            term_palette: Palette {
-                ansi: [
-                    0x1e1e2a, 0xff8a8a, 0x5fe0b0, 0xffd28a, 0x8fa7ff, 0xd99ad6, 0x7fd1c7, 0xd8d8e2, //
-                    0x7b7d90, 0xffa3a3, 0x84ecc4, 0xffe0a8, 0xaabcff, 0xe8b4e6, 0x9fe3da, 0xf2f2f7,
-                ],
-                foreground: 0xd8d8e2,
-                background: 0x0e0e14,
-                cursor: 0xb9a8ff,
-            },
-            selection: rgba(0xb9a8ff4d),
-            diff_add: rgb(0x5fe0b0),
-            diff_del: rgb(0xff8a8a),
-            search_match: rgba(0xffd28a4d),
-            search_current: rgba(0xffd28ab3),
-        }
-    }
+    /// 構文ハイライトの色。None なら GPUI Kit の既定のまま。
+    pub syntax: Option<crate::themes::SyntaxPalette>,
 }
 
 impl Global for Theme {}
@@ -89,8 +79,6 @@ pub mod size {
     pub const PROJECT_ICON: Pixels = px(32.);
     pub const RADIUS_SM: Pixels = px(6.);
     pub const RADIUS_MD: Pixels = px(8.);
-    pub const TERM_FONT_SIZE: Pixels = px(14.);
-    pub const TERM_LINE_HEIGHT: Pixels = px(18.);
     pub const TERM_PAD_X: Pixels = px(12.);
     pub const TERM_PAD_Y: Pixels = px(8.);
     pub const PALETTE_W: Pixels = px(560.);
@@ -159,19 +147,78 @@ pub fn popup_shadow() -> Vec<BoxShadow> {
     vec![BoxShadow { color: hsla(0., 0., 0., 0.35), offset: point(px(0.), px(8.)), blur_radius: px(24.), spread_radius: px(0.), inset: false }]
 }
 
+/// UI の書体。設定の [font] ui を書けばそれを先に使い、無い文字は OS の既定の書体で補う。
 pub fn ui_font() -> Font {
     let (family, fallbacks): (&str, &[&str]) = if cfg!(target_os = "macos") {
         (".SystemUIFont", &["Hiragino Sans"])
     } else {
         ("Segoe UI Variable Text", &["Segoe UI", "Yu Gothic UI"])
     };
+    let mut fallbacks: Vec<String> = fallbacks.iter().map(|s| s.to_string()).collect();
+    let family = match fonts().ui {
+        Some(custom) => {
+            fallbacks.insert(0, family.to_string());
+            custom
+        }
+        None => family.to_string(),
+    };
     let mut f = font(family);
-    f.fallbacks = Some(FontFallbacks::from_fonts(fallbacks.iter().map(|s| s.to_string()).collect()));
+    f.fallbacks = Some(FontFallbacks::from_fonts(fallbacks));
     f
 }
 
 pub fn mono_font() -> Font {
-    font(MONO_FAMILY)
+    font(fonts().mono)
+}
+
+/// 起動時の GPUI Kit の既定の構文の色。構文の色を持たないテーマに戻したときに使う
+/// （apply_component_theme は今の色を写して書き換えるので、写しておかないと直前のテーマの色が残る）。
+struct KitDefaultSyntax(gpui_kit::component::highlighter::SyntaxColors);
+
+impl Global for KitDefaultSyntax {}
+
+/// テーマの構文の色。持たなければ GPUI Kit の既定の色。
+fn syntax_for(
+    palette: Option<&crate::themes::SyntaxPalette>,
+    default: &gpui_kit::component::highlighter::SyntaxColors,
+) -> gpui_kit::component::highlighter::SyntaxColors {
+    palette.map_or_else(|| default.clone(), kit_syntax)
+}
+
+/// fude の構文の色を GPUI Kit の SyntaxColors にする。ThemeStyle のフィールドが非公開なので JSON から作る。
+pub fn kit_syntax(p: &crate::themes::SyntaxPalette) -> gpui_kit::component::highlighter::SyntaxColors {
+    let c = |v: u32| serde_json::json!({ "color": format!("#{v:06x}") });
+    let value = serde_json::json!({
+        "attribute": c(p.attribute),
+        "boolean": c(p.constant),
+        "comment": c(p.comment),
+        "comment_doc": c(p.comment),
+        "constant": c(p.constant),
+        "constructor": c(p.type_),
+        "enum": c(p.type_),
+        "function": c(p.function),
+        "keyword": c(p.keyword),
+        "label": c(p.constant),
+        "link_text": c(p.link),
+        "link_uri": c(p.link),
+        "number": c(p.number),
+        "operator": c(p.operator),
+        "property": c(p.property),
+        "punctuation": c(p.punctuation),
+        "punctuation.bracket": c(p.punctuation),
+        "punctuation.delimiter": c(p.punctuation),
+        "punctuation.special": c(p.operator),
+        "string": c(p.string),
+        "string.escape": c(p.operator),
+        "string.special": c(p.string),
+        "tag": c(p.tag),
+        "title": c(p.title),
+        "type": c(p.type_),
+        "variable": c(p.variable),
+        "variable.special": c(p.keyword),
+        "variant": c(p.constant),
+    });
+    serde_json::from_value(value).expect("構文の色の JSON の形")
 }
 
 /// GPUI Kit の部品（エディタ、差分）のテーマを fude に合わせる。背景は透明にし、ウィンドウの透過を残す。
@@ -179,10 +226,19 @@ pub fn apply_component_theme(cx: &mut gpui_kit::App) {
     use gpui_kit::component::{Theme as KitTheme, ThemeMode};
     let fude = *cx.global::<Theme>();
     KitTheme::change(ThemeMode::Dark, None, cx);
+    let default = match cx.try_global::<KitDefaultSyntax>() {
+        Some(d) => d.0.clone(),
+        None => {
+            let d = KitTheme::global(cx).highlight_theme.style.syntax.clone();
+            cx.set_global(KitDefaultSyntax(d.clone()));
+            d
+        }
+    };
     let t = KitTheme::global_mut(cx);
     let clear = gpui_kit::hsla(0., 0., 0., 0.);
-    t.mono_font_family = MONO_FAMILY.into();
-    t.mono_font_size = size::TERM_FONT_SIZE;
+    let fonts = fonts();
+    t.mono_font_family = fonts.mono.into();
+    t.mono_font_size = px(fonts.size);
     t.colors.background = clear;
     t.colors.foreground = fude.fg_default.into();
     t.colors.muted_foreground = fude.fg_dim.into();
@@ -202,6 +258,7 @@ pub fn apply_component_theme(cx: &mut gpui_kit::App) {
     highlight.style.editor_foreground = Some(fude.fg_default.into());
     highlight.style.editor_line_number = Some(gpui_kit::Hsla::from(fude.fg_dim).opacity(0.6));
     highlight.style.editor_active_line_number = Some(fude.fg_dim.into());
+    highlight.style.syntax = syntax_for(fude.syntax.as_ref(), &default);
     t.highlight_theme = std::sync::Arc::new(highlight);
 }
 
@@ -214,5 +271,37 @@ mod tests {
         assert_eq!(ease_out_quint(0.0), 0.0);
         assert_eq!(ease_out_quint(1.0), 1.0);
         assert!(ease_out_quint(0.5) > 0.9);
+    }
+
+    /// 構文の色を持たないテーマ（fude、oled）は、直前のテーマの色ではなく GPUI Kit の既定の色にする。
+    #[test]
+    fn theme_without_syntax_uses_kit_default() {
+        use super::{kit_syntax, syntax_for};
+        let dracula = crate::themes::colors(fude_core::settings::ThemeId::Dracula).syntax.unwrap();
+        let default = gpui_kit::component::highlighter::SyntaxColors::default();
+        assert_eq!(syntax_for(None, &default), default);
+        assert_eq!(syntax_for(Some(&dracula), &default), kit_syntax(&dracula));
+    }
+
+    #[test]
+    fn kit_syntax_carries_colors() {
+        use super::kit_syntax;
+        let p = crate::themes::colors(fude_core::settings::ThemeId::Dracula).syntax.unwrap();
+        let v = serde_json::to_value(kit_syntax(&p)).unwrap();
+        assert_eq!(v["keyword"]["color"].as_str().map(str::to_lowercase).as_deref(), Some("#ff79c6ff"));
+        assert!(v["type"]["color"].is_string());
+    }
+
+    /// 静的な FONTS を書き換えると並列の試験とぶつかるので、値の求め方だけを確かめる。
+    #[test]
+    fn term_metrics_follow_settings() {
+        use super::term_metrics;
+        use fude_core::settings::Settings;
+        use gpui_kit::px;
+        let mut font = Settings::default().font;
+        font.size = 18.0;
+        font.line_height = 24.0;
+        assert_eq!(term_metrics(&font), (px(18.), px(24.)));
+        assert_eq!(term_metrics(&Settings::default().font), (px(14.), px(18.)));
     }
 }

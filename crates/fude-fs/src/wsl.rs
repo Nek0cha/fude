@@ -255,16 +255,24 @@ pub struct WslWatcher {
 }
 
 impl WslWatcher {
-    pub fn start(distro: String, bin: String, root: String, on_batch: Box<dyn Fn(crate::watch::WatchBatch) + Send>) -> WslWatcher {
+    /// heavy は `fude watch` の 3 つ目の引数（JSON）で渡す。
+    pub fn start(
+        distro: String,
+        bin: String,
+        root: String,
+        heavy: crate::ignored::HeavyDirs,
+        on_batch: Box<dyn Fn(crate::watch::WatchBatch) + Send>,
+    ) -> WslWatcher {
         use std::sync::atomic::Ordering;
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
         let (stop2, child2) = (stop.clone(), child.clone());
+        let heavy_json = serde_json::to_string(&heavy).unwrap_or_default();
         std::thread::spawn(move || {
             let mut attempt = 0u32;
             while !stop2.load(Ordering::Relaxed) {
-                let script = format!(r#"{RESOLVE}b=$(r "$1"); exec "$b" watch "$2""#);
-                let spawned = wsl_command(&distro, &script, &[&bin, &root])
+                let script = format!(r#"{RESOLVE}b=$(r "$1"); exec "$b" watch "$2" "$3""#);
+                let spawned = wsl_command(&distro, &script, &[&bin, &root, &heavy_json])
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())
@@ -309,6 +317,17 @@ impl Drop for WslWatcher {
 
 #[cfg(test)]
 mod tests {
+    /// 隠すフォルダの JSON（" と空白を含む）が、wsl.exe と sh を通っても崩れずに届く。
+    #[test]
+    #[ignore = "WSL の Ubuntu が必要"]
+    fn json_argument_survives_wsl() {
+        let heavy = crate::ignored::HeavyDirs { names: vec!["a b".into(), "c\"d".into()], show_in_tree: false };
+        let json = serde_json::to_string(&heavy).unwrap();
+        let out = super::wsl_command("Ubuntu", r#"printf '%s' "$1""#, &[&json]).output().unwrap();
+        let got = super::decode_wsl_output(&out.stdout);
+        assert_eq!(serde_json::from_str::<crate::ignored::HeavyDirs>(&got).unwrap(), heavy, "{got}");
+    }
+
     use super::*;
 
     #[test]

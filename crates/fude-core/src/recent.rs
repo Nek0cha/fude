@@ -55,7 +55,7 @@ impl RecentList {
 
 /// セッションと同じディレクトリの recent.json（FUDE_INSTANCE=x なら recent-x.json）。
 pub fn recent_path(os: Platform, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    data_file(os, env, "recent")
+    data_file(os, env, "recent", "json")
 }
 
 #[cfg(test)]

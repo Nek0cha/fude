@@ -11,7 +11,8 @@ enum Cli {
     Open(PathBuf),
     Serve,
     /// root の変更を監視し、WatchBatch を JSON 1 行ずつ標準出力に書く。標準入力が閉じたら終わる。
-    Watch(PathBuf),
+    /// 2 つ目は隠すフォルダ（JSON。無ければ既定の一覧）。
+    Watch(PathBuf, fude_fs::ignored::HeavyDirs),
     Version,
     /// Claude Code の hook。信号に縮めて Windows の fude.exe に渡す。print_config なら設定例を出す。
     Hook { print_config: bool },
@@ -39,7 +40,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         [cmd] if cmd == "version" => Ok(Cli::Version),
         [cmd] if cmd == "hook" => Ok(Cli::Hook { print_config: false }),
         [cmd, flag] if cmd == "hook" && flag == "--print-config" => Ok(Cli::Hook { print_config: true }),
-        [cmd, root] if cmd == "watch" => Ok(Cli::Watch(PathBuf::from(root))),
+        [cmd, root] if cmd == "watch" => Ok(Cli::Watch(PathBuf::from(root), Default::default())),
+        [cmd, root, heavy] if cmd == "watch" => serde_json::from_str(heavy)
+            .map(|h| Cli::Watch(PathBuf::from(root), h))
+            .map_err(|e| format!("隠すフォルダの指定を読めない: {e}")),
         [path] => Ok(Cli::Open(PathBuf::from(path))),
         _ => Err("使い方: fude [フォルダ | ファイル] | fude serve | fude watch <フォルダ> | fude hook [--print-config] | fude version".to_string()),
     }
@@ -93,7 +97,7 @@ fn main() {
                 }
             }
         }
-        Ok(Cli::Watch(root)) => watch(root),
+        Ok(Cli::Watch(root, heavy)) => watch(root, heavy),
         Ok(Cli::Hook { print_config: true }) => {
             print_hook_config();
             0
@@ -116,7 +120,7 @@ fn main() {
 
 /// root を監視して、変更を 1 行ずつ書く。標準入力が閉じる（Windows 側が wsl.exe を終わらせる）か、
 /// 書けなくなったら終わる。
-fn watch(root: PathBuf) -> i32 {
+fn watch(root: PathBuf, heavy: fude_fs::ignored::HeavyDirs) -> i32 {
     let on_batch = Box::new(|batch: fude_fs::watch::WatchBatch| {
         use std::io::Write;
         let Ok(line) = serde_json::to_string(&batch) else { return };
@@ -125,7 +129,7 @@ fn watch(root: PathBuf) -> i32 {
             std::process::exit(0);
         }
     });
-    let _watcher = match fude_fs::watch::LocalWatcher::start(root, on_batch) {
+    let _watcher = match fude_fs::watch::LocalWatcher::start(root, heavy, on_batch) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("fude watch: {e}");
@@ -255,7 +259,11 @@ mod tests {
         assert_eq!(parse(&[]), Ok(Cli::Open(PathBuf::from("."))));
         assert_eq!(parse(&["serve"]), Ok(Cli::Serve));
         assert_eq!(parse(&["version"]), Ok(Cli::Version));
-        assert_eq!(parse(&["watch", "/home/x/p"]), Ok(Cli::Watch(PathBuf::from("/home/x/p"))));
+        assert_eq!(parse(&["watch", "/home/x/p"]), Ok(Cli::Watch(PathBuf::from("/home/x/p"), Default::default())));
+        assert_eq!(
+            parse(&["watch", "/home/x/p", r#"{"names":["gen"],"show_in_tree":false}"#]),
+            Ok(Cli::Watch(PathBuf::from("/home/x/p"), fude_fs::ignored::HeavyDirs { names: vec!["gen".into()], show_in_tree: false }))
+        );
         assert_eq!(parse(&["~/x"]), Ok(Cli::Open(PathBuf::from("~/x"))));
         assert!(parse(&["a", "b"]).is_err());
     }

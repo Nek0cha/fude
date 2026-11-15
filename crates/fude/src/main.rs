@@ -6,6 +6,7 @@ mod assets;
 mod changes_menu;
 mod cli;
 mod close_flow;
+mod config_runtime;
 mod columns;
 mod dialog;
 mod drag;
@@ -36,6 +37,7 @@ mod term_search;
 mod terminal_paint;
 mod terminal_view;
 mod theme;
+mod themes;
 mod title_row;
 mod tree_menu;
 mod tree_model;
@@ -59,14 +61,10 @@ use gpui_kit::*;
 use crate::assets::AppAssets;
 use crate::cli::{Launch, parse_launch};
 use crate::instance::{HandOff, hand_off, report_error};
-use crate::theme::Theme;
-use crate::workspace_view::{InitialOpen, Startup, WorkspaceView, bind_keys};
+use crate::workspace_view::{InitialOpen, Startup, WorkspaceView};
 
 const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Regular.ttf");
 const MONO_BOLD: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Bold.ttf");
-
-/// ウィンドウの背景の方式。Windows と macOS のどちらも Blurred（ユーザーが検証2の画面で選んだ見た目）。
-const WINDOW_BACKGROUND: WindowBackgroundAppearance = WindowBackgroundAppearance::Blurred;
 
 /// 保存した位置がどれかのディスプレイに見えていればそこへ、そうでなければ画面の中央に 1200×780 で開く。
 fn initial_bounds(saved: Option<WindowGeom>, cx: &App) -> WindowBounds {
@@ -121,6 +119,7 @@ fn main() {
     let saved = session_path.as_deref().and_then(session::load);
     let saved_window = saved.as_ref().and_then(|d| d.window.clone());
     let recent_path = recent::recent_path(Platform::current(), &env);
+    let config_path = fude_core::settings::config_path(Platform::current(), &env);
     let recent = recent_path
         .as_deref()
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -138,14 +137,13 @@ fn main() {
         cx.text_system()
             .add_fonts(vec![Cow::Borrowed(MONO_REGULAR), Cow::Borrowed(MONO_BOLD)])
             .expect("同梱の等幅フォントを読み込めない");
-        cx.set_global(Theme::dark());
-        theme::apply_component_theme(cx);
-        bind_keys(cx);
-        file_view::bind_file_view_keys(cx);
-        tree_view::bind_tree_keys(cx);
-        palette_view::bind_palette_keys(cx);
-        term_search::bind_term_search_keys(cx);
-        search_view::bind_search_view_keys(cx);
+        // 設定ファイル（無ければ作る）。テーマ、フォント、キーはここで反映する（計画9a）。
+        let mut config = config_runtime::load_or_create(config_path.as_deref());
+        let key_issues = config_runtime::apply_global(cx, None, &config.settings);
+        config.issues.extend(key_issues);
+        let window_background = config_runtime::background_appearance(&config.settings.window);
+        cx.set_global(config);
+        config_runtime::start_watching(cx);
         // ウィンドウは 1 枚なので、閉じたらアプリも終える（macOS でアプリだけ残らないように）。
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -160,7 +158,7 @@ fn main() {
                 traffic_light_position: Some(point(px(18.), px(13.))),
                 ..t
             }),
-            window_background: WINDOW_BACKGROUND,
+            window_background,
             window_bounds: Some(initial_bounds(saved_window, cx)),
             window_min_size: Some(size(px(640.), px(400.))),
             ..base

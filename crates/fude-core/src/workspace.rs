@@ -110,9 +110,32 @@ pub struct Workspace {
     projects: Vec<Project>,
     active: Option<ProjectId>,
     next_id: u64,
+    /// 設定の terminal.shell が "wsl" のとき、ローカルのプロジェクトの新しいターミナルに使うディストリビューション
+    /// （空なら wsl.exe の既定）。None ならローカルのシェル。
+    local_wsl: Option<String>,
 }
 
 impl Workspace {
+    /// 設定の [terminal] を受け取る。次に作るターミナルから効く。
+    pub fn set_local_shell(&mut self, terminal: &crate::settings::TerminalSettings) {
+        // WSL は Windows だけ。ほかの OS では "wsl" を書いてもローカルのシェルのまま。
+        let wsl = cfg!(windows) && terminal.shell == crate::settings::NativeShell::Wsl;
+        self.local_wsl = wsl.then(|| terminal.wsl_distro.clone().unwrap_or_default());
+    }
+
+    /// root の既定のシェル。ローカルでも、設定で WSL を選んでいれば WSL。
+    fn root_shell(&self, root: &ProjectRoot) -> ShellKind {
+        match (root, &self.local_wsl) {
+            (ProjectRoot::Local(_), Some(distro)) => ShellKind::Wsl { distro: distro.clone() },
+            _ => root.default_shell(),
+        }
+    }
+
+    /// project で新しいターミナルを開くときのシェル。プロジェクトの上書きがあればそれ。
+    pub fn new_terminal_shell(&self, project: &Project) -> ShellKind {
+        project.shell.clone().unwrap_or_else(|| self.root_shell(&project.root))
+    }
+
     pub fn projects(&self) -> &[Project] {
         &self.projects
     }
@@ -154,7 +177,10 @@ impl Workspace {
         }
         let id = ProjectId(self.alloc());
         let tabs = match mode {
-            OpenMode::WithTerminal => vec![self.make_tab(shell.clone().unwrap_or_else(|| root.default_shell()))],
+            OpenMode::WithTerminal => {
+                let kind = shell.clone().unwrap_or_else(|| self.root_shell(&root));
+                vec![self.make_tab(kind)]
+            }
             OpenMode::EditorOnly => Vec::new(),
         };
         let name = root.name();
@@ -728,5 +754,27 @@ mod tests {
         // 名前が前方だけ同じものは動かさない。
         ws.rename_paths(id, "note", "x");
         assert_eq!(ws.projects()[0].pin.as_deref(), Some("notes/b.md"));
+    }
+
+    #[test]
+    fn local_project_uses_wsl_when_configured() {
+        use crate::settings::{NativeShell, Settings};
+        let mut terminal = Settings::default().terminal;
+        terminal.shell = NativeShell::Wsl;
+        terminal.wsl_distro = Some("Ubuntu".into());
+        let mut ws = Workspace::default();
+        ws.set_local_shell(&terminal);
+        let id = ws.open_project(ProjectRoot::Local("/w/a".into()));
+        let p = ws.projects().iter().find(|p| p.id == id).unwrap();
+        assert_eq!(p.tabs[0].panes[0].kind, ShellKind::Wsl { distro: "Ubuntu".into() });
+        assert_eq!(ws.new_terminal_shell(p), ShellKind::Wsl { distro: "Ubuntu".into() });
+        // WSL のプロジェクトは、そのディストリビューションのまま。
+        let wsl = ws.open_project(ProjectRoot::Wsl { distro: "Debian".into(), path: "/home/x".into() });
+        let p = ws.projects().iter().find(|p| p.id == wsl).unwrap();
+        assert_eq!(ws.new_terminal_shell(p), ShellKind::Wsl { distro: "Debian".into() });
+        // 既定に戻すと Native。
+        ws.set_local_shell(&Settings::default().terminal);
+        let p = ws.projects().iter().find(|p| p.id == id).unwrap();
+        assert_eq!(ws.new_terminal_shell(p), ShellKind::Native);
     }
 }

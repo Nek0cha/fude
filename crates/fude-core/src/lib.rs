@@ -16,6 +16,7 @@ pub mod plan;
 pub mod recent;
 pub mod session;
 pub mod settings;
+pub mod settings_edit;
 pub mod text;
 pub mod tree_history;
 pub mod workspace;

@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fude_core::keymap::{Command, Platform, context_bindings, default_bindings};
+use fude_core::keymap::{Binding, Command, Platform, bindings};
 use fude_core::recent::RecentList;
 use fude_core::session::{self, SessionData, WindowGeom};
-use fude_core::settings::{LastProjectClosed, Settings};
+use fude_core::settings::{ConfigIssue, LastProjectClosed, Settings};
 use fude_core::claude::{AgentState, Agents, HookCommand, HookSignal, hook_config, parse_terminal_id};
 use fude_core::workspace::{OpenMode, PaneId, Project, ProjectId, ProjectRoot, ShellKind, Tab, Workspace};
 use fude_core::motion::Fade;
@@ -50,67 +50,101 @@ gpui_kit::actions!(
     ]
 );
 
-/// Command と文脈を GPUI のキーバインドにする。
-fn binding(key: &'static str, command: Command, context: Option<&'static str>) -> KeyBinding {
+/// Command の GPUI のアクション。
+fn command_action(command: Command) -> Box<dyn Action> {
     use crate::file_view::{SaveFile, SendToClaude, ToggleMarkdownMode};
     use crate::tree_view::ToggleTree;
     match command {
-        Command::Close => KeyBinding::new(key, CloseItem, context),
-        Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
-        Command::Save => KeyBinding::new(key, SaveFile, context),
-        Command::SendToClaude => KeyBinding::new(key, SendToClaude, context),
-        Command::ToggleMarkdownMode => KeyBinding::new(key, ToggleMarkdownMode, context),
-        Command::OpenPalette => KeyBinding::new(key, OpenPalette, context),
-        Command::GoToFile => KeyBinding::new(key, GoToFile, context),
-        Command::FindInFiles => KeyBinding::new(key, FindInFiles, context),
-        Command::FindInTerminal => KeyBinding::new(key, FindInTerminal, context),
-        Command::ToggleRouteMap => KeyBinding::new(key, ToggleRouteMap, context),
-        other => default_binding(key, other),
-    }
-}
-
-/// fude_core の割り当て表を GPUI のキーバインドに変換して登録する。
-pub fn bind_keys(cx: &mut App) {
-    let platform = Platform::current();
-    let mut bindings: Vec<KeyBinding> =
-        default_bindings(platform).into_iter().map(|(key, command)| binding(key, command, None)).collect();
-    bindings.extend(context_bindings(platform).into_iter().map(|(key, command, context)| binding(key, command, Some(context))));
-    cx.bind_keys(bindings);
-}
-
-fn default_binding(key: &'static str, command: Command) -> KeyBinding {
-    match command {
-        Command::NewTab => KeyBinding::new(key, NewTab, None),
-        Command::SplitTab => KeyBinding::new(key, SplitTab, None),
-        Command::NextTab => KeyBinding::new(key, NextTab, None),
-        Command::PrevTab => KeyBinding::new(key, PrevTab, None),
-        Command::Copy => KeyBinding::new(key, CopySelection, Some("Terminal")),
-        Command::Paste => KeyBinding::new(key, PasteText, Some("Terminal")),
+        Command::Close => Box::new(CloseItem),
+        Command::ToggleTree => Box::new(ToggleTree),
+        Command::Save => Box::new(SaveFile),
+        Command::SendToClaude => Box::new(SendToClaude),
+        Command::ToggleMarkdownMode => Box::new(ToggleMarkdownMode),
+        Command::OpenPalette => Box::new(OpenPalette),
+        Command::GoToFile => Box::new(GoToFile),
+        Command::FindInFiles => Box::new(FindInFiles),
+        Command::FindInTerminal => Box::new(FindInTerminal),
+        Command::ToggleRouteMap => Box::new(ToggleRouteMap),
+        Command::NewTab => Box::new(NewTab),
+        Command::SplitTab => Box::new(SplitTab),
+        Command::NextTab => Box::new(NextTab),
+        Command::PrevTab => Box::new(PrevTab),
+        Command::Copy => Box::new(CopySelection),
+        Command::Paste => Box::new(PasteText),
         Command::ActivateProject(n) => match n {
-            1 => KeyBinding::new(key, ActivateProject1, None),
-            2 => KeyBinding::new(key, ActivateProject2, None),
-            3 => KeyBinding::new(key, ActivateProject3, None),
-            4 => KeyBinding::new(key, ActivateProject4, None),
-            5 => KeyBinding::new(key, ActivateProject5, None),
-            6 => KeyBinding::new(key, ActivateProject6, None),
-            7 => KeyBinding::new(key, ActivateProject7, None),
-            8 => KeyBinding::new(key, ActivateProject8, None),
-            _ => KeyBinding::new(key, ActivateProject9, None),
+            1 => Box::new(ActivateProject1),
+            2 => Box::new(ActivateProject2),
+            3 => Box::new(ActivateProject3),
+            4 => Box::new(ActivateProject4),
+            5 => Box::new(ActivateProject5),
+            6 => Box::new(ActivateProject6),
+            7 => Box::new(ActivateProject7),
+            8 => Box::new(ActivateProject8),
+            _ => Box::new(ActivateProject9),
         },
-        // 文脈の付くものは binding で扱う。
-        Command::Close
-        | Command::ToggleTree
-        | Command::Save
-        | Command::SendToClaude
-        | Command::ToggleMarkdownMode
-        | Command::OpenPalette
-        | Command::GoToFile
-        | Command::FindInFiles
-        | Command::FindInTerminal
-        | Command::ToggleRouteMap => {
-            unreachable!("binding で扱う")
-        }
     }
+}
+
+/// キーと文脈とアクションから KeyBinding を作る。KeyBinding::new は &'static str しか受けないため load を使う。
+fn load_binding(key: &str, action: Box<dyn Action>, context: Option<&'static str>, cx: &App) -> Option<KeyBinding> {
+    let predicate = context.map(|c| std::rc::Rc::new(KeyBindingContextPredicate::parse(c).expect("文脈の表記")));
+    KeyBinding::load(key, action, predicate, false, None, cx).ok()
+}
+
+/// GPUI が読めるキーの表記か（空白で区切った連続のキーも含む）。KeyBinding::new は読めない表記で落ちるため、先に確かめる。
+pub(crate) fn valid_key(key: &str, os: OperatingSystem) -> bool {
+    let mut parts = key.split_whitespace().peekable();
+    parts.peek().is_some() && parts.all(|k| Keystroke::parse_with_os(k, os).is_ok())
+}
+
+fn current_os() -> OperatingSystem {
+    if cfg!(target_os = "macos") { OperatingSystem::Mac } else { OperatingSystem::Windows }
+}
+
+/// 設定の上書きを当てた割り当て表のうち、読めるキーだけ。読めないキーは issue にする。
+pub(crate) fn valid_bindings(settings: &Settings) -> (Vec<Binding>, Vec<ConfigIssue>) {
+    let (list, mut issues) = bindings(Platform::current(), &settings.keybindings);
+    let (ok, bad): (Vec<Binding>, Vec<Binding>) = list.into_iter().partition(|b| valid_key(&b.key, current_os()));
+    let os = if cfg!(target_os = "macos") { "macos" } else { "windows" };
+    let line_of = |b: &Binding| settings.keybindings.lines.get(&format!("{os}.{}", b.command.name())).copied();
+    issues.extend(bad.into_iter().map(|b| ConfigIssue { line: line_of(&b), message: format!("keybindings の \"{}\" は読めないキーの表記です（{}）", b.key, b.command.name()) }));
+    (ok, issues)
+}
+
+/// GPUI Kit の部品（入力欄など）が init で登録した割り当て。fude の割り当てを足す前に写しておき、
+/// 設定を読み直すたびに入れ直す。
+struct BaseKeymap(Vec<KeyBinding>);
+
+impl Global for BaseKeymap {}
+
+/// base のあとに list を足した割り当ての全部（読み直すたびに作り直すので増えない）。
+pub(crate) fn keymap_with(base: &[KeyBinding], list: &[Binding], make: impl Fn(&Binding) -> Option<KeyBinding>) -> Vec<KeyBinding> {
+    base.iter().cloned().chain(list.iter().filter_map(make)).collect()
+}
+
+/// 画面ごとの固定のキー（Escape など）。
+fn register_fixed_keys(cx: &mut App) {
+    crate::file_view::bind_file_view_keys(cx);
+    crate::tree_view::bind_tree_keys(cx);
+    crate::palette_view::bind_palette_keys(cx);
+    crate::term_search::bind_term_search_keys(cx);
+    crate::search_view::bind_search_view_keys(cx);
+}
+
+/// 割り当てを全部入れ直す: GPUI Kit の割り当て、設定の上書きを当てた fude の割り当て、画面ごとの固定のキーの順。
+/// 最初の呼び出しのときに、それまでに登録されていたもの（GPUI Kit の init）を写しておく。
+/// 外したキーを NoAction で上書きすると、同じキーの文脈付きの割り当てまで消えるため、消してから入れ直す。
+pub fn install_keys(cx: &mut App, settings: &Settings) -> Vec<ConfigIssue> {
+    if !cx.has_global::<BaseKeymap>() {
+        let base: Vec<KeyBinding> = cx.key_bindings().borrow().bindings().cloned().collect();
+        cx.set_global(BaseKeymap(base));
+    }
+    let (list, issues) = valid_bindings(settings);
+    let all = keymap_with(&cx.global::<BaseKeymap>().0, &list, |b| load_binding(&b.key, command_action(b.command), b.context, cx));
+    cx.clear_key_bindings();
+    cx.bind_keys(all);
+    register_fixed_keys(cx);
+    issues
 }
 
 /// ブランチ名の読み方。
@@ -142,7 +176,7 @@ pub(crate) enum AfterClose {
 
 /// remaining は閉じたあとのプロジェクトの数。
 pub(crate) fn last_project_closed_action(settings: &Settings, remaining: usize) -> AfterClose {
-    match (remaining, settings.on_last_project_closed) {
+    match (remaining, settings.close.on_last_project) {
         (1.., _) => AfterClose::Stay,
         (0, LastProjectClosed::Home) => AfterClose::ShowHome,
         (0, LastProjectClosed::Quit) => AfterClose::Quit,
@@ -259,8 +293,11 @@ pub struct WorkspaceView {
     save_task: Option<Task<()>>,
     /// 最後に見たウィンドウの位置と大きさ（アプリの終了時はウィンドウに触れないため）。
     last_geom: Option<WindowGeom>,
-    /// 設定（段階 9 までは既定値）。
+    /// 設定の写し（ConfigState と同じ値。変化を見比べるために持つ）。
     pub(crate) settings: Settings,
+    /// 閉じた書き損じの知らせ（同じ内容なら出し直さない）。
+    notice_dismissed: Option<Vec<ConfigIssue>>,
+    _config: Subscription,
     /// 最近開いたプロジェクトと、その保存先。
     pub(crate) recent: RecentList,
     recent_path: Option<PathBuf>,
@@ -273,6 +310,8 @@ pub struct WorkspaceView {
     pub(crate) tree: crate::tree_view::TreeState,
     /// プロジェクトごとの ProjectFs、監視、Git の状態。
     pub(crate) live: HashMap<ProjectId, crate::project_state::ProjectLive>,
+    /// ProjectLive を作るたびに増やす番号。
+    pub(crate) live_generation: u64,
     /// 変更したファイルの一覧（「● N」を押すと出る）。
     pub(crate) changes_menu: Option<(ProjectId, crate::popup::Popup)>,
     /// プロジェクトごとの右パネル。
@@ -376,7 +415,9 @@ impl WorkspaceView {
             wsl_hosts: Arc::new(WslHosts::new()),
             focus,
             session_path,
-            settings: Settings::default(),
+            settings: cx.global::<crate::config_runtime::ConfigState>().settings.clone(),
+            notice_dismissed: None,
+            _config: cx.observe_global_in::<crate::config_runtime::ConfigState>(window, |this, window, cx| this.on_config_changed(window, cx)),
             recent,
             recent_path,
             last_session,
@@ -396,6 +437,7 @@ impl WorkspaceView {
             editors: HashMap::new(),
             editor_tab_scroll: (ScrollHandle::new(), None),
             live: HashMap::new(),
+            live_generation: 0,
             tree: crate::tree_view::TreeState::new(cx),
             changes_menu: None,
             screen_fade: Fade::settled(1.0),
@@ -408,6 +450,7 @@ impl WorkspaceView {
             _bounds: bounds,
             _quit: quit,
         };
+        this.workspace.set_local_shell(&this.settings.terminal);
         match open {
             InitialOpen::Project { root, shell } => this.open_project(root, shell, cx),
             InitialOpen::File { file, root_hint } => this.open_file(file, root_hint, None, window, cx),
@@ -574,9 +617,82 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// 設定ファイルを読み直した（ConfigState が変わった）。ウィンドウとターミナルとプロジェクトに効くものを反映する。
+    /// テーマ、フォント、キーは config_runtime::apply_global が反映済み。
+    fn on_config_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let new = cx.global::<crate::config_runtime::ConfigState>().settings.clone();
+        if new == self.settings {
+            cx.notify();
+            return;
+        }
+        let old = std::mem::replace(&mut self.settings, new.clone());
+        if old.window != new.window {
+            window.set_background_appearance(crate::config_runtime::background_appearance(&new.window));
+        }
+        self.workspace.set_local_shell(&new.terminal);
+        for (view, _) in self.terminals.values() {
+            view.update(cx, |v, cx| v.apply_settings(&new, window, cx));
+        }
+        if old.tree != new.tree {
+            // 隠すフォルダが変わったら、ファイルへのアクセスと監視を作り直し、ツリーを読み直す。
+            self.live.clear();
+            self.tree.models.clear();
+            self.sync_live(cx);
+        }
+        cx.notify();
+    }
+
+    /// 隠すフォルダの設定。
+    pub(crate) fn heavy_dirs(&self) -> fude_fs::ignored::HeavyDirs {
+        fude_fs::ignored::HeavyDirs::from_settings(self.settings.tree.heavy_dirs.clone(), self.settings.tree.show_heavy_dirs)
+    }
+
+    /// 設定ファイルの書き損じの知らせ（最下部の 1 行）。最初の 1 件と、ほかの件数、「開く」、閉じる。
+    fn render_config_notice(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
+        let state = cx.global::<crate::config_runtime::ConfigState>();
+        let first = state.issues.first()?;
+        if self.notice_dismissed.as_ref() == Some(&state.issues) {
+            return None;
+        }
+        let rest = state.issues.len() - 1;
+        let text = if rest > 0 {
+            format!("{}（ほかに {rest} 件）", crate::config_runtime::issue_text(first))
+        } else {
+            crate::config_runtime::issue_text(first)
+        };
+        let path = state.path.clone();
+        let issues = state.issues.clone();
+        let button = |label: &'static str| {
+            div().px(px(8.)).py(px(2.)).rounded(crate::theme::size::RADIUS_SM).cursor_pointer().hover(|s| s.bg(theme.bg_hover)).child(label)
+        };
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(4.))
+                .bg(theme.bg_panel)
+                .border_t_1()
+                .border_color(theme.border_subtle)
+                .text_size(px(12.))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.warn).child(text))
+                .children(path.map(|path| {
+                    button("開く").id("config-notice-open").on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_file(fude_core::location::FileLocation::Local(path.clone()), None, None, window, cx);
+                    }))
+                }))
+                .child(button("閉じる").id("config-notice-close").on_click(cx.listener(move |this, _, _, cx| {
+                    this.notice_dismissed = Some(issues.clone());
+                    cx.notify();
+                }))),
+        )
+    }
+
     /// 既定のシェルで新しいタブを開き、`claude` と Enter を入力する。
     pub(crate) fn launch_claude(&mut self, cx: &mut Context<Self>) {
-        let Some(kind) = self.workspace.active_project().map(|p| p.default_shell()) else { return };
+        let Some(kind) = self.workspace.active_project().map(|p| self.workspace.new_terminal_shell(p)) else { return };
         if self.workspace.new_tab(kind).is_none() {
             return;
         }
@@ -699,7 +815,7 @@ impl WorkspaceView {
 
     /// 選択中のプロジェクトの既定のシェルでタブを作る。
     pub(crate) fn new_default_tab(&mut self) {
-        if let Some(kind) = self.workspace.active_project().map(|p| p.default_shell()) {
+        if let Some(kind) = self.workspace.active_project().map(|p| self.workspace.new_terminal_shell(p)) {
             self.workspace.new_tab(kind);
         }
     }
@@ -824,6 +940,8 @@ impl WorkspaceView {
             }
             let terminal_id = terminal_id(id);
             let view = cx.new(|cx| TerminalView::new(&kind, &root, &terminal_id, window, cx));
+            let settings = self.settings.clone();
+            view.update(cx, |v, cx| v.apply_settings(&settings, window, cx));
             let link_kind = kind.clone();
             let link_root = root.clone();
             let sub = cx.subscribe_in(&view, window, move |this, view, event: &TerminalEvent, window, cx| {
@@ -1016,6 +1134,7 @@ impl Render for WorkspaceView {
         let dialog = self.render_dialog(window, cx, now);
         let palette = self.render_palette(window, cx, now);
         let wait_frame = self.render_wait_frame(&theme, now);
+        let config_notice = self.render_config_notice(&theme, cx);
 
         div()
             .id("workspace")
@@ -1072,6 +1191,7 @@ impl Render for WorkspaceView {
                     .children(vertical_tabs)
                     .child(div().flex_1().min_w_0().h_full().child(main)),
             )
+            .children(config_notice)
             .children(menu)
             .children(project_menu)
             .children(home_menu)
@@ -1085,6 +1205,77 @@ impl Render for WorkspaceView {
 
 #[cfg(test)]
 mod tests {
+    /// 読み直しで、外したキーが同じキーの文脈付きの割り当てまで消さないこと。読み直しを重ねても増えないこと。
+    #[test]
+    fn reloaded_keymap_resolves_new_binding_in_context() {
+        use super::{CloseItem, keymap_with};
+        use crate::file_view::SaveFile;
+        use fude_core::keymap::{Binding, Command, FILE_VIEW};
+        use gpui_kit::{KeyBinding, KeyContext, Keymap, Keystroke};
+        let make = |b: &Binding| -> Option<KeyBinding> {
+            let key: &'static str = Box::leak(b.key.clone().into_boxed_str());
+            Some(match b.command {
+                Command::Save => KeyBinding::new(key, SaveFile, b.context),
+                _ => KeyBinding::new(key, CloseItem, b.context),
+            })
+        };
+        let base = vec![KeyBinding::new("escape", CloseItem, Some("Input"))];
+        let a = vec![Binding { key: "ctrl-q".into(), command: Command::Close, context: None }];
+        let b = vec![Binding { key: "ctrl-q".into(), command: Command::Save, context: Some(FILE_VIEW) }];
+        let first = keymap_with(&base, &a, make);
+        assert_eq!(first.len(), 2);
+        let second = keymap_with(&base, &b, make);
+        assert_eq!(second.len(), 2, "読み直しで増えない");
+        let keymap = Keymap::new(second);
+        let contexts = [KeyContext::parse("Workspace").unwrap(), KeyContext::parse("FileView").unwrap(), KeyContext::parse("Input").unwrap()];
+        let (found, _) = keymap.bindings_for_input(&[Keystroke::parse("ctrl-q").unwrap()], &contexts);
+        assert!(found.first().is_some_and(|k| k.action().partial_eq(&SaveFile)), "ctrl-q が保存にならない");
+        let (found, _) = keymap.bindings_for_input(&[Keystroke::parse("escape").unwrap()], &contexts);
+        assert!(!found.is_empty(), "基礎の割り当てが残る");
+    }
+
+    #[test]
+    fn unchanged_reload_does_not_grow_issues() {
+        use super::valid_bindings;
+        use fude_core::settings::Settings;
+        let mut s = Settings::default();
+        let row = vec![("nope".to_string(), vec!["ctrl-1".to_string()])];
+        s.keybindings.windows = row.clone();
+        s.keybindings.macos = row;
+        let once = crate::config_runtime::unchanged_issues(Vec::new(), &s);
+        let twice = crate::config_runtime::unchanged_issues(Vec::new(), &s);
+        assert_eq!(once.len(), 1);
+        assert_eq!(once, twice);
+        assert_eq!(once, valid_bindings(&s).1);
+    }
+
+    #[test]
+    fn key_notation_is_checked() {
+        use super::valid_key;
+        use gpui_kit::OperatingSystem::Windows;
+        assert!(valid_key("ctrl-shift-p", Windows));
+        assert!(valid_key("cmd-k cmd-s", Windows));
+        assert!(!valid_key("", Windows));
+        assert!(!valid_key("   ", Windows));
+    }
+
+    #[test]
+    fn bad_keys_become_issues() {
+        use super::valid_bindings;
+        use fude_core::settings::Settings;
+        let mut s = Settings::default();
+        let row = vec![("close".to_string(), vec!["".to_string(), "ctrl-q".to_string()])];
+        s.keybindings.windows = row.clone();
+        s.keybindings.macos = row;
+        s.keybindings.lines.insert("windows.close".into(), 4);
+        s.keybindings.lines.insert("macos.close".into(), 4);
+        let (list, issues) = valid_bindings(&s);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].line, Some(4));
+        assert!(list.iter().any(|b| b.key == "ctrl-q"));
+        assert!(!list.iter().any(|b| b.key.is_empty()));
+    }
+
     use super::geom_from_bounds;
     use fude_core::session::WindowGeom;
     use gpui_kit::{Bounds, WindowBounds, point, px, size};
@@ -1112,7 +1303,8 @@ mod tests {
         use super::{AfterClose, last_project_closed_action};
         use fude_core::settings::{LastProjectClosed, Settings};
         let home = Settings::default();
-        let quit = Settings { on_last_project_closed: LastProjectClosed::Quit, ..Settings::default() };
+        let mut quit = Settings::default();
+        quit.close.on_last_project = LastProjectClosed::Quit;
         assert_eq!(last_project_closed_action(&home, 1), AfterClose::Stay);
         assert_eq!(last_project_closed_action(&quit, 2), AfterClose::Stay);
         assert_eq!(last_project_closed_action(&home, 0), AfterClose::ShowHome);

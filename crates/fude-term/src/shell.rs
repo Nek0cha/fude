@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use fude_core::settings::NativeShell;
 use fude_core::workspace::{ProjectRoot, ShellKind};
 
 /// PTY で起動するコマンド。
@@ -21,8 +22,15 @@ const WSLENV_ADD: &str = "COLORTERM/u:TERM_PROGRAM/u:FUDE_TERMINAL_ID/u";
 /// WSL のシェルの --cd は、ローカルのプロジェクトなら Windows のパス、同じディストリビューションの
 /// プロジェクトなら Linux のパス、別のディストリビューションならホーム（~）。
 /// terminal_id は FUDE_TERMINAL_ID として渡す（hook と、WSL の稼働の確認がターミナルを見分けるため。設計書 §5.8）。
-/// env は環境変数の読み取り（テストで差し替える）。
-pub fn spawn_spec(kind: &ShellKind, root: &ProjectRoot, terminal_id: &str, env: &dyn Fn(&str) -> Option<String>) -> SpawnSpec {
+/// native は設定の terminal.shell（ShellKind::Native のときに使う）。WSL のディストリビューションが空なら -d を付けない
+/// （wsl.exe の既定のディストリビューション）。env は環境変数の読み取り（テストで差し替える）。
+pub fn spawn_spec(
+    kind: &ShellKind,
+    root: &ProjectRoot,
+    terminal_id: &str,
+    native: &NativeShell,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> SpawnSpec {
     let mut vars = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -46,19 +54,30 @@ pub fn spawn_spec(kind: &ShellKind, root: &ProjectRoot, terminal_id: &str, env: 
                 ProjectRoot::Wsl { distro: d, path } if d == distro => path.clone(),
                 ProjectRoot::Wsl { .. } => "~".to_string(),
             };
-            let args = vec!["-d".into(), distro.clone(), "--cd".into(), cd];
+            let mut args = if distro.is_empty() { Vec::new() } else { vec!["-d".into(), distro.clone()] };
+            args.extend(["--cd".into(), cd]);
             ("wsl.exe".to_string(), args)
         }
-        ShellKind::Native if cfg!(windows) => {
-            let program = if find_in_path("pwsh.exe", env) { "pwsh.exe" } else { "powershell.exe" };
-            (program.to_string(), vec!["-NoLogo".to_string()])
-        }
+        ShellKind::Native if cfg!(windows) => match native {
+            NativeShell::Pwsh => ("pwsh.exe".to_string(), vec!["-NoLogo".to_string()]),
+            NativeShell::Powershell => ("powershell.exe".to_string(), vec!["-NoLogo".to_string()]),
+            NativeShell::Cmd => ("cmd.exe".to_string(), Vec::new()),
+            NativeShell::Program(p) => (p.clone(), Vec::new()),
+            NativeShell::Auto | NativeShell::Wsl => {
+                let program = if find_in_path("pwsh.exe", env) { "pwsh.exe" } else { "powershell.exe" };
+                (program.to_string(), vec!["-NoLogo".to_string()])
+            }
+        },
         ShellKind::Native => {
             // Finder から起動すると LANG が無く、日本語が崩れるため、文字の種類だけ UTF-8 にする。
             if ["LANG", "LC_ALL", "LC_CTYPE"].iter().all(|k| env(k).is_none()) {
                 vars.push(("LC_CTYPE".into(), "UTF-8".into()));
             }
-            let program = env("SHELL").filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+            let program = match native {
+                NativeShell::Program(p) => p.clone(),
+                NativeShell::Pwsh => "pwsh".to_string(),
+                _ => env("SHELL").filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into()),
+            };
             (program, vec!["-l".to_string()])
         }
     };
@@ -83,7 +102,7 @@ mod tests {
 
     fn spec_in(kind: &ShellKind, root: &ProjectRoot, vars: &[(&str, &str)]) -> SpawnSpec {
         let map: HashMap<String, String> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        spawn_spec(kind, root, "p1", &|k| map.get(k).cloned())
+        spawn_spec(kind, root, "p1", &NativeShell::Auto, &|k| map.get(k).cloned())
     }
 
     fn wsl_root() -> ProjectRoot {
@@ -162,5 +181,31 @@ mod tests {
         assert_eq!(env(&spec, "COLORTERM"), Some("truecolor"));
         assert_eq!(env(&spec, "TERM_PROGRAM"), Some("fude"));
         assert_eq!(spec.cwd, Path::new("/w/a"));
+    }
+
+    #[test]
+    fn native_shell_choice() {
+        use fude_core::settings::NativeShell;
+        let root = ProjectRoot::Local(PathBuf::from("/w"));
+        let spec = |native: &NativeShell, vars: &[(&str, &str)]| {
+            let map: HashMap<String, String> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            spawn_spec(&ShellKind::Native, &root, "p1", native, &|k| map.get(k).cloned())
+        };
+        assert_eq!(spec(&NativeShell::Program("/bin/fish".into()), &[]).program, "/bin/fish");
+        if cfg!(windows) {
+            assert_eq!(spec(&NativeShell::Cmd, &[]).program, "cmd.exe");
+            assert_eq!(spec(&NativeShell::Pwsh, &[]).program, "pwsh.exe");
+            assert_eq!(spec(&NativeShell::Powershell, &[]).program, "powershell.exe");
+            assert_eq!(spec(&NativeShell::Auto, &[("PATH", "")]).program, "powershell.exe");
+        } else {
+            assert_eq!(spec(&NativeShell::Auto, &[("SHELL", "/bin/bash")]).program, "/bin/bash");
+        }
+    }
+
+    #[test]
+    fn wsl_without_distro_omits_d() {
+        let spec = spec_with(&ShellKind::Wsl { distro: String::new() }, "/w", &[]);
+        assert!(!spec.args.iter().any(|a| a == "-d"), "{:?}", spec.args);
+        assert_eq!(spec.program, "wsl.exe");
     }
 }

@@ -29,6 +29,8 @@ pub(crate) struct ProjectLive {
     files_task: Option<Task<()>>,
     /// 監視（LocalWatcher か WslWatcher）。捨てると止まる。
     _watcher: Option<Box<dyn Any>>,
+    /// 作り直しの番号。前の start_live が遅れて終わったときに、古い fs と監視を入れないため。
+    pub generation: u64,
     _events: Option<Task<()>>,
     status_task: Option<Task<()>>,
 }
@@ -37,19 +39,27 @@ pub(crate) struct ProjectLive {
 fn start_watcher(
     root: &ProjectRoot,
     hosts: &WslHosts,
+    heavy: fude_fs::ignored::HeavyDirs,
     on_batch: Box<dyn Fn(WatchBatch) + Send>,
 ) -> std::io::Result<Box<dyn Any>> {
     match root {
-        ProjectRoot::Local(path) => Ok(Box::new(fude_fs::watch::LocalWatcher::start(path.clone(), on_batch)?)),
+        ProjectRoot::Local(path) => Ok(Box::new(fude_fs::watch::LocalWatcher::start(path.clone(), heavy, on_batch)?)),
         #[cfg(windows)]
         ProjectRoot::Wsl { distro, path } => {
-            Ok(Box::new(fude_fs::wsl::WslWatcher::start(distro.clone(), hosts.bin().to_string(), path.clone(), on_batch)))
+            Ok(Box::new(fude_fs::wsl::WslWatcher::start(distro.clone(), hosts.bin().to_string(), path.clone(), heavy, on_batch)))
         }
         #[cfg(not(windows))]
         ProjectRoot::Wsl { .. } => {
             let _ = hosts;
             Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "WSL は Windows だけ"))
         }
+    }
+}
+
+impl ProjectLive {
+    /// generation の start_live の結果を受け入れるか。
+    pub fn accepts(&self, generation: u64) -> bool {
+        self.generation == generation
     }
 }
 
@@ -63,17 +73,25 @@ impl WorkspaceView {
             if self.live.contains_key(&id) {
                 continue;
             }
-            self.live.insert(id, ProjectLive::default());
-            self.start_live(id, root, cx);
+            self.live_generation += 1;
+            let generation = self.live_generation;
+            self.live.insert(id, ProjectLive { generation, ..ProjectLive::default() });
+            self.start_live(id, root, generation, cx);
         }
     }
 
     /// ProjectFs を裏で用意し（WSL は配置の確認を待つ）、監視を始め、Git の状態を読む。
-    fn start_live(&mut self, project: ProjectId, root: ProjectRoot, cx: &mut Context<Self>) {
+    fn start_live(&mut self, project: ProjectId, root: ProjectRoot, generation: u64, cx: &mut Context<Self>) {
         let hosts = self.wsl_hosts.clone();
-        let task = cx.background_spawn(async move { project_fs(&root, &hosts).map(|fs| (fs, root, hosts)) });
+        let heavy = self.heavy_dirs();
+        let task = cx.background_spawn(async move {
+            project_fs(&root, &hosts).map(|fs| {
+                fs.set_heavy_dirs(heavy.clone());
+                (fs, root, hosts, heavy)
+            })
+        });
         cx.spawn(async move |this, cx| {
-            let (fs, root, hosts) = match task.await {
+            let (fs, root, hosts, heavy) = match task.await {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("プロジェクトのファイルを扱えない: {e}");
@@ -81,7 +99,7 @@ impl WorkspaceView {
                 }
             };
             let (tx, mut rx) = futures::channel::mpsc::unbounded::<WatchBatch>();
-            let watcher = match start_watcher(&root, &hosts, Box::new(move |b| {
+            let watcher = match start_watcher(&root, &hosts, heavy, Box::new(move |b| {
                 let _ = tx.unbounded_send(b);
             })) {
                 Ok(w) => Some(w),
@@ -98,7 +116,7 @@ impl WorkspaceView {
                         }
                     }
                 });
-                let Some(live) = this.live.get_mut(&project) else { return };
+                let Some(live) = this.live.get_mut(&project).filter(|l| l.accepts(generation)) else { return };
                 live.fs = Some(fs);
                 live._watcher = watcher;
                 live._events = Some(events);
@@ -219,6 +237,13 @@ pub(crate) fn palette_paths(files: fude_fs::WalkedFiles) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_live_task_is_ignored() {
+        let live = super::ProjectLive { generation: 2, ..Default::default() };
+        assert!(live.accepts(2));
+        assert!(!live.accepts(1));
+    }
+
     use super::palette_paths;
     use fude_fs::{RelPath, WalkedFiles};
 

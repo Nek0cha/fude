@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn foreground_job_is_detected() {
         let dir = std::env::temp_dir();
-        let spec = spawn_spec(&ShellKind::Native, &ProjectRoot::Local(dir), "t1", &|k| std::env::var(k).ok());
+        let spec = spawn_spec(&ShellKind::Native, &ProjectRoot::Local(dir), "t1", &fude_core::settings::NativeShell::Auto, &|k| std::env::var(k).ok());
         let session = Session::spawn(&spec, GridSize { cols: 80, rows: 24 }, Arc::new(|_| {})).unwrap();
         assert!(eventually(Duration::from_secs(10), || session.has_foreground_job() == Some(false)), "待っているだけなら偽");
         let cmd = if cfg!(windows) { "ping -n 30 127.0.0.1\r" } else { "sleep 30\n" };

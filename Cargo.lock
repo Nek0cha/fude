@@ -1760,6 +1760,7 @@ dependencies = [
  "fude-term",
  "futures",
  "gpui-kit",
+ "notify",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -1779,6 +1780,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]
