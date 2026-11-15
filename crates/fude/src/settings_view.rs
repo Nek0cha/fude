@@ -517,7 +517,7 @@ impl SettingsView {
                 div()
                     .pb(px(6.))
                     .text_color(theme.fg_dim)
-                    .child("ボタンを押したときだけ、Claude Code の settings.json に fude の hook を書きます。ほかの設定は残します。"),
+                    .child("Claude Code の settings.json に fude の hook を追加します。"),
             )
             .children(dev_note)
             .children(rows)
