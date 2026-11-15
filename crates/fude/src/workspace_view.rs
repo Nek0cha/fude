@@ -486,6 +486,12 @@ impl WorkspaceView {
         .detach();
     }
 
+    /// エディタ列のビューにフォーカスを当てる（ペインへの戻しを止める）。
+    pub(crate) fn focus_editor(&mut self, focus: &FocusHandle, window: &mut Window, cx: &mut Context<Self>) {
+        self.focused_pane = None;
+        window.focus(focus, cx);
+    }
+
     /// メニューを閉じたあと、フォーカスを戻す。ペインがあればそこへ（次の描画で）、無ければ右パネル、
     /// それも無ければワークスペースへ。
     pub(crate) fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
