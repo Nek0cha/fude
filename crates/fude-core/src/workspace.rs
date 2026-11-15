@@ -118,7 +118,9 @@ pub struct Workspace {
 impl Workspace {
     /// 設定の [terminal] を受け取る。次に作るターミナルから効く。
     pub fn set_local_shell(&mut self, terminal: &crate::settings::TerminalSettings) {
-        self.local_wsl = (terminal.shell == crate::settings::NativeShell::Wsl).then(|| terminal.wsl_distro.clone().unwrap_or_default());
+        // WSL は Windows だけ。ほかの OS では "wsl" を書いてもローカルのシェルのまま。
+        let wsl = cfg!(windows) && terminal.shell == crate::settings::NativeShell::Wsl;
+        self.local_wsl = wsl.then(|| terminal.wsl_distro.clone().unwrap_or_default());
     }
 
     /// root の既定のシェル。ローカルでも、設定で WSL を選んでいれば WSL。

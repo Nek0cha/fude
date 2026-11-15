@@ -215,7 +215,8 @@ pub fn bindings(platform: Platform, overrides: &KeybindingOverrides) -> (Vec<Bin
     let mut issues = Vec::new();
     for (name, keys) in table.0 {
         let Some(command) = Command::from_name(name) else {
-            issues.push(ConfigIssue { line: None, message: format!("keybindings.{}.{name} は知らない Command の名前です", table.1) });
+            let line = overrides.lines.get(&format!("{}.{name}", table.1)).copied();
+            issues.push(ConfigIssue { line, message: format!("keybindings.{}.{name} は知らない Command の名前です", table.1) });
             continue;
         };
         let context = if defaults.iter().any(|&(_, c)| c == command) {
@@ -395,7 +396,7 @@ mod tests {
 
     fn overrides(windows: &[(&str, &[&str])], macos: &[(&str, &[&str])]) -> KeybindingOverrides {
         let conv = |rows: &[(&str, &[&str])]| rows.iter().map(|(c, keys)| (c.to_string(), keys.iter().map(|k| k.to_string()).collect())).collect();
-        KeybindingOverrides { windows: conv(windows), macos: conv(macos) }
+        KeybindingOverrides { windows: conv(windows), macos: conv(macos), lines: Default::default() }
     }
 
     fn rows_of(list: &[Binding], command: Command) -> Vec<(String, Option<&'static str>)> {
@@ -476,6 +477,14 @@ mod tests {
     fn other_platform_table_is_ignored() {
         let (list, _) = bindings(Platform::Windows, &overrides(&[], &[("close", &[])]));
         assert_eq!(rows_of(&list, Command::Close).len(), 2);
+    }
+
+    #[test]
+    fn unknown_command_issue_has_line() {
+        let mut o = overrides(&[("nope", &["ctrl-1"])], &[]);
+        o.lines.insert("windows.nope".into(), 7);
+        let (_, issues) = bindings(Platform::Windows, &o);
+        assert_eq!(issues[0].line, Some(7));
     }
 
     #[test]

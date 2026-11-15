@@ -167,9 +167,13 @@ impl ProjectFs for LocalFs {
                 let names = index_names.get_or_insert_with(|| tracked_names(&self.root, rel));
                 is_ignored = !names.contains(&name);
             }
-            // ツリーに出す設定なら、隠すフォルダも外したものとして出す（開いたときに中を読む）。
-            if is_dir && !heavy.show_in_tree && ignored::hides_dir(&heavy, &name, is_ignored, in_repo) {
-                continue;
+            // ツリーに出す設定なら、隠すフォルダも外したものとして出す（開いたときに中を読む）。git の無い
+            // フォルダでも、隠す名前のフォルダは外したものと同じ薄い色にする。
+            if is_dir && ignored::hides_dir(&heavy, &name, is_ignored, in_repo) {
+                if !heavy.show_in_tree {
+                    continue;
+                }
+                is_ignored = true;
             }
             entries.push(DirEntry { name, is_dir, ignored: is_ignored });
         }
@@ -432,6 +436,14 @@ target-dev/
         assert_eq!(marks(&fs, "node_modules"), vec![pair("x.js", true)]);
         let files = fs.walk_files().unwrap();
         assert!(files.ignored.is_empty(), "{:?}", files.ignored);
+    }
+
+    #[test]
+    fn shown_heavy_dirs_are_dim_outside_git() {
+        let dir = repo(false, &[("node_modules/x.js", ""), ("src/a.rs", "")]);
+        let fs = LocalFs::new(dir.path().to_path_buf());
+        fs.set_heavy_dirs(crate::ignored::HeavyDirs::from_settings(None, true));
+        assert_eq!(marks(&fs, ""), vec![pair("node_modules", true), pair("src", false)]);
     }
 
     #[test]

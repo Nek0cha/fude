@@ -317,6 +317,17 @@ impl Drop for WslWatcher {
 
 #[cfg(test)]
 mod tests {
+    /// 隠すフォルダの JSON（" と空白を含む）が、wsl.exe と sh を通っても崩れずに届く。
+    #[test]
+    #[ignore = "WSL の Ubuntu が必要"]
+    fn json_argument_survives_wsl() {
+        let heavy = crate::ignored::HeavyDirs { names: vec!["a b".into(), "c\"d".into()], show_in_tree: false };
+        let json = serde_json::to_string(&heavy).unwrap();
+        let out = super::wsl_command("Ubuntu", r#"printf '%s' "$1""#, &[&json]).output().unwrap();
+        let got = super::decode_wsl_output(&out.stdout);
+        assert_eq!(serde_json::from_str::<crate::ignored::HeavyDirs>(&got).unwrap(), heavy, "{got}");
+    }
+
     use super::*;
 
     #[test]

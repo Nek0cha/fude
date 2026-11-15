@@ -18,14 +18,19 @@ pub fn set_fonts(font: &FontSettings) {
     *FONTS.write().unwrap_or_else(|e| e.into_inner()) = Some(font.clone());
 }
 
+/// 文字の大きさと行の高さ。
+fn term_metrics(font: &FontSettings) -> (Pixels, Pixels) {
+    (px(font.size), px(font.line_height))
+}
+
 /// ターミナルとエディタの文字の大きさ。
 pub fn term_font_size() -> Pixels {
-    px(fonts().size)
+    term_metrics(&fonts()).0
 }
 
 /// ターミナルとエディタの行の高さ。
 pub fn term_line_height() -> Pixels {
-    px(fonts().line_height)
+    term_metrics(&fonts()).1
 }
 
 #[derive(Clone, Copy)]
@@ -257,19 +262,16 @@ mod tests {
         assert!(v["type"]["color"].is_string());
     }
 
+    /// 静的な FONTS を書き換えると並列の試験とぶつかるので、値の求め方だけを確かめる。
     #[test]
-    fn term_font_size_follows_settings() {
-        use super::{set_fonts, term_font_size, term_line_height};
+    fn term_metrics_follow_settings() {
+        use super::term_metrics;
         use fude_core::settings::Settings;
         use gpui_kit::px;
         let mut font = Settings::default().font;
         font.size = 18.0;
         font.line_height = 24.0;
-        set_fonts(&font);
-        assert_eq!(term_font_size(), px(18.));
-        assert_eq!(term_line_height(), px(24.));
-        set_fonts(&Settings::default().font);
-        assert_eq!(term_font_size(), px(14.));
-        assert_eq!(term_line_height(), px(18.));
+        assert_eq!(term_metrics(&font), (px(18.), px(24.)));
+        assert_eq!(term_metrics(&Settings::default().font), (px(14.), px(18.)));
     }
 }

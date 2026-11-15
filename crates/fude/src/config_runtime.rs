@@ -28,10 +28,10 @@ pub fn load_or_create(path: Option<&Path>) -> ConfigState {
         return ConfigState { settings: Settings::default(), issues: Vec::new(), path: None };
     };
     let state = |settings, issues| ConfigState { settings, issues, path: Some(path.to_path_buf()) };
-    match std::fs::read_to_string(path) {
-        Ok(text) => match parse(&text) {
-            ParseOutcome::Ok { settings, issues } => state(settings, issues),
-            ParseOutcome::Unreadable(issue) => state(Settings::default(), vec![issue]),
+    match std::fs::read(path) {
+        Ok(bytes) => match fude_core::settings::decode_config(&bytes).map(|text| parse(&text)) {
+            Ok(ParseOutcome::Ok { settings, issues }) => state(settings, issues),
+            Ok(ParseOutcome::Unreadable(issue)) | Err(issue) => state(Settings::default(), vec![issue]),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, DEFAULT_CONFIG));
@@ -134,10 +134,11 @@ pub fn start_watching(cx: &mut App) {
 pub fn reload_now(cx: &mut App) {
     let state = cx.global::<ConfigState>().clone();
     let Some(path) = state.path.clone() else { return };
-    let (settings, mut issues) = match std::fs::read_to_string(&path) {
+    let read = std::fs::read(&path).map_err(|e| ConfigIssue { line: None, message: format!("設定ファイルを読めません: {e}") });
+    let (settings, mut issues) = match read.and_then(|b| fude_core::settings::decode_config(&b)) {
         Ok(text) => reload(&state.settings, &text),
         // 消えた・読めないときは今の値のまま。
-        Err(e) => (state.settings.clone(), vec![ConfigIssue { line: None, message: format!("設定ファイルを読めません: {e}") }]),
+        Err(issue) => (state.settings.clone(), vec![issue]),
     };
     if settings == state.settings {
         let issues = unchanged_issues(issues, &settings);

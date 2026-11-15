@@ -105,7 +105,9 @@ fn current_os() -> OperatingSystem {
 pub(crate) fn valid_bindings(settings: &Settings) -> (Vec<Binding>, Vec<ConfigIssue>) {
     let (list, mut issues) = bindings(Platform::current(), &settings.keybindings);
     let (ok, bad): (Vec<Binding>, Vec<Binding>) = list.into_iter().partition(|b| valid_key(&b.key, current_os()));
-    issues.extend(bad.into_iter().map(|b| ConfigIssue { line: None, message: format!("keybindings の \"{}\" は読めないキーの表記です（{}）", b.key, b.command.name()) }));
+    let os = if cfg!(target_os = "macos") { "macos" } else { "windows" };
+    let line_of = |b: &Binding| settings.keybindings.lines.get(&format!("{os}.{}", b.command.name())).copied();
+    issues.extend(bad.into_iter().map(|b| ConfigIssue { line: line_of(&b), message: format!("keybindings の \"{}\" は読めないキーの表記です（{}）", b.key, b.command.name()) }));
     (ok, issues)
 }
 
@@ -308,6 +310,8 @@ pub struct WorkspaceView {
     pub(crate) tree: crate::tree_view::TreeState,
     /// プロジェクトごとの ProjectFs、監視、Git の状態。
     pub(crate) live: HashMap<ProjectId, crate::project_state::ProjectLive>,
+    /// ProjectLive を作るたびに増やす番号。
+    pub(crate) live_generation: u64,
     /// 変更したファイルの一覧（「● N」を押すと出る）。
     pub(crate) changes_menu: Option<(ProjectId, crate::popup::Popup)>,
     /// プロジェクトごとの右パネル。
@@ -433,6 +437,7 @@ impl WorkspaceView {
             editors: HashMap::new(),
             editor_tab_scroll: (ScrollHandle::new(), None),
             live: HashMap::new(),
+            live_generation: 0,
             tree: crate::tree_view::TreeState::new(cx),
             changes_menu: None,
             screen_fade: Fade::settled(1.0),
@@ -1262,8 +1267,11 @@ mod tests {
         let row = vec![("close".to_string(), vec!["".to_string(), "ctrl-q".to_string()])];
         s.keybindings.windows = row.clone();
         s.keybindings.macos = row;
+        s.keybindings.lines.insert("windows.close".into(), 4);
+        s.keybindings.lines.insert("macos.close".into(), 4);
         let (list, issues) = valid_bindings(&s);
         assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].line, Some(4));
         assert!(list.iter().any(|b| b.key == "ctrl-q"));
         assert!(!list.iter().any(|b| b.key.is_empty()));
     }

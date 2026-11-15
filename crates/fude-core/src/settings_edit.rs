@@ -19,6 +19,8 @@ pub enum EditValue {
 pub enum EditError {
     /// 今のファイルが TOML として読めない。手書きの内容を消さないため、書き込まない。
     Unreadable,
+    /// 書き込むと読めないファイルになる（想定していない書き方）。書き込まない。
+    WouldBreak,
 }
 
 impl EditValue {
@@ -58,7 +60,44 @@ pub fn set_value(text: &str, path: &[&str], value: EditValue) -> Result<String, 
         }
         return Ok(format!("{bom}{out}"));
     }
-    Ok(format!("{bom}{}", insert_line(body, tables, key, &value.to_value())))
+    let header = tables.join(".");
+    let header_written = tables.is_empty() || body.lines().any(|l| header_name(l) == Some(header.as_str()));
+    let out = if !header_written && item_mut(doc.as_item_mut(), tables).is_some() {
+        // インライン表、ドット付きのキー、見出しの無い親の表: 行を足さず toml_edit で入れる。
+        insert_with_toml_edit(&mut doc, tables, key, value.to_value());
+        let mut out = doc.to_string();
+        if body.contains("\r\n") {
+            out = out.replace("\r\n", "\n").replace('\n', "\r\n");
+        }
+        out
+    } else {
+        insert_line(body, tables, key, &value.to_value())
+    };
+    if matches!(parse(&out), ParseOutcome::Unreadable(_)) {
+        return Err(EditError::WouldBreak);
+    }
+    Ok(format!("{bom}{out}"))
+}
+
+/// names の先の項目（表かインライン表）。Item::get_mut は無いキーを作ってしまうので、TableLike で探す。
+fn item_mut<'a>(mut item: &'a mut Item, names: &[&str]) -> Option<&'a mut Item> {
+    for name in names {
+        item = item.as_table_like_mut()?.get_mut(name)?;
+    }
+    item.is_table_like().then_some(item)
+}
+
+fn insert_with_toml_edit(doc: &mut DocumentMut, tables: &[&str], key: &str, value: Value) {
+    let Some(item) = item_mut(doc.as_item_mut(), tables) else { return };
+    match item {
+        Item::Table(t) => {
+            t.insert(key, Item::Value(value));
+        }
+        Item::Value(Value::InlineTable(t)) => {
+            t.insert(key, value);
+        }
+        _ => {}
+    }
 }
 
 fn table_mut<'a>(mut table: &'a mut Table, names: &[&str]) -> Option<&'a mut Table> {
@@ -72,7 +111,7 @@ fn table_mut<'a>(mut table: &'a mut Table, names: &[&str]) -> Option<&'a mut Tab
 fn header_name(line: &str) -> Option<&str> {
     let t = line.trim();
     let inner = t.strip_prefix('[')?.split(']').next()?;
-    Some(inner.trim())
+    Some(inner.trim().trim_matches('"'))
 }
 
 /// `# key = ...` の形のコメント行か。
@@ -202,6 +241,30 @@ mod tests {
             let out = set_value(&crlf, path, value).unwrap();
             assert!(!out.replace("\r\n", "").contains('\n'), "単独の LF がある: {path:?}");
         }
+    }
+
+    #[test]
+    fn inline_table_gets_key_without_duplicate_table() {
+        let out = set_value("window = { blur = false }\n", &["window", "background_opacity"], EditValue::Float(1.0)).unwrap();
+        let s = reparse(&out);
+        assert_eq!(s.window.background_opacity, 1.0);
+        assert!(!s.window.blur);
+    }
+
+    #[test]
+    fn dotted_keys_get_key_without_duplicate_table() {
+        let out = set_value("window.blur = false\n", &["window", "background_opacity"], EditValue::Float(0.5)).unwrap();
+        let s = reparse(&out);
+        assert_eq!(s.window.background_opacity, 0.5);
+        assert!(!s.window.blur);
+    }
+
+    #[test]
+    fn quoted_header_is_found() {
+        let out = set_value("[ \"window\" ]\nblur = false\n", &["window", "background_opacity"], EditValue::Float(0.5)).unwrap();
+        let s = reparse(&out);
+        assert_eq!(s.window.background_opacity, 0.5);
+        assert!(!s.window.blur);
     }
 
     #[test]

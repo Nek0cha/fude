@@ -144,6 +144,8 @@ pub struct TreeSettings {
 pub struct KeybindingOverrides {
     pub windows: Vec<(String, Vec<String>)>,
     pub macos: Vec<(String, Vec<String>)>,
+    /// 書いた行（"windows.close" → 1 始まりの行）。問題の知らせに使う。
+    pub lines: std::collections::HashMap<String, usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -247,6 +249,19 @@ show_heavy_dirs = false       # 隠すフォルダ（node_modules など）を�
 # open_palette = ["cmd-alt-p"]
 "##;
 
+/// 設定ファイルのバイト列を文字列にする。UTF-8（BOM 付きも）と、BOM 付きの UTF-16LE（古いメモ帳の「Unicode」）を読む。
+/// それ以外は、何が悪いか分かる文の問題にする。
+pub fn decode_config(bytes: &[u8]) -> Result<String, ConfigIssue> {
+    if let Some(rest) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        return String::from_utf16(&units).map_err(|_| ConfigIssue { line: None, message: "設定ファイルを UTF-8 で保存し直してください".into() });
+    }
+    String::from_utf8(bytes.to_vec()).map_err(|_| ConfigIssue {
+        line: None,
+        message: "設定ファイルが UTF-8 ではありません。UTF-8 で保存し直してください".into(),
+    })
+}
+
 /// 設定ファイルの文面を読む。
 pub fn parse(text: &str) -> ParseOutcome {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -341,10 +356,24 @@ pub fn parse(text: &str) -> ParseOutcome {
     let show_heavy_dirs = r.bool(tree, Some("tree"), "show_heavy_dirs").unwrap_or(d.tree.show_heavy_dirs);
     let heavy_dirs = r.string_list(tree, Some("tree"), "heavy_dirs");
 
-    let keybindings = KeybindingOverrides {
+    let mut keybindings = KeybindingOverrides {
         windows: r.key_table(keys, "keybindings.windows", "windows"),
         macos: r.key_table(keys, "keybindings.macos", "macos"),
+        lines: Default::default(),
     };
+    for (os, rows) in [("windows", &keybindings.windows), ("macos", &keybindings.macos)] {
+        for (name, _) in rows {
+            if let Some(line) = line_of(text, Some(&format!("keybindings.{os}")), name) {
+                keybindings.lines.insert(format!("{os}.{name}"), line);
+            }
+        }
+    }
+    for name in ["window", "font", "cursor", "terminal", "close", "tree", "keybindings"] {
+        if table.get(name).is_some_and(|v| !v.is_table()) {
+            let line = line_of(text, None, name);
+            r.issue(line, name, &format!("表（[{name}]）で書いてください"));
+        }
+    }
 
     let settings = Settings {
         theme,
@@ -383,6 +412,13 @@ fn line_of(text: &str, section: Option<&str>, key: &str) -> Option<usize> {
         if let Some(inner) = t.strip_prefix('[').and_then(|r| r.split(']').next()) {
             current = Some(inner.trim().to_string());
             continue;
+        }
+        // 先頭の表に `section.key = ...` とドット付きで書いた形も探す。
+        let dotted = section.filter(|_| current.is_none()).map(|s| format!("{s}.{key}"));
+        if let Some(rest) = dotted.as_deref().and_then(|d| t.strip_prefix(d))
+            && rest.trim_start().starts_with('=')
+        {
+            return Some(i + 1);
         }
         if current.as_deref() != section {
             continue;
@@ -617,6 +653,39 @@ mod tests {
         let inside = text.find('あ').unwrap() + 1;
         assert_eq!(line_at(text, inside), 1);
         assert_eq!(line_at(text, text.len() + 10), 3);
+    }
+
+    #[test]
+    fn dotted_key_issue_has_line() {
+        let (_, issues) = ok("theme = \"fude\"\nwindow.background_opacity = 2.0\n");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].line, Some(2));
+    }
+
+    #[test]
+    fn section_that_is_not_a_table_is_an_issue() {
+        let (_, issues) = ok("window = 3\n");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].line, Some(1));
+    }
+
+    #[test]
+    fn keybinding_lines_are_kept() {
+        let (s, _) = ok("[keybindings.windows]\n\nnope = [\"ctrl-1\"]\n");
+        assert_eq!(s.keybindings.lines.get("windows.nope"), Some(&3));
+    }
+
+    #[test]
+    fn decode_reads_utf8_bom_and_utf16() {
+        assert_eq!(decode_config(b"theme = 1").unwrap(), "theme = 1");
+        let mut utf16 = vec![0xff, 0xfe];
+        for u in "theme = \"oled\"".encode_utf16() {
+            utf16.extend(u.to_le_bytes());
+        }
+        assert_eq!(decode_config(&utf16).unwrap(), "theme = \"oled\"");
+        // Shift-JIS の「設定」。
+        let issue = decode_config(&[0x90, 0xdd, 0x92, 0xe8]).unwrap_err();
+        assert!(issue.message.contains("UTF-8"), "{issue:?}");
     }
 
     #[test]
