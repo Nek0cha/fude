@@ -200,6 +200,8 @@ pub struct Startup {
     pub recent_path: Option<PathBuf>,
     pub recent: RecentList,
     pub open: InitialOpen,
+    /// 初回のチュートリアルを出す（9c §5.1）。
+    pub tutorial: bool,
 }
 
 /// 今の UNIX 秒。
@@ -360,7 +362,7 @@ pub struct WorkspaceView {
 impl WorkspaceView {
     /// 起動時にセッションは戻さない（設計書 §5.10 の B 案）。startup.open があれば開く。
     pub fn new(startup: Startup, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let Startup { session_path, last_session, recent_path, recent, open } = startup;
+        let Startup { session_path, last_session, recent_path, recent, open, tutorial: _ } = startup;
         let vertical_tabs = last_session.as_ref().is_some_and(|s| s.vertical_tabs);
         let workspace = Workspace::default();
         let activation = cx.observe_window_activation(window, |this, window, cx| {
