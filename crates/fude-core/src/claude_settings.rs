@@ -247,9 +247,17 @@ pub fn write_with_backup(path: &Path, new_text: &str) -> io::Result<()> {
     if path.exists() {
         std::fs::copy(path, dir.join(format!("{name}.bak")))?;
     }
-    let tmp = dir.join(format!("{name}.tmp.{}", std::process::id()));
+    // シンボリックリンク（dotfiles の管理など）なら、リンクを残してリンク先を置き換える。
+    let is_link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    let target = if is_link { std::fs::canonicalize(path)? } else { path.to_path_buf() };
+    let target_dir = target.parent().ok_or_else(|| io::Error::other("settings.json のフォルダが無い"))?;
+    let tmp = target_dir.join(format!("{name}.tmp.{}", std::process::id()));
     std::fs::write(&tmp, new_text)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
+    // 元の権限（0600 など）を引き継ぐ。
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    std::fs::rename(&tmp, &target).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }
@@ -438,6 +446,27 @@ mod tests {
         assert!(matches!(run_admin(&HookAdmin::Install { command: None }, Some(&path), &make), HookStatus::Unreadable(_)));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{");
         assert!(matches!(run_admin(&HookAdmin::Status { command: None }, None, &make), HookStatus::Unreadable(_)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_with_backup_follows_symlink_and_keeps_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fude-claude-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        std::fs::create_dir_all(dir.join("home")).unwrap();
+        let real = dir.join("dotfiles").join("settings.json");
+        std::fs::write(&real, "one").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("home").join("settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_with_backup(&link, "two").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "リンクのまま");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "two");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(dir.join("home").join("settings.json.bak")).unwrap(), "one");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

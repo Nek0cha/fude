@@ -105,6 +105,20 @@ pub(crate) fn target_row(state: &TargetState) -> (String, Vec<(HookOp, &'static 
     }
 }
 
+/// パネルを開き直したときに調べ直す登録先（設計書 §5.4）。この PC と、一度調べた WSL。
+/// まだ調べていない WSL は起こさないため、調べている最中のものは二重に走らせないため除く。
+pub(crate) fn rows_to_recheck(targets: &[(HookTarget, TargetState)]) -> Vec<HookTarget> {
+    targets
+        .iter()
+        .filter(|(t, s)| match s {
+            TargetState::Checking => false,
+            TargetState::Unchecked => *t == HookTarget::ThisPc,
+            TargetState::Known(_) | TargetState::NotInstalled => true,
+        })
+        .map(|(t, _)| t.clone())
+        .collect()
+}
+
 /// 登録先の名前。
 fn target_label(target: &HookTarget) -> String {
     match target {
@@ -167,6 +181,13 @@ impl SettingsView {
         view.run_target(HookTarget::ThisPc, HookOp::Check, cx);
         view.reload_distros(cx);
         view
+    }
+
+    /// パネルを開き直した。hook の状態を調べ直す。
+    pub fn reopened(&mut self, cx: &mut Context<Self>) {
+        for target in rows_to_recheck(&self.targets) {
+            self.run_target(target, HookOp::Check, cx);
+        }
     }
 
     /// target に op を裏で行い、終わったら状態を差し替える。
@@ -561,8 +582,8 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     // super::* は gpui の test 属性も持ち込むので、名前を挙げる。
-    use super::{filter_fonts, font_list, line_height_label, parse_hex_input, percent_label, target_row};
-    use crate::hook_targets::{HookOp, TargetState};
+    use super::{filter_fonts, font_list, line_height_label, parse_hex_input, percent_label, rows_to_recheck, target_row};
+    use crate::hook_targets::{HookOp, HookTarget, TargetState};
     use fude_core::claude_settings::HookStatus;
 
     #[test]
@@ -622,5 +643,20 @@ mod tests {
         assert_eq!(ops(&bad), [(HookOp::Check, "調べ直す")]);
         assert_eq!(target_row(&TargetState::NotInstalled).0, "まだ登録していません（登録するときに fude を WSL に置きます）");
         assert_eq!(ops(&TargetState::NotInstalled), [(HookOp::Install, "登録する")]);
+    }
+
+    #[test]
+    fn reopening_rechecks_this_pc_and_checked_wsl() {
+        let targets = vec![
+            (HookTarget::ThisPc, TargetState::Known(HookStatus::NotRegistered)),
+            (HookTarget::Wsl("A".into()), TargetState::Unchecked),
+            (HookTarget::Wsl("B".into()), TargetState::Known(HookStatus::Registered)),
+            (HookTarget::Wsl("C".into()), TargetState::NotInstalled),
+            (HookTarget::Wsl("D".into()), TargetState::Checking),
+        ];
+        assert_eq!(
+            rows_to_recheck(&targets),
+            [HookTarget::ThisPc, HookTarget::Wsl("B".into()), HookTarget::Wsl("C".into())]
+        );
     }
 }

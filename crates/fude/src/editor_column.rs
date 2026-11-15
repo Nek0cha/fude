@@ -186,13 +186,16 @@ impl WorkspaceView {
     /// プロジェクトが無ければホーム画面の代わりに出す。
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let view = match &self.settings_view {
-            Some(v) => v.clone(),
+            Some(v) => {
+                v.update(cx, |v, cx| v.reopened(cx));
+                v.clone()
+            }
             None => {
                 let v = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
-                cx.subscribe_in(&v, window, |this, _, ev: &crate::settings_view::SettingsViewEvent, window, cx| match ev {
-                    crate::settings_view::SettingsViewEvent::OpenConfig(path) => {
-                        this.open_file(fude_core::location::FileLocation::Local(path.clone()), None, None, window, cx)
-                    }
+                // 設定ファイルはどのプロジェクトの中にも無いので、エディタ列には開けない（open_file は設定のフォルダを
+                // プロジェクトとして開いてしまう）。OS の既定のアプリで開く。
+                cx.subscribe_in(&v, window, |_, _, ev: &crate::settings_view::SettingsViewEvent, _, cx| match ev {
+                    crate::settings_view::SettingsViewEvent::OpenConfig(path) => cx.open_with_system(path),
                 })
                 .detach();
                 self.settings_view = Some(v.clone());

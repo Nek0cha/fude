@@ -57,8 +57,14 @@ impl PendingWrites {
         self.last_written = Some(text);
     }
 
-    pub fn is_own_write(&self, text: &str) -> bool {
-        self.last_written.as_deref() == Some(text)
+    /// 見張りが読み直した text を反映しないでよいか。自分で書いた文面で、しかもスライダーの書き込みを待っている
+    /// （画面の値のほうが新しい）ときだけ true。自分の書き込みでない文面が来たら、覚えた文面は捨てる。
+    pub fn skip_reload(&mut self, text: &str) -> bool {
+        if self.last_written.as_deref() != Some(text) {
+            self.last_written = None;
+            return false;
+        }
+        !self.pending.is_empty()
     }
 }
 
@@ -263,8 +269,9 @@ pub fn reload_now(cx: &mut App) {
     let Some(path) = state.path.clone() else { return };
     let read = std::fs::read(&path).map_err(|e| ConfigIssue { line: None, message: format!("設定ファイルを読めません: {e}") });
     let (settings, mut issues) = match read.and_then(|b| fude_core::settings::decode_config(&b)) {
-        // 設定パネルが書いた文面そのもの。スライダーを動かし続けていると画面の値のほうが新しいので、戻さない。
-        Ok(text) if cx.default_global::<PendingWrites>().is_own_write(&text) => return,
+        // 設定パネルが書いた文面で、スライダーを動かし続けている（画面の値のほうが新しい）ので、戻さない。
+        // 動かし終えた書き込みのあとの読み直しで、手で直した分と知らせも反映される。
+        Ok(text) if cx.default_global::<PendingWrites>().skip_reload(&text) => return,
         Ok(text) => reload(&state.settings, &text),
         // 消えた・読めないときは今の値のまま。
         Err(issue) => (state.settings.clone(), vec![issue]),
@@ -405,10 +412,16 @@ mod tests {
     }
 
     #[test]
-    fn own_write_is_not_reloaded() {
+    fn own_write_is_skipped_only_while_slider_waits() {
+        let opacity = vec![FileEdit::Set(&["window", "background_opacity"], EditValue::Float(0.5))];
         let mut p = PendingWrites::default();
         p.wrote("a = 1\n".into());
-        assert!(p.is_own_write("a = 1\n"));
-        assert!(!p.is_own_write("a = 2\n"));
+        // 待っている書き込みが無ければ、自分の文面でも読み直す（手で戻したとき、知らせを消すとき）。
+        assert!(!p.skip_reload("a = 1\n"));
+        assert!(p.push(opacity, true).is_empty());
+        assert!(p.skip_reload("a = 1\n"));
+        assert!(!p.skip_reload("a = 2\n"));
+        // 自分の書き込みでない読み直しが来たら、覚えた文面は捨てる。
+        assert!(!p.skip_reload("a = 1\n"));
     }
 }
