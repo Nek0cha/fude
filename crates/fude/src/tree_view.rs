@@ -235,6 +235,7 @@ impl WorkspaceView {
             cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                 let theme = *cx.global::<Theme>();
                 let selected = this.tree.selected.clone();
+                let root = this.workspace.active_project().map(|p| p.root.clone());
                 this.tree.rows[range.start.min(this.tree.rows.len())..range.end.min(this.tree.rows.len())]
                     .iter()
                     .cloned()
@@ -264,8 +265,17 @@ impl WorkspaceView {
                         });
                         let clicked = row.clone();
                         let menu_row = row.clone();
+                        // ターミナルや Markdown へ落とせるよう、行をドラッグで運ぶ。
+                        let dragged = root.as_ref().map(|root| crate::drag::DraggedEntry {
+                            rel: row.rel.as_str().to_string(),
+                            is_dir: row.is_dir,
+                            location: crate::drag::entry_location(root, row.rel.as_str()),
+                        });
                         div()
                             .id(ElementId::Name(format!("tree-row-{}", range.start + i).into()))
+                            .when_some(dragged, |d, entry| {
+                                d.on_drag(entry, |entry: &crate::drag::DraggedEntry, _, _, cx| cx.new(|_| entry.clone()))
+                            })
                             .h(ROW_H)
                             .w_full()
                             .pl(px(8. + INDENT * row.depth as f32))

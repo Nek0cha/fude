@@ -1,11 +1,13 @@
 pub mod claude;
 pub mod close;
+pub mod drop_text;
 pub mod editor_tabs;
 pub mod fuzzy;
 pub mod git_head;
 pub mod keymap;
 pub mod keys;
 pub mod location;
+pub mod markdown;
 pub mod motion;
 pub mod panel;
 pub mod palette;

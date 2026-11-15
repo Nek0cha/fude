@@ -48,10 +48,13 @@ pub enum PaletteCommand {
     ToggleRouteMap,
     LaunchClaude,
     CopyHookConfig,
+    ToggleMarkdownMode,
+    TogglePin,
+    ToggleVerticalTabs,
 }
 
 impl PaletteCommand {
-    pub const ALL: [PaletteCommand; 14] = [
+    pub const ALL: [PaletteCommand; 17] = [
         PaletteCommand::NewTerminal,
         PaletteCommand::SplitTerminal,
         PaletteCommand::ToggleTree,
@@ -66,6 +69,9 @@ impl PaletteCommand {
         PaletteCommand::ToggleRouteMap,
         PaletteCommand::LaunchClaude,
         PaletteCommand::CopyHookConfig,
+        PaletteCommand::ToggleMarkdownMode,
+        PaletteCommand::TogglePin,
+        PaletteCommand::ToggleVerticalTabs,
     ];
 
     /// 表示名。
@@ -85,6 +91,9 @@ impl PaletteCommand {
             PaletteCommand::ToggleRouteMap => "路線図の表示切り替え",
             PaletteCommand::LaunchClaude => "Claude Code を起動",
             PaletteCommand::CopyHookConfig => "Claude Code の hook の設定をコピー",
+            PaletteCommand::ToggleMarkdownMode => "表示／ソースの切り替え",
+            PaletteCommand::TogglePin => "Markdown をピン留め／外す",
+            PaletteCommand::ToggleVerticalTabs => "ターミナルのタブを縦に並べる",
         }
     }
 
@@ -105,12 +114,15 @@ impl PaletteCommand {
             PaletteCommand::ToggleRouteMap => "toggle route map plan tasks",
             PaletteCommand::LaunchClaude => "launch start claude code",
             PaletteCommand::CopyHookConfig => "copy claude code hook config settings",
+            PaletteCommand::ToggleMarkdownMode => "toggle markdown preview source",
+            PaletteCommand::TogglePin => "pin markdown",
+            PaletteCommand::ToggleVerticalTabs => "vertical terminal tabs",
         }
     }
 
     /// プロジェクトを開いていないと使えないか。
     pub fn needs_project(self) -> bool {
-        self != PaletteCommand::OpenFolder
+        !matches!(self, PaletteCommand::OpenFolder | PaletteCommand::ToggleVerticalTabs)
     }
 
     /// 割り当てたキー（keymap の Command）。無ければ None。
@@ -127,7 +139,12 @@ impl PaletteCommand {
             PaletteCommand::GoToFile => Some(Command::GoToFile),
             PaletteCommand::FindInFiles => Some(Command::FindInFiles),
             PaletteCommand::FindInTerminal => Some(Command::FindInTerminal),
-            PaletteCommand::OpenFolder | PaletteCommand::LaunchClaude | PaletteCommand::CopyHookConfig => None,
+            PaletteCommand::ToggleMarkdownMode => Some(Command::ToggleMarkdownMode),
+            PaletteCommand::OpenFolder
+            | PaletteCommand::LaunchClaude
+            | PaletteCommand::CopyHookConfig
+            | PaletteCommand::TogglePin
+            | PaletteCommand::ToggleVerticalTabs => None,
         }
     }
 }
@@ -245,5 +262,15 @@ mod tests {
         for c in PaletteCommand::ALL {
             assert!(!c.label().is_empty());
         }
+    }
+
+    #[test]
+    fn new_commands_are_listed() {
+        for c in [PaletteCommand::ToggleMarkdownMode, PaletteCommand::TogglePin, PaletteCommand::ToggleVerticalTabs] {
+            assert!(PaletteCommand::ALL.contains(&c));
+        }
+        assert!(!PaletteCommand::ToggleVerticalTabs.needs_project());
+        assert_eq!(PaletteCommand::ToggleMarkdownMode.keymap_command(), Some(Command::ToggleMarkdownMode));
+        assert_eq!(PaletteCommand::TogglePin.keymap_command(), None);
     }
 }

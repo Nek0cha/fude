@@ -52,13 +52,14 @@ gpui_kit::actions!(
 
 /// Command と文脈を GPUI のキーバインドにする。
 fn binding(key: &'static str, command: Command, context: Option<&'static str>) -> KeyBinding {
-    use crate::file_view::{SaveFile, SendToClaude};
+    use crate::file_view::{SaveFile, SendToClaude, ToggleMarkdownMode};
     use crate::tree_view::ToggleTree;
     match command {
         Command::Close => KeyBinding::new(key, CloseItem, context),
         Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
         Command::Save => KeyBinding::new(key, SaveFile, context),
         Command::SendToClaude => KeyBinding::new(key, SendToClaude, context),
+        Command::ToggleMarkdownMode => KeyBinding::new(key, ToggleMarkdownMode, context),
         Command::OpenPalette => KeyBinding::new(key, OpenPalette, context),
         Command::GoToFile => KeyBinding::new(key, GoToFile, context),
         Command::FindInFiles => KeyBinding::new(key, FindInFiles, context),
@@ -101,6 +102,7 @@ fn default_binding(key: &'static str, command: Command) -> KeyBinding {
         | Command::ToggleTree
         | Command::Save
         | Command::SendToClaude
+        | Command::ToggleMarkdownMode
         | Command::OpenPalette
         | Command::GoToFile
         | Command::FindInFiles
@@ -281,6 +283,12 @@ pub struct WorkspaceView {
     pub(crate) editor_anim: crate::editor_column::EditorAnim,
     /// 左パネル（ツリー）の出入り。
     pub(crate) tree_presence: crate::anim::Presence,
+    /// ピン列（プロジェクトごとのビューと、出入りの動き）。
+    pub(crate) pins: crate::pin_view::PinSlot,
+    /// ターミナルのタブを縦に並べるか（全プロジェクトで 1 つ。session.json に保存し、起動時に常に読む）。
+    pub(crate) vertical_tabs: bool,
+    /// 縦のタブの列の幅の動き。
+    pub(crate) vtabs_w: Fade,
     /// タブと分割の動き。
     pub(crate) anims: crate::layout_anim::LayoutAnims,
     /// OS の「動きを減らす」設定。起動時とウィンドウが前面に来たときに読む。
@@ -308,6 +316,7 @@ impl WorkspaceView {
     /// 起動時にセッションは戻さない（設計書 §5.10 の B 案）。startup.open があれば開く。
     pub fn new(startup: Startup, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let Startup { session_path, last_session, recent_path, recent, open } = startup;
+        let vertical_tabs = last_session.as_ref().is_some_and(|s| s.vertical_tabs);
         let workspace = Workspace::default();
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
@@ -381,6 +390,9 @@ impl WorkspaceView {
             anims: Default::default(),
             editor_anim: Default::default(),
             tree_presence: crate::anim::Presence::hidden(),
+            pins: Default::default(),
+            vertical_tabs,
+            vtabs_w: Fade::settled(0.0),
             editors: HashMap::new(),
             editor_tab_scroll: (ScrollHandle::new(), None),
             live: HashMap::new(),
@@ -640,7 +652,7 @@ impl WorkspaceView {
         let Some(path) = self.session_path.clone() else { return };
         let geom = geom_from_bounds(window.window_bounds());
         self.last_geom = Some(geom.clone());
-        let data = SessionData::capture_keeping(&self.workspace, Some(geom), self.last_session.as_ref());
+        let data = SessionData::capture_keeping(&self.workspace, Some(geom), self.vertical_tabs, self.last_session.as_ref());
         if data.has_projects() {
             self.last_session = Some(data.clone());
         }
@@ -669,7 +681,7 @@ impl WorkspaceView {
         let Some(path) = self.session_path.as_ref() else { return };
         self.save_task = None;
         self.pending = None;
-        let data = SessionData::capture_keeping(&self.workspace, self.last_geom.clone(), self.last_session.as_ref());
+        let data = SessionData::capture_keeping(&self.workspace, self.last_geom.clone(), self.vertical_tabs, self.last_session.as_ref());
         if self.saved.as_ref() == Some(&data) {
             return;
         }
@@ -808,7 +820,7 @@ impl WorkspaceView {
             let view = cx.new(|cx| TerminalView::new(&kind, &root, &terminal_id, window, cx));
             let link_kind = kind.clone();
             let link_root = root.clone();
-            let sub = cx.subscribe_in(&view, window, move |this, _, event: &TerminalEvent, window, cx| {
+            let sub = cx.subscribe_in(&view, window, move |this, view, event: &TerminalEvent, window, cx| {
                 match event {
                     TerminalEvent::OpenLink(target) => this.open_link(target.clone(), &link_kind, &link_root, window, cx),
                     TerminalEvent::Title(title) => this.workspace.set_pane_title(id, title.clone()),
@@ -818,6 +830,13 @@ impl WorkspaceView {
                     TerminalEvent::Exited { success: false } => {}
                     TerminalEvent::Input => {
                         this.agents.typed(id.raw());
+                    }
+                    TerminalEvent::DroppedFiles(files) => {
+                        let text = fude_core::drop_text::drop_text(files, &link_kind, Platform::current());
+                        view.read(cx).write(text.into_bytes());
+                        this.agents.typed(id.raw());
+                        this.workspace.focus_pane(id);
+                        this.refocus_pane();
                     }
                     TerminalEvent::Focused => {
                         this.workspace.focus_pane(id);
@@ -883,7 +902,11 @@ impl WorkspaceView {
 
     /// ターミナルの大きさが変わる動き（分割、エディタ列、ツリー、エディタの移動）の途中か。
     pub(crate) fn layout_animating(&self, now: Instant) -> bool {
-        self.anims.split_animating(now) || self.editor_animating(now) || self.tree_presence.is_animating(now)
+        self.anims.split_animating(now)
+            || self.editor_animating(now)
+            || self.tree_presence.is_animating(now)
+            || self.pins.presence.is_animating(now)
+            || self.vtabs_w.is_animating(now)
     }
 
     /// 動きの間は、選択中のタブのターミナルが PTY にサイズを送らないようにする。
@@ -925,6 +948,7 @@ impl Render for WorkspaceView {
         let (bg, fg) = (theme.bg_window, theme.fg_default);
         self.sync_terminals(window, cx);
         self.sync_live(cx);
+        self.sync_pins(now, window, cx);
         self.ensure_active_view(window, cx);
         self.anims.observe(self.workspace.active_project(), now, self.reduced_motion);
         let editor_shape =
@@ -936,6 +960,7 @@ impl Render for WorkspaceView {
             || self.anims.editor_tabs_animating(now)
             || self.editor_animating(now)
             || self.tree_presence.is_animating(now)
+            || self.pins.presence.is_animating(now)
         {
             window.request_animation_frame();
         }
@@ -943,6 +968,7 @@ impl Render for WorkspaceView {
         self.schedule_save(window, cx);
         self.observe_waiting(window, now);
         self.observe_route_map(window, now, cx);
+        self.observe_vertical_tabs(window, now);
         let home = self.workspace.projects().is_empty();
         if self.showing_home != Some(home) {
             // 最初の描画ではフェードしない。
@@ -962,16 +988,20 @@ impl Render for WorkspaceView {
             self.render_home(cx, now)
         } else {
             let terminals = self.terminals.iter().map(|(id, (view, _))| (*id, view.clone())).collect();
-            let main_w = window.viewport_size().width - crate::theme::size::RAIL_W - px(self.route_map_width(now));
-            let (tree, editor) = self.render_columns(main_w, now, cx);
+            let main_w = window.viewport_size().width
+                - crate::theme::size::RAIL_W
+                - px(self.route_map_width(now))
+                - px(self.vertical_tabs_width(now));
+            let (tree, editor, pin) = self.render_columns(main_w, window.viewport_size().width, now, cx);
             let active_tab = self.workspace.active_project().and_then(|p| p.active_tab());
             let share = active_tab.map_or(1.0, |t| self.anims.split_share(t.id, now));
-            render_main_area(active_tab, &terminals, share, tree, editor, cx)
+            render_main_area(active_tab, &terminals, share, tree, editor, pin, cx)
         };
         let main = main.opacity(self.screen_fade.value(now));
         let title_row = self.render_title_row(window, cx, now);
         let rail = self.render_rail(cx, now);
         let route_map = self.render_route_map(now, cx);
+        let vertical_tabs = self.render_vertical_tabs(now, cx);
         let menu = self.render_shell_menu(window, cx, now);
         let project_menu = self.render_project_menu(window, cx, now);
         let home_menu = self.render_home_menu(window, cx, now);
@@ -1033,6 +1063,7 @@ impl Render for WorkspaceView {
                     .relative()
                     .child(rail)
                     .children(route_map)
+                    .children(vertical_tabs)
                     .child(div().flex_1().min_w_0().h_full().child(main)),
             )
             .children(menu)

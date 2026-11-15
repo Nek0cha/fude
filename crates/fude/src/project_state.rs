@@ -124,6 +124,7 @@ impl WorkspaceView {
                 view.update(cx, |v, cx| v.on_external_change(cx));
             }
         }
+        self.reload_pin_if_changed(project, &changed, cx);
         self.on_tree_changed(project, &batch, cx);
         if batch.git {
             self.refresh_branch(project, cx);

@@ -531,6 +531,20 @@ impl WorkspaceView {
             PaletteCommand::FindInFiles => return self.open_find_in_files(window, cx),
             PaletteCommand::LaunchClaude => return self.launch_claude(cx),
             PaletteCommand::CopyHookConfig => return self.copy_hook_config(window, cx),
+            // 中身は計画8 の後のタスクで入れる。
+            PaletteCommand::ToggleMarkdownMode => {
+                let Some(view) = self.active_editor_view() else { return };
+                window.focus(&view.read(cx).focus_handle(), cx);
+                Box::new(crate::file_view::ToggleMarkdownMode)
+            }
+            PaletteCommand::TogglePin => {
+                // 選択中のタブが Markdown ならそれを切り替える。そうでなければピンを外す。
+                let Some(p) = self.workspace.active_project() else { return };
+                let project = p.id;
+                let rel = p.editor.active().map(|i| i.rel.clone()).filter(|r| fude_core::markdown::is_markdown(r));
+                return self.toggle_pin(project, rel, cx);
+            }
+            PaletteCommand::ToggleVerticalTabs => return self.toggle_vertical_tabs(cx),
         };
         window.dispatch_action(action, cx);
     }

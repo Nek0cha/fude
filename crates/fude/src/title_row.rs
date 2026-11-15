@@ -21,13 +21,15 @@ pub(crate) fn icon(name: IconName, color: Rgba) -> Svg {
 
 impl WorkspaceView {
     pub(crate) fn render_title_row(&mut self, window: &mut Window, cx: &mut Context<Self>, now: Instant) -> Div {
-        let mut tabs: Vec<AnyElement> = match self.workspace.active_project() {
+        // 縦に並べているときは、上の列にターミナルのタブを出さない（＋や分割、ピルは残す）。
+        let vertical = self.vertical_tabs;
+        let mut tabs: Vec<AnyElement> = match self.workspace.active_project().filter(|_| !vertical) {
             Some(p) => {
                 let active = p.active_tab;
                 p.tabs
                     .iter()
                     .map(|t| {
-                        let el = self.render_tab(t, Some(t.id) == active, cx, now);
+                        let el = self.render_tab(t, Some(t.id) == active, false, cx, now);
                         // 出てきたタブは幅を広げながら、文字をフェードインする（設計書 §6.3）。
                         match self.anims.opened.get(&t.id) {
                             Some(start) => {
@@ -44,7 +46,7 @@ impl WorkspaceView {
         };
         // 閉じたタブは、文字を消してから幅を縮める。
         let theme = *cx.global::<Theme>();
-        for c in &self.anims.closing {
+        for c in self.anims.closing.iter().filter(|_| !vertical) {
             let (text, width, _) = tab_close_progress(now.saturating_duration_since(c.started), self.reduced_motion);
             let ghost = div()
                 .h(size::TAB_H)
@@ -148,7 +150,8 @@ impl WorkspaceView {
         })
     }
 
-    fn render_tab(&self, tab: &Tab, selected: bool, cx: &mut Context<Self>, now: Instant) -> Stateful<Div> {
+    /// タブ。vertical なら縦の列の行（幅いっぱい、題名を伸ばして × を右端に寄せる）。
+    pub(crate) fn render_tab(&self, tab: &Tab, selected: bool, vertical: bool, cx: &mut Context<Self>, now: Instant) -> Stateful<Div> {
         let theme = *cx.global::<Theme>();
         let id = tab.id;
         let key = HoverKey::Tab(id);
@@ -175,7 +178,8 @@ impl WorkspaceView {
 
         self.hoverable(div().id(ElementId::Name(format!("tab-{id:?}").into())), key, cx)
             .h(size::TAB_H)
-            .max_w(size::TAB_MAX_W)
+            .when(vertical, |d| d.w_full())
+            .when(!vertical, |d| d.max_w(size::TAB_MAX_W))
             .flex_shrink_0()
             .px(px(10.))
             .flex()
@@ -187,7 +191,7 @@ impl WorkspaceView {
             .text_color(fg)
             .text_size(px(13.))
             .child(if self.tab_waiting(tab) { icon(IconName::Bell, theme.warn) } else { icon(IconName::Terminal, fg) })
-            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().child(tab.title()))
+            .child(div().min_w_0().when(vertical, |d| d.flex_1()).overflow_hidden().whitespace_nowrap().child(tab.title()))
             .child(close)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.workspace.activate_tab(id);
