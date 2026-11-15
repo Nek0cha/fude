@@ -39,6 +39,7 @@ mod theme;
 mod title_row;
 mod tree_menu;
 mod tree_model;
+mod tree_undo;
 mod tree_view;
 mod vertical_tabs;
 mod workspace_view;

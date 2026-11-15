@@ -30,6 +30,8 @@ pub(crate) struct Dialog {
     pub buttons: Vec<DialogButton>,
     /// 押したボタンの位置を受け取る。Cancel のボタンが無いダイアログで Esc を押したときは呼ばない。
     pub on_choose: OnChoose,
+    /// 選んだあとフォーカスを返す先（ツリーなど）。None ならペイン（ターミナル）へ返す。
+    pub refocus: Option<FocusHandle>,
 }
 
 /// Enter で選ぶボタン。ボタンが 1 つだけなら、それを選ぶ。
@@ -60,10 +62,24 @@ pub(crate) fn cancel_index(buttons: &[DialogButton]) -> Option<usize> {
     buttons.iter().position(|b| b.role == ButtonRole::Cancel)
 }
 
-/// 選んだあと、ターミナルへフォーカスを戻すか。選んだ処理がフォーカスを動かした（still_on_workspace が
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refocus {
+    /// ダイアログの返す先（refocus）へ。
+    Target,
+    /// ペイン（ターミナル）へ。
+    Pane,
+    /// 選んだ処理が動かした場所を保つ。
+    Keep,
+}
+
+/// 選んだあと、フォーカスをどこへ戻すか。選んだ処理がフォーカスを動かした（still_on_workspace が
 /// false。閉じたタブの隣のエディタなど）ときは、その場所を保つ。
-pub(crate) fn refocus_after_choose(still_on_workspace: bool) -> bool {
-    still_on_workspace
+pub(crate) fn refocus_choice(still_on_workspace: bool, has_target: bool) -> Refocus {
+    match (still_on_workspace, has_target) {
+        (false, _) => Refocus::Keep,
+        (true, true) => Refocus::Target,
+        (true, false) => Refocus::Pane,
+    }
 }
 
 /// 出ているダイアログ。消える動きの間も持つ（on_choose は選んだ時点で取り出す）。
@@ -71,20 +87,26 @@ pub(crate) struct OpenDialog {
     message: String,
     buttons: Vec<DialogButton>,
     on_choose: Option<OnChoose>,
+    refocus: Option<FocusHandle>,
     popup: Popup,
 }
 
 impl WorkspaceView {
     pub(crate) fn show_dialog(&mut self, dialog: Dialog, window: &mut Window, cx: &mut Context<Self>) {
-        let Dialog { message, buttons, on_choose } = dialog;
+        let Dialog { message, buttons, on_choose, refocus } = dialog;
         let popup = Popup::open(point(px(0.), px(0.)), window, cx);
-        self.dialog = Some(OpenDialog { message, buttons, on_choose: Some(on_choose), popup });
+        self.dialog = Some(OpenDialog { message, buttons, on_choose: Some(on_choose), refocus, popup });
         cx.notify();
     }
 
     /// 失敗を知らせる（OK だけのダイアログ）。
     pub(crate) fn show_error(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
-        let dialog = Dialog { message, buttons: ok_dialog_buttons(), on_choose: Box::new(|_, _, _, _| {}) };
+        self.show_error_to(message, None, window, cx);
+    }
+
+    /// 失敗を知らせ、閉じたあと refocus（None ならペイン）へフォーカスを返す。
+    pub(crate) fn show_error_to(&mut self, message: String, refocus: Option<FocusHandle>, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = Dialog { message, buttons: ok_dialog_buttons(), on_choose: Box::new(|_, _, _, _| {}), refocus };
         self.show_dialog(dialog, window, cx);
     }
 
@@ -96,11 +118,14 @@ impl WorkspaceView {
     fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(d) = self.dialog.as_mut() else { return };
         let Some(on_choose) = d.on_choose.take() else { return };
+        let target = d.refocus.take();
         d.popup.close(Instant::now());
         window.focus(&self.focus, cx);
         on_choose(index, self, window, cx);
-        if refocus_after_choose(self.focus.is_focused(window)) {
-            self.refocus_pane();
+        match (refocus_choice(self.focus.is_focused(window), target.is_some()), target) {
+            (Refocus::Target, Some(target)) => window.focus(&target, cx),
+            (Refocus::Pane, _) => self.refocus_pane(),
+            _ => {}
         }
         cx.notify();
     }
@@ -188,14 +213,21 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ButtonRole, DialogButton, cancel_index, default_index, error_text, ok_dialog_buttons, refocus_after_choose};
+    use super::{ButtonRole, DialogButton, Refocus, cancel_index, default_index, error_text, ok_dialog_buttons, refocus_choice};
 
     #[test]
     fn choice_that_moved_focus_keeps_it() {
-        // 選んだ処理がフォーカスを動かした（隣のエディタのタブなど）なら、ターミナルへ戻さない。
-        assert!(!refocus_after_choose(false));
+        // 選んだ処理がフォーカスを動かした（隣のエディタのタブなど）なら、その場所を保つ。
+        assert_eq!(refocus_choice(false, false), Refocus::Keep);
+        assert_eq!(refocus_choice(false, true), Refocus::Keep);
         // 動かさなかった（キャンセルなど）なら、ターミナルへ戻す。
-        assert!(refocus_after_choose(true));
+        assert_eq!(refocus_choice(true, false), Refocus::Pane);
+    }
+
+    #[test]
+    fn refocus_target_wins_over_pane() {
+        // 返す先（ツリーなど）があれば、ペインではなくそこへ戻す。
+        assert_eq!(refocus_choice(true, true), Refocus::Target);
     }
 
     fn b(label: &'static str, role: ButtonRole) -> DialogButton {

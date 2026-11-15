@@ -16,6 +16,36 @@ pub(crate) struct TreeRow {
     pub mark: Option<GitMark>,
 }
 
+/// ツリーに描く 1 行。名前の入力欄（計画8b）も行として並べる。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RowSlot {
+    Entry(TreeRow),
+    Edit { depth: usize, kind: crate::tree_menu::EditKind },
+}
+
+/// rows に名前の入力欄を差し込む。名前の変更は対象の行を置き換え、新規は作り先のフォルダの行のすぐ下
+/// （ルートならいちばん上）に 1 段深く差し込む。対象の行が見えていなければ差し込まない。
+pub(crate) fn rows_with_edit(rows: Vec<TreeRow>, edit: Option<(&crate::tree_menu::EditKind, &RelPath)>) -> Vec<RowSlot> {
+    use crate::tree_menu::EditKind;
+    let Some((&kind, target)) = edit else { return rows.into_iter().map(RowSlot::Entry).collect() };
+    let mut out = Vec::with_capacity(rows.len() + 1);
+    if kind != EditKind::Rename && target.is_root() {
+        out.push(RowSlot::Edit { depth: 0, kind });
+    }
+    for row in rows {
+        if row.rel != *target {
+            out.push(RowSlot::Entry(row));
+        } else if kind == EditKind::Rename {
+            out.push(RowSlot::Edit { depth: row.depth, kind });
+        } else {
+            let depth = row.depth + 1;
+            out.push(RowSlot::Entry(row));
+            out.push(RowSlot::Edit { depth, kind });
+        }
+    }
+    out
+}
+
 #[derive(Default)]
 pub(crate) struct TreeModel {
     /// 読んだフォルダ（相対パス）の子。
@@ -103,6 +133,24 @@ impl TreeModel {
         }
     }
 
+    /// dir と、その祖先をすべて開く。読む必要のあるフォルダ（浅い順）を返す。
+    pub fn reveal(&mut self, dir: &RelPath) -> Vec<RelPath> {
+        let mut need = Vec::new();
+        let mut path = String::new();
+        for part in dir.as_str().split('/').filter(|p| !p.is_empty()) {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(part);
+            let Ok(rel) = RelPath::new(&path) else { break };
+            self.expand(&rel);
+            if self.needs_load(&rel) {
+                need.push(rel);
+            }
+        }
+        need
+    }
+
     /// ファイル名で絞り込む（大文字小文字を区別しない部分一致）。all_files は全ファイルの一覧（無ければ、届くまで何も出さない）。
     pub fn set_filter(&mut self, query: &str, all_files: Option<&[RelPath]>) {
         self.filter = query.trim().to_lowercase();
@@ -180,7 +228,8 @@ impl TreeModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{TreeModel, TreeRow};
+    use super::{RowSlot, TreeModel, TreeRow, rows_with_edit};
+    use crate::tree_menu::EditKind;
     use fude_fs::git::{GitMark, GitStatus};
     use fude_fs::{DirEntry, RelPath};
 
@@ -273,5 +322,47 @@ mod tests {
         assert!(m.needs_load(&rel("src")));
         // 読み直すまでは古い子を出し続ける（ちらつかないように）。
         assert_eq!(m.rows(None).len(), 2);
+    }
+
+    fn slot_row(p: &str, depth: usize, is_dir: bool) -> TreeRow {
+        let rel = rel(p);
+        TreeRow { name: p.rsplit('/').next().unwrap().into(), rel, depth, is_dir, expanded: is_dir, mark: None }
+    }
+
+    /// 作り先のフォルダと祖先をすべて開き、読む必要のあるものを返す（絞り込みからの新規、計画8b）。
+    #[test]
+    fn reveal_opens_ancestors() {
+        let mut m = TreeModel::default();
+        m.set_children(&RelPath::root(), vec![entry("src", true)]);
+        let need = m.reveal(&rel("src/deep"));
+        assert_eq!(need, vec![rel("src"), rel("src/deep")]);
+        m.set_children(&rel("src"), vec![entry("deep", true)]);
+        m.set_children(&rel("src/deep"), vec![]);
+        let rows = m.rows(None);
+        assert!(rows.iter().any(|r| r.rel == rel("src/deep") && r.expanded));
+        assert!(m.reveal(&rel("src/deep")).is_empty());
+        assert!(m.reveal(&RelPath::root()).is_empty());
+    }
+
+    #[test]
+    fn edit_slot_replaces_renamed_row() {
+        let rows = vec![slot_row("docs", 0, true), slot_row("docs/a.md", 1, false), slot_row("docs/b.md", 1, false)];
+        let slots = rows_with_edit(rows, Some((&EditKind::Rename, &rel("docs/a.md"))));
+        assert_eq!(slots.len(), 3);
+        assert!(matches!(slots[1], RowSlot::Edit { depth: 1, kind: EditKind::Rename }));
+        assert!(matches!(&slots[2], RowSlot::Entry(r) if r.rel == rel("docs/b.md")));
+    }
+
+    #[test]
+    fn new_item_slot_goes_under_folder_or_top() {
+        let rows = vec![slot_row("docs", 0, true), slot_row("docs/a.md", 1, false), slot_row("z.md", 0, false)];
+        let slots = rows_with_edit(rows.clone(), Some((&EditKind::NewFile, &rel("docs"))));
+        assert_eq!(slots.len(), 4);
+        assert!(matches!(slots[1], RowSlot::Edit { depth: 1, kind: EditKind::NewFile }));
+        let slots = rows_with_edit(rows.clone(), Some((&EditKind::NewFolder, &RelPath::root())));
+        assert!(matches!(slots[0], RowSlot::Edit { depth: 0, kind: EditKind::NewFolder }));
+        let slots = rows_with_edit(rows, None);
+        assert_eq!(slots.len(), 3);
+        assert!(slots.iter().all(|s| matches!(s, RowSlot::Entry(_))));
     }
 }

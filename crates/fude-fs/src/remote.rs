@@ -218,6 +218,17 @@ impl ProjectFs for RemoteFs {
         self.done(Request::Remove { root: self.root.clone(), path: rel.clone() })
     }
 
+    fn trash(&self, rel: &RelPath) -> io::Result<crate::TrashTicket> {
+        match self.call(Request::Trash { root: self.root.clone(), path: rel.clone() }, &[])? {
+            (Response::Trashed { ticket }, _) => Ok(ticket),
+            (resp, _) => Err(unexpected(resp)),
+        }
+    }
+
+    fn restore(&self, ticket: &crate::TrashTicket, rel: &RelPath) -> io::Result<()> {
+        self.done(Request::Restore { root: self.root.clone(), ticket: ticket.clone(), path: rel.clone() })
+    }
+
     fn git_status(&self) -> io::Result<Option<crate::git::GitStatus>> {
         match self.call(Request::GitStatus { root: self.root.clone() }, &[])? {
             (Response::Status, json) => serde_json::from_slice(&json)
@@ -315,6 +326,21 @@ mod tests {
         let entries = fs.list_dir(&RelPath::root()).unwrap();
         assert_eq!(entries.len(), 5000);
         assert_eq!(entries[4999].name, "component-04999.tsx");
+    }
+
+    #[test]
+    fn remote_trash_and_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = RemoteFs::new(client(ServeConnector, Duration::from_secs(10)), dir.path().to_string_lossy().into());
+        std::fs::write(dir.path().join("r.txt"), "one").unwrap();
+        let ticket = fs.trash(&rel("r.txt")).unwrap();
+        assert!(!dir.path().join("r.txt").exists());
+        std::fs::write(dir.path().join("r.txt"), "new").unwrap();
+        assert_eq!(fs.restore(&ticket, &rel("r.txt")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        std::fs::remove_file(dir.path().join("r.txt")).unwrap();
+        fs.restore(&ticket, &rel("r.txt")).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("r.txt")).unwrap(), "one");
+        assert_eq!(fs.trash(&rel("none")).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
