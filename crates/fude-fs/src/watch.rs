@@ -47,25 +47,38 @@ fn is_dir_entry(e: &ignore::DirEntry) -> bool {
 }
 
 /// start の下の、外したフォルダ（隠す名前のフォルダとその中、.git は除く）を、skip に無いものから max 個まで。
+/// 浅い順（幅優先）に集める。深い生成物より、浅い docs/superpowers などを先に見張るため。
+/// シンボリックリンクのフォルダは辿らない。
 fn ignored_dirs(start: &Path, skip: &HashSet<PathBuf>, max: usize) -> Vec<PathBuf> {
-    if max == 0 {
-        return Vec::new();
-    }
-    let walker = WalkBuilder::new(start)
-        .standard_filters(false)
-        .hidden(false)
-        .filter_entry(|e| e.file_name() != ".git" && !(is_dir_entry(e) && crate::ignored::is_hidden_dir(&e.file_name().to_string_lossy())))
-        .build();
     let mut out = Vec::new();
-    for e in walker.flatten().filter(is_dir_entry) {
-        let path = e.into_path();
-        if skip.contains(&path) {
-            continue;
-        }
-        out.push(path);
-        if out.len() >= max {
-            eprintln!("監視する外したフォルダが {max} 個に達したので、残りは見張らない");
-            break;
+    if max == 0 {
+        return out;
+    }
+    if !skip.contains(start) {
+        out.push(start.to_path_buf());
+    }
+    let mut queue = std::collections::VecDeque::from([start.to_path_buf()]);
+    while let Some(dir) = queue.pop_front() {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        let mut children: Vec<PathBuf> = read
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter(|e| {
+                let name = e.file_name();
+                name != ".git" && !crate::ignored::is_hidden_dir(&name.to_string_lossy())
+            })
+            .map(|e| e.path())
+            .collect();
+        children.sort();
+        for child in children {
+            if out.len() >= max {
+                eprintln!("監視する外したフォルダが {max} 個に達したので、残りは見張らない");
+                return out;
+            }
+            if !skip.contains(&child) {
+                out.push(child.clone());
+            }
+            queue.push_back(child);
         }
     }
     out
@@ -76,6 +89,19 @@ fn watch_set(start: &Path, root: &Path, ignored_max: usize) -> WatchSet {
     let dirs = walk_dirs(start, crate::ignored::in_git_repo(root));
     let ignored: HashSet<PathBuf> = ignored_dirs(start, &dirs, ignored_max).into_iter().collect();
     WatchSet { dirs: dirs.union(&ignored).cloned().collect(), ignored }
+}
+
+/// rel（root からの相対パス）の親の段に、隠す名前のフォルダがあるか。
+fn has_hidden_component(rel: &Path) -> bool {
+    rel.parent().is_some_and(|p| p.components().any(|c| crate::ignored::is_hidden_dir(&c.as_os_str().to_string_lossy())))
+}
+
+impl WatchSet {
+    /// 消えたフォルダとその中を集合から外す。
+    fn forget(&mut self, dir: &Path) {
+        self.dirs.retain(|d| !d.starts_with(dir));
+        self.ignored.retain(|d| !d.starts_with(dir));
+    }
 }
 
 /// watch_set のフォルダの集合（試験用の入口）。
@@ -109,7 +135,9 @@ impl LocalWatcher {
     pub fn start(root: PathBuf, on_batch: OnBatch) -> io::Result<LocalWatcher> {
         let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
         let mut watcher = notify::recommended_watcher(tx).map_err(io::Error::other)?;
-        let set = watch_set(&root, &root, IGNORED_DIRS_MAX);
+        // 外したフォルダを集合に入れるのは Linux だけ（フォルダごとに見張るため）。ほかの OS は再帰で見張り、
+        // 届いた変化を has_hidden_component で絞る。
+        let set = watch_set(&root, &root, if PER_DIR { IGNORED_DIRS_MAX } else { 0 });
         let git_dir = root.join(".git");
         if PER_DIR {
             for dir in &set.dirs {
@@ -194,7 +222,7 @@ fn worker(
     mut extra: Option<(RecommendedWatcher, mpsc::Receiver<notify::Result<notify::Event>>)>,
     on_batch: OnBatch,
 ) {
-    let WatchSet { mut dirs, ignored: mut ignored_set } = set;
+    let mut set = set;
     let in_repo = crate::ignored::in_git_repo(&root);
     let mut changed: BTreeSet<String> = BTreeSet::new();
     let mut git = false;
@@ -225,25 +253,35 @@ fn worker(
                     continue;
                 }
                 let Some(parent) = path.parent() else { continue };
-                if !dirs.contains(parent) {
+                // Linux は見張っているフォルダの中だけ。ほかの OS はルートを再帰で見張っているので、隠す名前の
+                // フォルダの下でなければ通す（外したフォルダの数で絞らない）。
+                if !set.dirs.contains(parent) && (PER_DIR || has_hidden_component(rel)) {
                     continue;
                 }
                 if is_rules_file(rel) {
                     rules = true;
                 }
-                if path.is_dir() && !dirs.contains(&path) {
+                // 消えたフォルダは集合から外す（外したフォルダの枠を空ける）。
+                if !path.exists() && set.dirs.contains(&path) {
+                    set.forget(&path);
+                }
+                if path.is_dir() && !set.dirs.contains(&path) {
                     // 外したフォルダの中にできたフォルダも、外したものとして数える。
-                    let is_ignored = ignored_set.contains(parent) || !not_ignored(&path);
+                    let is_ignored = set.ignored.contains(parent) || !not_ignored(&path);
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let left = IGNORED_DIRS_MAX.saturating_sub(set.ignored.len());
                     let added: HashSet<PathBuf> = if crate::ignored::hides_dir(&name, is_ignored, in_repo) {
                         HashSet::new()
+                    } else if !PER_DIR {
+                        // 見張りは要らない。中身を知らせるためだけに足す（数えない）。
+                        HashSet::from([path.clone()])
                     } else if is_ignored {
-                        let found = ignored_dirs(&path, &dirs, IGNORED_DIRS_MAX.saturating_sub(ignored_set.len()));
-                        ignored_set.extend(found.iter().cloned());
+                        let found = ignored_dirs(&path, &set.dirs, left);
+                        set.ignored.extend(found.iter().cloned());
                         found.into_iter().collect()
                     } else {
-                        let sub = watch_set(&path, &root, IGNORED_DIRS_MAX.saturating_sub(ignored_set.len()));
-                        ignored_set.extend(sub.ignored);
+                        let sub = watch_set(&path, &root, left);
+                        set.ignored.extend(sub.ignored);
                         sub.dirs
                     };
                     if let Some((w, _)) = extra.as_mut() {
@@ -261,7 +299,7 @@ fn worker(
                             }
                         }
                     }
-                    dirs.extend(added);
+                    set.dirs.extend(added);
                 }
                 changed.insert(rel.to_string_lossy().replace('\\', "/"));
                 first.get_or_insert_with(Instant::now);
@@ -431,6 +469,60 @@ mod tests {
         for p in ["a.rs", ".git/HEAD", "gitignore"] {
             assert!(!is_rules_file(Path::new(p)), "{p}");
         }
+    }
+
+    #[test]
+    fn watch_dirs_prefers_shallow() {
+        // 深い生成物より、浅い外したフォルダ（docs/superpowers など）を先に見張りに入れる。
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "a/\nb/\n").unwrap();
+        std::fs::create_dir_all(root.join("a").join("x").join("y").join("z")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        let dirs = watch_dirs(root, root, 2);
+        assert!(dirs.contains(&root.join("a")) && dirs.contains(&root.join("b")), "{dirs:?}");
+    }
+
+    #[test]
+    fn hidden_component_names() {
+        assert!(has_hidden_component(Path::new("target/debug/x")));
+        assert!(has_hidden_component(Path::new("web/node_modules/a.js")));
+        assert!(!has_hidden_component(Path::new("docs/superpowers/plan.md")));
+    }
+
+    #[test]
+    fn forgetting_a_dir_frees_its_subtree() {
+        let mut set = WatchSet { dirs: HashSet::new(), ignored: HashSet::new() };
+        for d in ["/r/a", "/r/a/b", "/r/ab", "/r/c"] {
+            set.dirs.insert(PathBuf::from(d));
+            set.ignored.insert(PathBuf::from(d));
+        }
+        set.forget(Path::new("/r/a"));
+        let mut left: Vec<_> = set.ignored.iter().cloned().collect();
+        left.sort();
+        assert_eq!(left, vec![PathBuf::from("/r/ab"), PathBuf::from("/r/c")]);
+        assert_eq!(set.dirs.len(), 2);
+    }
+
+    /// Linux 以外は、見張りの数を数えないので、外したフォルダの数に関わらず届く（このリポジトリの target-dev など）。
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn ignored_dir_is_reported_beyond_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "big/\ndocs/\n").unwrap();
+        for i in 0..IGNORED_DIRS_MAX + 10 {
+            std::fs::create_dir_all(root.join("big").join(i.to_string())).unwrap();
+        }
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let (_w, rx) = start(root);
+        std::fs::create_dir_all(root.join("docs").join("new")).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        std::fs::write(root.join("docs").join("new").join("a.md"), "x").unwrap();
+        let got = wait_for(&rx, Duration::from_secs(3), |b| changed(b).contains(&"docs/new/a.md".to_string()));
+        assert!(changed(&got).contains(&"docs/new/a.md".to_string()), "{got:?}");
     }
 
     #[test]
