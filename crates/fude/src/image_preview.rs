@@ -69,7 +69,9 @@ pub(crate) fn image_body(image: Arc<Image>, caption: String, theme: &Theme) -> D
         .font(ui_font())
         .child(
             div().flex_1().min_h_0().w_full().child(
+                // GPUI は ID のある img だけ、gif や webp のコマを進める。
                 img(image)
+                    .id("fv-image")
                     .size_full()
                     .object_fit(ObjectFit::ScaleDown)
                     .with_fallback(move || {
