@@ -88,11 +88,11 @@ fn command_action(command: Command) -> Box<dyn Action> {
 }
 
 /// キーで出た action が、チュートリアルを閉じる命令か（9c §5.6）。fude の命令のアクションだけを見る（入力欄の操作などは閉じない）。
-fn closes_on_action(action: &dyn Action) -> bool {
+fn closes_on_action(action: &dyn Action, has_project: bool) -> bool {
     Command::FIXED
         .into_iter()
         .chain((1..=9).map(Command::ActivateProject))
-        .filter(|c| crate::tutorial_view::key_command_closes(*c))
+        .filter(|c| crate::tutorial_view::key_command_closes(*c, has_project))
         .any(|c| command_action(c).partial_eq(action))
 }
 
@@ -415,7 +415,7 @@ impl WorkspaceView {
         let keystrokes = cx.observe_keystrokes(|this, ev, window, cx| {
             if this.tutorial.is_some()
                 && let Some(action) = &ev.action
-                && closes_on_action(action.as_ref())
+                && closes_on_action(action.as_ref(), this.workspace.active_project().is_some())
             {
                 this.leave_tutorial(window, cx);
             }
@@ -806,13 +806,29 @@ impl WorkspaceView {
     }
 
     /// チュートリアルを出していれば閉じて true。印と設定ファイルは書かない（途中で抜けた扱い）。
-    /// フォーカスは、最後に使ったターミナル（無ければワークスペース自身）に戻す。
+    /// チュートリアルがフォーカスを持っていたなら、選択中のターミナル（無ければワークスペース自身）へすぐに移す。
+    /// キーの命令はこれより先に動くので、命令が移したフォーカス（パレットの欄、ツリーなど）はそのままにする。
     pub(crate) fn leave_tutorial(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.tutorial.take().is_none() {
-            return false;
+        let Some(tutorial) = self.tutorial.take() else { return false };
+        let tutorial_focus = tutorial.read(cx).focus_handle();
+        let owned = tutorial_focus.contains_focused(window, cx) || window.focused(cx).is_none();
+        // キーで開いたパレットは、戻る先にチュートリアルを覚えている。もう描かないので、閉じたら選択中のペインへ戻す。
+        self.forget_palette_return(&tutorial_focus);
+        let target = self.workspace.active_project().and_then(|p| p.active_tab()).map(|t| t.panes[t.focused].id);
+        let terminal = target.and_then(|id| self.terminals.get(&id).map(|(view, _)| (id, view.read(cx).focus_handle())));
+        match crate::tutorial_view::leave_focus(owned, terminal.is_some()) {
+            crate::tutorial_view::LeaveFocus::Keep => {}
+            crate::tutorial_view::LeaveFocus::Terminal => {
+                if let Some((id, handle)) = terminal {
+                    self.focused_pane = Some(id);
+                    window.focus(&handle, cx);
+                }
+            }
+            crate::tutorial_view::LeaveFocus::Workspace => {
+                window.focus(&self.focus, cx);
+                self.refocus_pane();
+            }
         }
-        window.focus(&self.focus, cx);
-        self.refocus_pane();
         cx.notify();
         true
     }

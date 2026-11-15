@@ -40,8 +40,31 @@ pub(crate) fn closes_tutorial(command: PaletteCommand) -> bool {
 
 /// キーの命令で、チュートリアルを閉じるか（§5.6、§5.7）。パレットを開くだけでは画面は変わらないので閉じない。
 /// Ctrl+, は何もしない。コピーと貼り付けはターミナルの中だけで効くので閉じない。
-pub(crate) fn key_command_closes(command: Command) -> bool {
-    !matches!(command, Command::OpenPalette | Command::OpenSettings | Command::Copy | Command::Paste)
+/// プロジェクトが無いときは、どの命令も画面を変えないので閉じない（2 ページ目で教えたキーを試しても消えない）。
+pub(crate) fn key_command_closes(command: Command, has_project: bool) -> bool {
+    has_project && !matches!(command, Command::OpenPalette | Command::OpenSettings | Command::Copy | Command::Paste)
+}
+
+/// チュートリアルを閉じたあとのフォーカスの行き先。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeaveFocus {
+    /// 命令が移したフォーカスをそのままにする。
+    Keep,
+    /// 選択中のターミナルへすぐに移す。
+    Terminal,
+    /// ワークスペース自身へ移す。
+    Workspace,
+}
+
+/// owned はチュートリアルが閉じる直前にフォーカスを持っていたか、has_terminal は選択中のターミナルがあるか。
+/// 命令がすでにフォーカスを移していればそのままにする。移すときは次の描画を待たずに移し、あとから開くパレットなどの
+/// フォーカスを描画で上書きしないようにする。
+pub(crate) fn leave_focus(owned: bool, has_terminal: bool) -> LeaveFocus {
+    match (owned, has_terminal) {
+        (false, _) => LeaveFocus::Keep,
+        (true, true) => LeaveFocus::Terminal,
+        (true, false) => LeaveFocus::Workspace,
+    }
 }
 
 /// ページ（§5.2）。
@@ -379,7 +402,7 @@ impl Render for TutorialView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Nav, Page, closes_tutorial, decide_startup, key_command_closes, step, tree_text, write_mark};
+    use super::{LeaveFocus, Nav, Page, closes_tutorial, decide_startup, key_command_closes, leave_focus, step, tree_text, write_mark};
     use fude_core::keymap::Command;
     use fude_core::palette::PaletteCommand;
 
@@ -394,11 +417,29 @@ mod tests {
 
     #[test]
     fn leave_tutorial_on_key() {
-        assert!(!key_command_closes(Command::OpenPalette), "パレットを開くだけでは閉じない");
-        assert!(!key_command_closes(Command::OpenSettings), "チュートリアルの上の Ctrl+, は何もしない");
+        assert!(!key_command_closes(Command::OpenPalette, true), "パレットを開くだけでは閉じない");
+        assert!(!key_command_closes(Command::OpenSettings, true), "チュートリアルの上の Ctrl+, は何もしない");
         for c in [Command::ToggleTree, Command::GoToFile, Command::NewTab, Command::ActivateProject(2), Command::FindInFiles] {
-            assert!(key_command_closes(c), "{c:?}");
+            assert!(key_command_closes(c, true), "{c:?}");
         }
+    }
+
+    #[test]
+    fn key_without_project_keeps_tutorial() {
+        // プロジェクトが無いときは、どのキーの命令も画面を変えないので閉じない（2 ページ目で Ctrl+B を試しても消えない）。
+        for c in Command::FIXED.into_iter().chain((1..=9).map(Command::ActivateProject)) {
+            assert!(!key_command_closes(c, false), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn leave_focus_only_when_tutorial_owned_it() {
+        // 命令がフォーカスを移していれば（パレットの欄、ツリーなど）、そのままにする。
+        assert_eq!(leave_focus(false, true), LeaveFocus::Keep);
+        assert_eq!(leave_focus(false, false), LeaveFocus::Keep);
+        // チュートリアルがフォーカスを持っていたなら、すぐに選択中のターミナルへ（次の描画まで待たない）。
+        assert_eq!(leave_focus(true, true), LeaveFocus::Terminal);
+        assert_eq!(leave_focus(true, false), LeaveFocus::Workspace);
     }
     use fude_core::keymap::KeyHints;
     use fude_core::tutorial::{StartupTutorial, is_done};

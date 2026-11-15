@@ -365,6 +365,15 @@ impl WorkspaceView {
         self.refresh_palette(cx);
     }
 
+    /// 開く前のフォーカスが focus（もう描かないビュー。閉じたチュートリアルなど）なら忘れ、閉じるときは選択中のペインへ戻す。
+    pub(crate) fn forget_palette_return(&mut self, focus: &FocusHandle) {
+        if let Some(p) = self.palette.as_mut()
+            && p.return_focus.as_ref() == Some(focus)
+        {
+            p.return_focus = None;
+        }
+    }
+
     /// 消える動きを始め、開く前のフォーカスへ戻す。
     pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let reduced = self.reduced_motion;

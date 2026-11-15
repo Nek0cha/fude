@@ -156,17 +156,24 @@ fn write_now(cx: &mut App, edits: &[FileEdit]) {
 pub fn ensure_config_file(cx: &mut App) {
     let state = cx.global::<ConfigState>().clone();
     let Some(path) = state.path.clone() else { return };
-    if path.exists() {
-        return;
-    }
-    let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, DEFAULT_CONFIG));
-    match written {
-        Ok(()) => cx.default_global::<PendingWrites>().wrote(DEFAULT_CONFIG.to_string()),
+    match create_default_config(&path) {
+        Ok(false) => {}
+        Ok(true) => cx.default_global::<PendingWrites>().wrote(DEFAULT_CONFIG.to_string()),
         Err(e) => {
             cx.set_global(ConfigState { write_error: Some(format!("設定ファイルを作れませんでした: {e}")), ..state });
             cx.refresh_windows();
         }
     }
+}
+
+/// path に設定ファイルが無ければ、フォルダごと既定の文面で作って true。あれば何もせず false。
+pub fn create_default_config(path: &Path) -> std::io::Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    path.parent().map_or(Ok(()), std::fs::create_dir_all)?;
+    std::fs::write(path, DEFAULT_CONFIG)?;
+    Ok(true)
 }
 
 /// 保存の出来事をまとめる時間。
@@ -316,6 +323,17 @@ pub fn reload_now(cx: &mut App) {
 mod tests {
     use super::*;
     use fude_core::settings::{DEFAULT_CONFIG, Settings, ThemeId, WindowSettings};
+
+    #[test]
+    fn create_default_config_only_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fude").join("config.toml");
+        assert!(create_default_config(&path).unwrap(), "無ければ作る");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_CONFIG);
+        std::fs::write(&path, "[window]\nopacity = 0.5\n").unwrap();
+        assert!(!create_default_config(&path).unwrap(), "あれば作らない");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[window]\nopacity = 0.5\n");
+    }
 
     #[test]
     fn missing_file_is_created_with_defaults() {
