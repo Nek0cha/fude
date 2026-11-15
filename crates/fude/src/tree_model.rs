@@ -183,6 +183,14 @@ impl TreeModel {
         dirs.iter().filter_map(|d| RelPath::new(d).ok()).collect()
     }
 
+    /// 開いているのに、まだ読んでいない（または読み直し待ちの）フォルダ。浅い順。ProjectFs が後から
+    /// 用意できたときに、開いたまま空のフォルダを残さないために使う。
+    pub fn unloaded_expanded(&self) -> Vec<RelPath> {
+        let mut dirs: Vec<&String> = self.expanded.iter().filter(|d| !self.children.contains_key(*d) || self.stale.contains(*d)).collect();
+        dirs.sort_by_key(|d| (d.matches('/').count(), d.as_str()));
+        dirs.into_iter().filter_map(|d| RelPath::new(d).ok()).collect()
+    }
+
     pub fn has_file_list(&self) -> bool {
         self.all_files.is_some()
     }
@@ -364,5 +372,14 @@ mod tests {
         let slots = rows_with_edit(rows, None);
         assert_eq!(slots.len(), 3);
         assert!(slots.iter().all(|s| matches!(s, RowSlot::Entry(_))));
+    }
+
+    #[test]
+    fn unloaded_expanded_dirs_are_listed_shallow_first() {
+        let mut m = TreeModel::default();
+        m.reveal(&rel("a/b"));
+        assert_eq!(m.unloaded_expanded(), vec![rel("a"), rel("a/b")]);
+        m.set_children(&rel("a"), vec![entry("b", true)]);
+        assert_eq!(m.unloaded_expanded(), vec![rel("a/b")]);
     }
 }

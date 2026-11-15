@@ -44,6 +44,75 @@ const ACTIONS: [TreeAction; 7] = [
     TreeAction::Reveal,
 ];
 
+/// 開いているツリーのメニュー。row が None なら何も無いところのメニュー。index はキーで選んでいる項目
+/// （マウスで出したときは None）。
+pub(crate) struct TreeMenuState {
+    pub row: Option<TreeRow>,
+    pub popup: Popup,
+    pub index: Option<usize>,
+}
+
+/// メニューに並べる項目。行が無いところでは、新規とエクスプローラー（Finder）で表示だけ。
+fn menu_actions(has_row: bool) -> Vec<TreeAction> {
+    ACTIONS
+        .iter()
+        .copied()
+        .filter(|a| has_row || matches!(a, TreeAction::NewFile | TreeAction::NewFolder | TreeAction::Reveal))
+        .collect()
+}
+
+/// ↑↓ で動かした先の項目。選択が無ければ ↓ は先頭、↑ は末尾。端で止まる。
+fn step_menu(index: Option<usize>, len: usize, down: bool) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    Some(match (index, down) {
+        (None, true) => 0,
+        (None, false) => last,
+        (Some(i), true) => (i + 1).min(last),
+        (Some(i), false) => i.saturating_sub(1),
+    })
+}
+
+/// キーで出すメニューの左上。行の左端から 24px 右、行の下端。scroll_y は一覧のスクロールのずれ（下へ送ると負）。
+/// 見えていない行は Nearest で一覧の端まで送られるので、一覧の中に収める。
+fn key_menu_position(list: Bounds<Pixels>, row_index: usize, scroll_y: Pixels) -> Point<Pixels> {
+    let row_h = crate::tree_view::ROW_H;
+    let y = list.origin.y + row_h * (row_index as f32 + 1.) + scroll_y;
+    let y = y.max(list.origin.y + row_h).min(list.origin.y + list.size.height);
+    point(list.origin.x + px(24.), y)
+}
+
+/// メニューの項目の光り方。キーで選んでいる間は選んだ項目だけを光らせ、ホバーとの二重の光りを避ける。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ItemLight {
+    Hover,
+    Selected,
+    Off,
+}
+
+fn item_light(index: Option<usize>, item: usize) -> ItemLight {
+    match index {
+        None => ItemLight::Hover,
+        Some(i) if i == item => ItemLight::Selected,
+        Some(_) => ItemLight::Off,
+    }
+}
+
+/// 新規か名前の変更が済んだあとの選択。新規は作ったものを選ぶ。名前の変更は、選んでいた行（とフォルダの中の行）
+/// を新しいパスに付け替え、それ以外の選択はそのまま。
+fn selection_after_edit(kind: EditKind, selected: Option<&RelPath>, target: &RelPath, dest: &RelPath) -> Option<RelPath> {
+    if kind != EditKind::Rename {
+        return Some(dest.clone());
+    }
+    let selected = selected?;
+    if selected == target {
+        return Some(dest.clone());
+    }
+    match selected.as_str().strip_prefix(target.as_str()).and_then(|rest| rest.strip_prefix('/')) {
+        Some(rest) => dest.join(rest).ok().or_else(|| Some(selected.clone())),
+        None => Some(selected.clone()),
+    }
+}
+
 fn label(action: TreeAction, os: Platform) -> &'static str {
     match (action, os) {
         (TreeAction::NewFile, _) => "新規ファイル",
@@ -142,18 +211,58 @@ impl WorkspaceView {
     }
 
     pub(crate) fn open_tree_menu(&mut self, row: Option<TreeRow>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        self.tree.menu = Some((row, Popup::open(position, window, cx)));
+        self.tree.menu = Some(TreeMenuState { row, popup: Popup::open(position, window, cx), index: None });
         cx.notify();
     }
 
+    /// Shift+F10 とメニューキー。選んでいる行の下に出し、先頭の項目を選んでおく。選択が並びに無ければ、
+    /// 何も無いところのメニューを一覧の左上に出す。
+    pub(crate) fn open_tree_menu_by_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let list = self.tree.list_bounds;
+        let selected = crate::tree_nav::selected_row(&self.tree.rows, self.tree.selected.as_ref()).map(|(ix, row)| (ix, row.clone()));
+        let (row, position) = match selected {
+            Some((ix, row)) => {
+                self.tree.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                let scroll_y = self.tree.scroll.0.borrow().base_handle.offset().y;
+                (Some(row), key_menu_position(list, ix, scroll_y))
+            }
+            None => (None, list.origin + point(px(24.), px(24.))),
+        };
+        self.tree.menu = Some(TreeMenuState { row, popup: Popup::open(position, window, cx), index: Some(0) });
+        cx.notify();
+    }
+
+    /// キーでメニューを操作する。Esc で閉じ、↑↓ で選び、Enter で選んだ項目を行う。
+    fn tree_menu_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.tree.menu.as_mut() else { return };
+        if menu.popup.closing() {
+            return;
+        }
+        let actions = menu_actions(menu.row.is_some());
+        match key {
+            "escape" => self.close_tree_menu(window, cx),
+            "up" | "down" => {
+                menu.index = step_menu(menu.index, actions.len(), key == "down");
+                cx.notify();
+            }
+            "enter" => {
+                if let Some(action) = menu.index.and_then(|i| actions.get(i).copied()) {
+                    let row = menu.row.clone();
+                    self.run_tree_action(row, action, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn close_tree_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tree.menu.as_mut().is_some_and(|(_, m)| m.close(Instant::now())) {
+        if self.tree.menu.as_mut().is_some_and(|m| m.popup.close(Instant::now())) {
             window.focus(&self.tree.focus, cx);
             cx.notify();
         }
     }
 
-    fn run_tree_action(&mut self, row: Option<TreeRow>, action: TreeAction, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_tree_action(&mut self, row: Option<TreeRow>, action: TreeAction, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tree_menu(window, cx);
         let Some(project) = self.workspace.active_project().map(|p| p.id) else { return };
         match action {
@@ -319,6 +428,9 @@ impl WorkspaceView {
                         _ => TreeOp::Created { path: dest.as_str().to_string(), trashed: None },
                     };
                     this.tree_history(project).push(op);
+                    // 選択を新しいパスへ移す（古いパスは並びから消え、キーの操作が効かなくなるため）。
+                    let selected = selection_after_edit(kind, this.tree.selected.as_ref(), &target, &dest);
+                    this.select_tree_row(selected, cx);
                     // 作り先のフォルダを開いて読み直す（監視の通知を待たない）。
                     this.tree.models.entry(project).or_default().expand(&parent);
                     this.load_tree_dir(project, parent.clone(), cx);
@@ -349,6 +461,8 @@ impl WorkspaceView {
                 let window_handle = window.window_handle();
                 let Some(fs) = this.live_fs(project) else { return };
                 let rel = row.rel.clone();
+                // 削除の後の選択を先に決めておく（監視の読み直しが先に済むと、消した行が並びから消えるため）。
+                let planned = crate::tree_nav::after_removal(&this.tree.rows, &row.rel);
                 this.tree_history(project).begin_op();
                 let task = cx.background_spawn(async move { fs.trash(&rel) });
                 let parent =
@@ -360,6 +474,11 @@ impl WorkspaceView {
                             this.tree_history(project).end_op();
                             match result {
                                 Ok(ticket) => {
+                                    // 消した行を選んでいたら、次の行（無ければ前の行）へ移す。
+                                    if this.tree.selected.as_ref() == Some(&row.rel) {
+                                        let next = crate::tree_nav::next_after_delete(&this.tree.rows, &row.rel, planned);
+                                        this.select_tree_row(next, cx);
+                                    }
                                     this.load_tree_dir(project, parent, cx);
                                     if ticket.id.is_empty() {
                                         let message = format!("{} をゴミ箱に移しましたが、取り消しには使えません。", row.name);
@@ -383,8 +502,8 @@ impl WorkspaceView {
     }
 
     pub(crate) fn render_tree_menu(&mut self, window: &mut Window, cx: &mut Context<Self>, now: Instant) -> Option<Deferred> {
-        let (row, menu) = self.tree.menu.as_ref()?;
-        let row = row.clone();
+        let state = self.tree.menu.as_ref()?;
+        let (row, menu, index) = (state.row.clone(), &state.popup, state.index);
         if menu.is_gone(now) {
             self.tree.menu = None;
             return None;
@@ -395,10 +514,8 @@ impl WorkspaceView {
         let theme = *cx.global::<Theme>();
         let closing = menu.closing();
         let os = Platform::current();
-        let items: Vec<AnyElement> = ACTIONS
-            .iter()
-            .copied()
-            .filter(|a| row.is_some() || matches!(a, TreeAction::NewFile | TreeAction::NewFolder | TreeAction::Reveal))
+        let items: Vec<AnyElement> = menu_actions(row.is_some())
+            .into_iter()
             .enumerate()
             .map(|(i, action)| {
                 let key = HoverKey::MenuItem(MENU_HOVER + i);
@@ -412,12 +529,26 @@ impl WorkspaceView {
                     .items_center()
                     .gap(px(8.))
                     .rounded(size::RADIUS_SM)
-                    .bg(self.hover_bg(key, theme.bg_hover, now))
+                    // キーで選んでいる項目は、ホバーと同じ色にする。キーで選んでいる間はほかの項目を光らせない。
+                    .bg(match item_light(index, i) {
+                        ItemLight::Hover => self.hover_bg(key, theme.bg_hover, now),
+                        ItemLight::Selected => theme.bg_hover,
+                        ItemLight::Off => Rgba { r: 0., g: 0., b: 0., a: 0. },
+                    })
+                    // キーで選んでいる間にマウスを動かしたら、その項目を選ぶ（光りを 1 つに保つ）。
+                    .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                        if let Some(menu) = this.tree.menu.as_mut()
+                            && menu.index.is_some_and(|ix| ix != i)
+                        {
+                            menu.index = Some(i);
+                            cx.notify();
+                        }
+                    }))
                     .text_color(color)
                     .child(icon(action_icon(action), theme.fg_dim))
                     .child(label(action, os))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.tree.menu.as_ref().is_some_and(|(_, m)| m.closing()) {
+                        if this.tree.menu.as_ref().is_some_and(|m| m.popup.closing()) {
                             return;
                         }
                         this.run_tree_action(row.clone(), action, window, cx);
@@ -428,9 +559,8 @@ impl WorkspaceView {
         let body = menu
             .frame("tree-menu", &theme, now)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "escape" {
-                    this.close_tree_menu(window, cx);
-                }
+                let key = ev.keystroke.key.clone();
+                this.tree_menu_key(&key, window, cx);
             }))
             .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_tree_menu(window, cx)))
             .children(if closing { Vec::new() } else { items });
@@ -440,7 +570,8 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{new_item_parent, tree_mention, validate_name};
+    use super::{EditKind, ItemLight, TreeAction, item_light, key_menu_position, menu_actions, new_item_parent, selection_after_edit, step_menu, tree_mention, validate_name};
+    use gpui_kit::{Bounds, Pixels, point, px, size};
     use crate::tree_model::TreeRow;
     use fude_fs::RelPath;
 
@@ -470,5 +601,60 @@ mod tests {
     fn tree_mention_marks_folders() {
         assert_eq!(tree_mention(&row("src/main.rs", false)), "@src/main.rs ");
         assert_eq!(tree_mention(&row("src/ui", true)), "@src/ui/ ");
+    }
+
+    #[test]
+    fn menu_actions_without_row_are_three() {
+        assert_eq!(menu_actions(false), vec![TreeAction::NewFile, TreeAction::NewFolder, TreeAction::Reveal]);
+        assert_eq!(menu_actions(true).len(), 7);
+    }
+
+    #[test]
+    fn selection_follows_rename_and_creation() {
+        let r = |p: &str| RelPath::new(p).unwrap();
+        // 名前を変えた行を選んでいれば、新しい名前を選ぶ。フォルダの中の行は付け替える。
+        assert_eq!(selection_after_edit(EditKind::Rename, Some(&r("a.txt")), &r("a.txt"), &r("b.txt")), Some(r("b.txt")));
+        assert_eq!(selection_after_edit(EditKind::Rename, Some(&r("d/x")), &r("d"), &r("e")), Some(r("e/x")));
+        assert_eq!(selection_after_edit(EditKind::Rename, Some(&r("dd")), &r("d"), &r("e")), Some(r("dd")));
+        assert_eq!(selection_after_edit(EditKind::Rename, None, &r("d"), &r("e")), None);
+        // 新規は作ったものを選ぶ。
+        assert_eq!(selection_after_edit(EditKind::NewFolder, Some(&r("a.txt")), &r("src"), &r("src/new")), Some(r("src/new")));
+        assert_eq!(selection_after_edit(EditKind::NewFile, None, &r("src"), &r("src/n.rs")), Some(r("src/n.rs")));
+    }
+
+    #[test]
+    fn only_one_menu_item_lights() {
+        // マウスで出したメニューはホバーだけで光る。
+        assert_eq!(item_light(None, 2), ItemLight::Hover);
+        // キーで選んでいる間は、選んだ項目だけが光り、ほかはホバーしても光らない。
+        assert_eq!(item_light(Some(2), 2), ItemLight::Selected);
+        assert_eq!(item_light(Some(2), 3), ItemLight::Off);
+    }
+
+    #[test]
+    fn step_menu_stops_at_ends() {
+        assert_eq!(step_menu(None, 7, true), Some(0));
+        assert_eq!(step_menu(None, 7, false), Some(6));
+        assert_eq!(step_menu(Some(6), 7, true), Some(6));
+        assert_eq!(step_menu(Some(0), 7, false), Some(0));
+        assert_eq!(step_menu(Some(2), 7, true), Some(3));
+        assert_eq!(step_menu(None, 0, true), None);
+    }
+
+    fn list() -> Bounds<Pixels> {
+        Bounds { origin: point(px(100.), px(50.)), size: size(px(200.), px(240.)) }
+    }
+
+    #[test]
+    fn key_menu_position_below_row() {
+        // 3 行目（0 始まりで 2）、1 行分下へ送ってある。
+        assert_eq!(key_menu_position(list(), 2, px(-24.)), point(px(124.), px(98.)));
+    }
+
+    #[test]
+    fn key_menu_position_stays_in_list() {
+        // 見えていない行は Nearest で端まで送られるので、その端に出す。
+        assert_eq!(key_menu_position(list(), 0, px(-240.)), point(px(124.), px(74.)));
+        assert_eq!(key_menu_position(list(), 50, px(0.)), point(px(124.), px(290.)));
     }
 }
