@@ -13,6 +13,12 @@ mod bundled {
     include!(concat!(env!("OUT_DIR"), "/linux_bin.rs"));
 }
 
+/// 同梱の Linux 用の fude とその版の印（Windows 以外と、同梱していないビルドは None）。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn bundled_linux() -> Option<(&'static [u8], &'static str)> {
+    bundled::LINUX_BIN
+}
+
 /// 置いてある版と同梱の版を比べ、違う（または無い）なら置く必要がある。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn needs_deploy(installed: Option<&str>, bundled: &str) -> bool {

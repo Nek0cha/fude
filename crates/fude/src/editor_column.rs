@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use fude_core::editor_tabs::{EditorItem, Opened, SEARCH_TAB};
+use fude_core::editor_tabs::{EditorItem, Opened, SEARCH_TAB, SETTINGS_TAB};
 use fude_core::panel::{FileMode, renamed_rel};
 use fude_core::workspace::ProjectId;
 use fude_fs::ProjectFs;
@@ -164,7 +164,64 @@ pub(crate) fn after_open(opened: Opened, has_view: bool, mode_given: bool, at_gi
     }
 }
 
+/// 設定パネルをどこに出すか（9b の設計書 §5.1）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SettingsOpen<P> {
+    /// 設定のタブを閉じるプロジェクト（選んでいないもの）。
+    pub close_in: Vec<P>,
+    /// 設定のタブを開くプロジェクト。
+    pub open_in: Option<P>,
+    /// プロジェクトが無いので、ホーム画面の代わりに出す。
+    pub on_home: bool,
+}
+
+/// projects は（プロジェクト、設定のタブを持つか）。設定のタブはアプリ全体で 1 枚なので、選んでいるプロジェクトに移す。
+pub(crate) fn settings_tab_moves<P: Copy + PartialEq>(projects: &[(P, bool)], active: Option<P>) -> SettingsOpen<P> {
+    let close_in = projects.iter().filter(|(p, has)| *has && Some(*p) != active).map(|(p, _)| *p).collect();
+    SettingsOpen { close_in, open_in: active, on_home: active.is_none() }
+}
+
 impl WorkspaceView {
+    /// 設定パネルを開く。選んでいるプロジェクトのエディタ列に設定のタブを開き（ほかのプロジェクトのものは閉じる）、
+    /// プロジェクトが無ければホーム画面の代わりに出す。
+    pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = match &self.settings_view {
+            Some(v) => {
+                v.update(cx, |v, cx| v.reopened(cx));
+                v.clone()
+            }
+            None => {
+                let v = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
+                // 設定ファイルはどのプロジェクトの中にも無いので、エディタ列には開けない（open_file は設定のフォルダを
+                // プロジェクトとして開いてしまう）。OS の既定のアプリで開く。
+                cx.subscribe_in(&v, window, |_, _, ev: &crate::settings_view::SettingsViewEvent, _, cx| match ev {
+                    crate::settings_view::SettingsViewEvent::OpenConfig(path) => cx.open_with_system(path),
+                })
+                .detach();
+                self.settings_view = Some(v.clone());
+                v
+            }
+        };
+        let projects: Vec<(ProjectId, bool)> =
+            self.workspace.projects().iter().map(|p| (p.id, p.editor.position(SETTINGS_TAB).is_some())).collect();
+        let moves = settings_tab_moves(&projects, self.workspace.active_project().map(|p| p.id));
+        for project in moves.close_in {
+            if let Some(tabs) = self.workspace.editor_mut(project)
+                && let Some(i) = tabs.position(SETTINGS_TAB)
+            {
+                tabs.close(i);
+            }
+        }
+        if let Some(project) = moves.open_in
+            && let Some(tabs) = self.workspace.editor_mut(project)
+        {
+            tabs.open(EditorItem::settings());
+        }
+        self.settings_on_home = moves.on_home;
+        window.focus(&view.read(cx).focus_handle(), cx);
+        cx.notify();
+    }
+
     /// 描画のたびに呼ぶ。エディタ列の出入りと、ターミナルの有無によるエディタの移動の動きを始める。
     pub(crate) fn observe_editor_column(&mut self, now: std::time::Instant) {
         use crate::theme::motion::{EDITOR_MOVE, PANEL_IN, PANEL_OUT, ease_out_quint};
@@ -273,9 +330,11 @@ impl WorkspaceView {
     /// エディタ列の中身（タブ列と、選択中のタブの FileView）。中身の幅は w に固定し、出入りの動きで折り返し直さない。
     fn render_editor_column(&mut self, project: ProjectId, w: Pixels, cx: &mut Context<Self>, now: std::time::Instant) -> Div {
         let tabs = self.render_editor_tabs(project, cx, now);
-        let search_active = self.workspace.active_project().and_then(|p| p.editor.active()).is_some_and(EditorItem::is_search);
-        let view: Option<AnyView> = if search_active {
+        let active = self.workspace.active_project().and_then(|p| p.editor.active()).cloned();
+        let view: Option<AnyView> = if active.as_ref().is_some_and(EditorItem::is_search) {
             self.searches.get(&project).map(|(v, _)| v.clone().into())
+        } else if active.as_ref().is_some_and(EditorItem::is_settings) {
+            self.settings_view.clone().map(Into::into)
         } else {
             let view = self.active_editor_view().or_else(|| self.editor_anim.closing.clone());
             let pin = self.workspace.active_project().and_then(|p| p.pin.clone());
@@ -337,6 +396,9 @@ impl WorkspaceView {
         let p = self.workspace.active_project()?;
         if p.editor.active()?.is_search() {
             return self.searches.get(&p.id).map(|(v, _)| v.read(cx).focus_handle());
+        }
+        if p.editor.active()?.is_settings() {
+            return self.settings_view.as_ref().map(|v| v.read(cx).focus_handle());
         }
         self.active_editor_view().map(|v| v.read(cx).focus_handle())
     }
@@ -530,6 +592,12 @@ impl WorkspaceView {
             }
             return;
         }
+        if rel == SETTINGS_TAB {
+            if let Some(view) = &self.settings_view {
+                window.focus(&view.read(cx).focus_handle(), cx);
+            }
+            return;
+        }
         match self.editors.get(&project).and_then(|s| s.views.get(&rel)).cloned() {
             Some(view) => window.focus(&view.read(cx).focus_handle(), cx),
             None => {
@@ -545,7 +613,7 @@ impl WorkspaceView {
     /// （セッションから戻したタブと、プロジェクトを切り替えたとき。作るのは選ばれたタブだけ）。
     pub(crate) fn ensure_active_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.workspace.active_project() else { return };
-        let Some(rel) = p.editor.active().filter(|i| !i.is_search()).map(|i| i.rel.clone()) else { return };
+        let Some(rel) = p.editor.active().filter(|i| !i.is_virtual()).map(|i| i.rel.clone()) else { return };
         let project = p.id;
         let slot = self.editors.get(&project);
         if slot.is_some_and(|s| s.views.contains_key(&rel) || !s.can_create(&rel)) {
@@ -565,8 +633,12 @@ impl WorkspaceView {
             .map(|i| i.rel.clone());
         let Some(rel) = rel else { return };
         let view = self.editors.get(&project).and_then(|s| s.views.get(&rel)).cloned();
-        let search_focused =
-            self.searches.get(&project).is_some_and(|(v, _)| v.read(cx).focus_handle().contains_focused(window, cx));
+        let search_focused = self.searches.get(&project).is_some_and(|(v, _)| v.read(cx).focus_handle().contains_focused(window, cx))
+            || (rel == SETTINGS_TAB && self.settings_view.as_ref().is_some_and(|v| v.read(cx).focus_handle().contains_focused(window, cx)));
+        if rel == SETTINGS_TAB {
+            // 待っているスライダーの書き込みを、閉じる前に書く。
+            crate::config_runtime::flush_pending(cx);
+        }
         let focus_in_editor =
             search_focused || self.project_views(project).iter().any(|v| v.read(cx).focus_handle().contains_focused(window, cx));
         let close = move |this: &mut WorkspaceView, window: &mut Window, cx: &mut Context<WorkspaceView>| {
@@ -728,8 +800,23 @@ impl WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::{
-        AfterClose, AfterOpen, EditorSlot, Opened, after_open, focus_after_close, rename_blocked, unsaved_views, watched_views,
+        AfterClose, AfterOpen, EditorSlot, Opened, SettingsOpen, after_open, focus_after_close, rename_blocked, settings_tab_moves,
+        unsaved_views, watched_views,
     };
+
+    #[test]
+    fn settings_tab_moves_to_active_project() {
+        let (a, b, c) = (1u64, 2, 3);
+        let moves = settings_tab_moves(&[(a, true), (b, false), (c, true)], Some(b));
+        assert_eq!(moves, SettingsOpen { close_in: vec![a, c], open_in: Some(b), on_home: false });
+        let stay = settings_tab_moves(&[(a, true), (b, false)], Some(a));
+        assert_eq!(stay, SettingsOpen { close_in: vec![], open_in: Some(a), on_home: false });
+    }
+
+    #[test]
+    fn settings_on_home_without_projects() {
+        assert_eq!(settings_tab_moves::<u64>(&[], None), SettingsOpen { close_in: vec![], open_in: None, on_home: true });
+    }
 
     #[test]
     fn focus_request_is_consumed_and_follows_rename() {

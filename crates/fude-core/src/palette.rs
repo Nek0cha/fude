@@ -53,10 +53,11 @@ pub enum PaletteCommand {
     ToggleVerticalTabs,
     UndoTreeOp,
     RedoTreeOp,
+    OpenSettings,
 }
 
 impl PaletteCommand {
-    pub const ALL: [PaletteCommand; 19] = [
+    pub const ALL: [PaletteCommand; 20] = [
         PaletteCommand::NewTerminal,
         PaletteCommand::SplitTerminal,
         PaletteCommand::ToggleTree,
@@ -76,6 +77,7 @@ impl PaletteCommand {
         PaletteCommand::ToggleVerticalTabs,
         PaletteCommand::UndoTreeOp,
         PaletteCommand::RedoTreeOp,
+        PaletteCommand::OpenSettings,
     ];
 
     /// 表示名。
@@ -100,6 +102,7 @@ impl PaletteCommand {
             PaletteCommand::ToggleVerticalTabs => "ターミナルのタブを縦に並べる",
             PaletteCommand::UndoTreeOp => "ツリーの操作を取り消す",
             PaletteCommand::RedoTreeOp => "ツリーの操作をやり直す",
+            PaletteCommand::OpenSettings => "設定を開く",
         }
     }
 
@@ -125,6 +128,7 @@ impl PaletteCommand {
             PaletteCommand::ToggleVerticalTabs => "vertical terminal tabs",
             PaletteCommand::UndoTreeOp => "undo file operation",
             PaletteCommand::RedoTreeOp => "redo file operation",
+            PaletteCommand::OpenSettings => "open settings preferences theme font",
         }
     }
 
@@ -148,6 +152,7 @@ impl PaletteCommand {
             PaletteCommand::FindInFiles => Some(Command::FindInFiles),
             PaletteCommand::FindInTerminal => Some(Command::FindInTerminal),
             PaletteCommand::ToggleMarkdownMode => Some(Command::ToggleMarkdownMode),
+            PaletteCommand::OpenSettings => Some(Command::OpenSettings),
             PaletteCommand::OpenFolder
             | PaletteCommand::LaunchClaude
             | PaletteCommand::CopyHookConfig
@@ -263,6 +268,9 @@ mod tests {
         }
         assert_eq!(PaletteCommand::LaunchClaude.label(), "Claude Code を起動");
         assert_eq!(PaletteCommand::CopyHookConfig.label(), "Claude Code の hook の設定をコピー");
+        assert_eq!(PaletteCommand::OpenSettings.label(), "設定を開く");
+        assert_eq!(PaletteCommand::OpenSettings.keymap_command(), Some(Command::OpenSettings));
+        assert_eq!(PaletteCommand::ALL.len(), 20);
         assert_eq!(PaletteCommand::LaunchClaude.keymap_command(), None);
         assert_eq!(PaletteCommand::CopyHookConfig.keymap_command(), None);
     }

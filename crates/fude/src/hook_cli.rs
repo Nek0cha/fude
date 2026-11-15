@@ -6,6 +6,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use fude_core::claude::{HookCommand, HookSignal, hook_config, signal_from_hook};
+pub use fude_core::claude_settings::HookAdmin;
 use fude_ipc::Message;
 
 /// 標準入力を読む上限。超えた分は読まない（読めずに捨てる）。
@@ -13,16 +14,22 @@ pub const HOOK_STDIN_MAX: u64 = 8 * 1024 * 1024;
 /// 起動中の fude の応答を待つ時間。
 pub const HOOK_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
-const USAGE: &str = "使い方: fude hook [--print-config | --signal] [--terminal <id>] [--instance <名前>]";
+const USAGE: &str = "使い方: fude hook [--print-config | --signal] [--terminal <id>] [--instance <名前>] | fude hook --install | --uninstall | --status";
 
 #[derive(Debug, PartialEq)]
 pub enum HookArgs {
     PrintConfig,
+    /// settings.json への登録・解除・状態（9b の設計書 §5.6）。
+    Admin(HookAdmin),
     Forward { signal_input: bool, terminal: Option<String>, instance: Option<String> },
 }
 
 /// `hook` を除いた引数。
 pub fn parse_hook_args(args: &[OsString]) -> Result<HookArgs, String> {
+    let strings: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    if let Some(admin) = fude_core::claude_settings::parse_admin(&strings) {
+        return admin.map(HookArgs::Admin);
+    }
     let mut signal_input = false;
     let mut terminal = None;
     let mut instance = None;
@@ -62,10 +69,27 @@ pub fn hook_endpoint(instance: Option<&str>, env: &dyn Fn(&str) -> Option<String
     }
 }
 
-/// この exe の hook の設定例。Windows はパスの \ を / にする（Git Bash でも PowerShell でも読めるように）。
+/// hook に登録するこの exe のパス。Windows はパスの \ を / にする（Git Bash でも PowerShell でも読めるように）。
+pub fn own_exe_for_hook() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(fude_core::paths::simplify_verbatim(exe).to_string_lossy().replace('\\', "/"))
+}
+
+/// settings.json への登録・解除・状態を実行し、そのあとの状態を 1 行の JSON で書く。
+fn run_admin(admin: &HookAdmin) {
+    use fude_core::claude_settings::{home_from_env, settings_path};
+    let env = |k: &str| std::env::var(k).ok();
+    let path = settings_path(&env, home_from_env(&env));
+    let own = own_exe_for_hook().unwrap_or_default();
+    let make = |c: Option<String>| HookCommand::Exec(c.unwrap_or_else(|| own.clone()));
+    let status = fude_core::claude_settings::run_admin(admin, path.as_deref(), &make);
+    crate::instance::attach_parent_console();
+    println!("{}", serde_json::to_string(&status).unwrap_or_default());
+}
+
+/// この exe の hook の設定例。
 fn print_config() {
-    let Ok(exe) = std::env::current_exe() else { return };
-    let path = fude_core::paths::simplify_verbatim(exe).to_string_lossy().replace('\\', "/");
+    let Some(path) = own_exe_for_hook() else { return };
     let config = hook_config(&HookCommand::Exec(path));
     crate::instance::attach_parent_console();
     println!("{}", serde_json::to_string_pretty(&config).unwrap_or_default());
@@ -75,6 +99,7 @@ fn print_config() {
 pub fn hook_main(args: &[OsString]) -> i32 {
     match parse_hook_args(args) {
         Ok(HookArgs::PrintConfig) => print_config(),
+        Ok(HookArgs::Admin(admin)) => run_admin(&admin),
         Ok(HookArgs::Forward { signal_input, terminal, instance }) => {
             let mut input = Vec::new();
             if std::io::stdin().lock().take(HOOK_STDIN_MAX).read_to_end(&mut input).is_err() {
@@ -96,7 +121,7 @@ pub fn hook_main(args: &[OsString]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{HOOK_SEND_TIMEOUT, HookArgs, hook_endpoint, hook_message, parse_hook_args};
+    use super::{HOOK_SEND_TIMEOUT, HookAdmin, HookArgs, hook_endpoint, hook_message, parse_hook_args};
     use fude_core::claude::HookSignal;
     use fude_ipc::Message;
     use std::ffi::OsString;
@@ -112,6 +137,9 @@ mod tests {
         );
         assert!(parse_hook_args(&a(&["--terminal"])).is_err());
         assert!(parse_hook_args(&a(&["--what"])).is_err());
+        assert_eq!(parse_hook_args(&a(&["--install"])), Ok(HookArgs::Admin(HookAdmin::Install { command: None })));
+        assert_eq!(parse_hook_args(&a(&["--uninstall"])), Ok(HookArgs::Admin(HookAdmin::Uninstall)));
+        assert!(parse_hook_args(&a(&["--status", "--x"])).is_err());
     }
 
     #[test]

@@ -6,6 +6,8 @@ use crate::panel::{FileMode, renamed_rel};
 
 /// 全体検索の結果のタブの rel。NUL を含むので、本物のファイルの相対パス（RelPath は NUL を拒む）とは重ならない。
 pub const SEARCH_TAB: &str = "\0search";
+/// 設定パネルのタブの rel（アプリ全体で 1 枚。9b の設計書 §5.1）。
+pub const SETTINGS_TAB: &str = "\0settings";
 
 /// エディタ列の 1 枚のタブ。ファイルか、全体検索の結果（プロジェクトに 1 枚）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +26,20 @@ impl EditorItem {
     pub fn is_search(&self) -> bool {
         self.rel == SEARCH_TAB
     }
+
+    /// 設定パネルのタブ。
+    pub fn settings() -> EditorItem {
+        EditorItem { rel: SETTINGS_TAB.to_string(), mode: FileMode::Full }
+    }
+
+    pub fn is_settings(&self) -> bool {
+        self.rel == SETTINGS_TAB
+    }
+
+    /// ファイルでないタブ（全体検索、設定）。rel が NUL で始まる。
+    pub fn is_virtual(&self) -> bool {
+        self.rel.starts_with('\0')
+    }
 }
 
 /// エディタ列のタブの並びと、選択中の位置。
@@ -41,10 +57,10 @@ pub enum Opened {
 }
 
 impl EditorTabs {
-    /// セッションに残すもの（全体検索のタブを除く。選択の位置も合わせて直す）。
+    /// セッションに残すもの（ファイルでないタブを除く。選択の位置も合わせて直す）。
     pub fn persistable(&self) -> EditorTabs {
         let mut tabs = self.clone();
-        if let Some(i) = tabs.items.iter().position(EditorItem::is_search) {
+        while let Some(i) = tabs.items.iter().position(EditorItem::is_virtual) {
             tabs.close(i);
         }
         tabs
@@ -210,6 +226,24 @@ mod tests {
         assert_eq!(t.active().unwrap().rel, "a");
         t.cycle(-1);
         assert_eq!(t.active().unwrap().rel, "b");
+    }
+
+    #[test]
+    fn settings_tab_is_virtual_and_not_persisted() {
+        let mut t = EditorTabs::default();
+        t.open(it("a.rs"));
+        t.open(EditorItem::settings());
+        t.open(EditorItem::search());
+        t.open(it("b.rs"));
+        assert!(t.items()[1].is_settings() && t.items()[1].is_virtual());
+        assert!(t.items()[2].is_virtual() && !t.items()[2].is_settings());
+        assert!(!t.items()[0].is_virtual());
+        assert_eq!(t.open(EditorItem::settings()), Opened::Existing(1));
+        let p = t.persistable();
+        let rels: Vec<&str> = p.items().iter().map(|i| i.rel.as_str()).collect();
+        assert_eq!(rels, ["a.rs", "b.rs"]);
+        assert_eq!(p.active().unwrap().rel, "b.rs");
+        assert!(SETTINGS_TAB.contains('\0'));
     }
 
     #[test]

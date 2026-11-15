@@ -46,6 +46,8 @@ pub enum Command {
     SendToClaude,
     /// Markdown の表示モードとソースモードの切り替え。ファイルの中だけで効く。
     ToggleMarkdownMode,
+    /// 設定パネルを開く（9b）。
+    OpenSettings,
 }
 
 impl Command {
@@ -69,6 +71,7 @@ impl Command {
             Command::ToggleRouteMap => "toggle_route_map",
             Command::SendToClaude => "send_to_claude",
             Command::ToggleMarkdownMode => "toggle_markdown_mode",
+            Command::OpenSettings => "open_settings",
         };
         fixed.to_string()
     }
@@ -77,7 +80,7 @@ impl Command {
         if let Some(n) = name.strip_prefix("activate_project_") {
             return n.parse::<u8>().ok().filter(|n| (1..=9).contains(n) && name.len() == "activate_project_".len() + 1).map(Command::ActivateProject);
         }
-        const FIXED: [Command; 16] = [
+        const FIXED: [Command; 17] = [
             Command::NewTab,
             Command::SplitTab,
             Command::NextTab,
@@ -94,6 +97,7 @@ impl Command {
             Command::ToggleRouteMap,
             Command::SendToClaude,
             Command::ToggleMarkdownMode,
+            Command::OpenSettings,
         ];
         FIXED.into_iter().find(|c| c.name() == name)
     }
@@ -131,6 +135,7 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("cmd-p", Command::GoToFile),
                 ("cmd-shift-f", Command::FindInFiles),
                 ("cmd-\\", Command::ToggleRouteMap),
+                ("cmd-,", Command::OpenSettings),
             ],
             PROJECT_KEYS_MAC,
         ),
@@ -152,6 +157,8 @@ pub fn default_bindings(platform: Platform) -> Vec<(&'static str, Command)> {
                 ("ctrl-shift-f", Command::FindInFiles),
                 // Ctrl+\ はシェルの SIGQUIT と重なるため、どこでも効くのは Shift 付きだけ（§10）。
                 ("ctrl-|", Command::ToggleRouteMap),
+                // Ctrl+, はシェルのキー操作と重ならないので、ターミナルの中でも効かせる（Windows Terminal と同じ）。
+                ("ctrl-,", Command::OpenSettings),
             ],
             PROJECT_KEYS_WIN,
         ),
@@ -401,6 +408,19 @@ mod tests {
 
     fn rows_of(list: &[Binding], command: Command) -> Vec<(String, Option<&'static str>)> {
         list.iter().filter(|b| b.command == command).map(|b| (b.key.clone(), b.context)).collect()
+    }
+
+    #[test]
+    fn open_settings_keys() {
+        let mac = default_bindings(Platform::MacOs);
+        assert!(mac.contains(&("cmd-,", Command::OpenSettings)));
+        let win = default_bindings(Platform::Windows);
+        assert!(win.contains(&("ctrl-,", Command::OpenSettings)));
+        let (list, _) = bindings(Platform::Windows, &KeybindingOverrides::default());
+        let row = list.iter().find(|b| b.command == Command::OpenSettings).unwrap();
+        assert_eq!(row.context, None, "ターミナルの中でも開ける");
+        assert_eq!(Command::from_name("open_settings"), Some(Command::OpenSettings));
+        assert_eq!(Command::OpenSettings.name(), "open_settings");
     }
 
     #[test]

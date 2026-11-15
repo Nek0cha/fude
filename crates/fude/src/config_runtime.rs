@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fude_core::settings::{ConfigIssue, DEFAULT_CONFIG, ParseOutcome, Settings, WindowSettings, parse};
+use fude_core::settings_edit::EditError;
+use fude_core::settings_panel::{FileEdit, PanelEdit, edit_text};
 use futures::StreamExt;
 use gpui_kit::{App, Global, WindowBackgroundAppearance};
 
@@ -15,9 +17,140 @@ pub struct ConfigState {
     pub settings: Settings,
     pub issues: Vec<ConfigIssue>,
     pub path: Option<PathBuf>,
+    /// 設定パネルからの書き込みに失敗した理由（9b の設計書 §5.3）。次に書けたら消す。
+    pub write_error: Option<String>,
 }
 
 impl Global for ConfigState {}
+
+/// 設定パネルからの書き込みの待ち（スライダーは止めてから書く）と、最後に自分で書いた文面。
+#[derive(Default)]
+pub struct PendingWrites {
+    pending: Vec<FileEdit>,
+    /// 待ちを始めるたびに増やす。古い待ちは何もしない。
+    generation: u64,
+    last_written: Option<String>,
+}
+
+impl Global for PendingWrites {}
+
+impl PendingWrites {
+    /// continuous（スライダー）なら待ちに置き（前の待ちは捨てる）、空を返す。そうでなければ、待っていた分と
+    /// edits を、すぐ書く順に返す。
+    pub fn push(&mut self, edits: Vec<FileEdit>, continuous: bool) -> Vec<FileEdit> {
+        if continuous {
+            self.pending = edits;
+            return Vec::new();
+        }
+        let mut now = std::mem::take(&mut self.pending);
+        now.extend(edits);
+        now
+    }
+
+    /// 待っている分を取り出す。
+    pub fn take(&mut self) -> Vec<FileEdit> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// 自分で書いた文面を覚える（見張りがそれを読み直しても反映しない）。
+    pub fn wrote(&mut self, text: String) {
+        self.last_written = Some(text);
+    }
+
+    /// 見張りが読み直した text を反映しないでよいか。自分で書いた文面で、しかもスライダーの書き込みを待っている
+    /// （画面の値のほうが新しい）ときだけ true。自分の書き込みでない文面が来たら、覚えた文面は捨てる。
+    pub fn skip_reload(&mut self, text: &str) -> bool {
+        if self.last_written.as_deref() != Some(text) {
+            self.last_written = None;
+            return false;
+        }
+        !self.pending.is_empty()
+    }
+}
+
+/// スライダーの書き込みを待つ時間（設計書 §5.3）。
+const SLIDER_WRITE_DELAY: Duration = Duration::from_millis(300);
+
+/// 今のファイルの文面（無ければ None）に edits を書いた文面。None なら既定の文面から始める。
+pub fn next_file_text(current: Option<&str>, edits: &[FileEdit]) -> Result<String, String> {
+    let mut text = current.unwrap_or(DEFAULT_CONFIG).to_string();
+    for edit in edits {
+        text = edit_text(&text, edit).map_err(|e| match e {
+            EditError::Unreadable => "設定ファイルに書けませんでした: 今のファイルを読めません".to_string(),
+            EditError::WouldBreak => "設定ファイルに書けませんでした: 書くと読めないファイルになります".to_string(),
+        })?;
+    }
+    Ok(text)
+}
+
+/// 設定パネルの変更を画面に反映し、設定ファイルに書く（スライダーは止めてから書く）。
+pub fn apply_edit(cx: &mut App, edit: PanelEdit) {
+    let state = cx.global::<ConfigState>().clone();
+    let mut settings = state.settings.clone();
+    edit.apply(&mut settings);
+    let file_edits = edit.file_edits(&settings);
+    if settings != state.settings {
+        // キーは変わらないので、問題の一覧はそのまま。
+        apply_global(cx, Some(&state.settings), &settings);
+        cx.set_global(ConfigState { settings, ..state });
+        cx.refresh_windows();
+    }
+    let continuous = edit.is_continuous();
+    let now = cx.default_global::<PendingWrites>().push(file_edits, continuous);
+    if !now.is_empty() {
+        write_now(cx, &now);
+    }
+    if continuous {
+        let pending = cx.default_global::<PendingWrites>();
+        pending.generation += 1;
+        let generation = pending.generation;
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(SLIDER_WRITE_DELAY).await;
+            cx.update(|cx| {
+                if cx.default_global::<PendingWrites>().generation == generation {
+                    flush_pending(cx);
+                }
+            });
+        })
+        .detach();
+    }
+}
+
+/// 待っている書き込みを今すぐ書く。
+pub fn flush_pending(cx: &mut App) {
+    let edits = cx.default_global::<PendingWrites>().take();
+    if !edits.is_empty() {
+        write_now(cx, &edits);
+    }
+}
+
+fn write_now(cx: &mut App, edits: &[FileEdit]) {
+    let state = cx.global::<ConfigState>().clone();
+    let Some(path) = state.path.clone() else { return };
+    let current = match std::fs::read(&path) {
+        Ok(bytes) => fude_core::settings::decode_config(&bytes).map(Some).map_err(|issue| format!("設定ファイルに書けませんでした: {}", issue.message)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("設定ファイルに書けませんでした: {e}")),
+    };
+    let result = current.and_then(|current| next_file_text(current.as_deref(), edits)).and_then(|text| {
+        path.parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, &text))
+            .map(|()| text)
+            .map_err(|e| format!("設定ファイルに書けませんでした: {e}"))
+    });
+    let write_error = match result {
+        Ok(text) => {
+            cx.default_global::<PendingWrites>().wrote(text);
+            None
+        }
+        Err(e) => Some(e),
+    };
+    if write_error != state.write_error {
+        cx.set_global(ConfigState { write_error, ..state });
+        cx.refresh_windows();
+    }
+}
 
 /// 保存の出来事をまとめる時間。
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -25,9 +158,9 @@ const RELOAD_DEBOUNCE: Duration = Duration::from_millis(150);
 /// 設定ファイルを読む。無ければ既定の文面で作る。読めなければ既定値で動かし、ファイルは書き換えない。
 pub fn load_or_create(path: Option<&Path>) -> ConfigState {
     let Some(path) = path else {
-        return ConfigState { settings: Settings::default(), issues: Vec::new(), path: None };
+        return ConfigState { settings: Settings::default(), issues: Vec::new(), path: None, write_error: None };
     };
-    let state = |settings, issues| ConfigState { settings, issues, path: Some(path.to_path_buf()) };
+    let state = |settings, issues| ConfigState { settings, issues, path: Some(path.to_path_buf()), write_error: None };
     match std::fs::read(path) {
         Ok(bytes) => match fude_core::settings::decode_config(&bytes).map(|text| parse(&text)) {
             Ok(ParseOutcome::Ok { settings, issues }) => state(settings, issues),
@@ -136,6 +269,9 @@ pub fn reload_now(cx: &mut App) {
     let Some(path) = state.path.clone() else { return };
     let read = std::fs::read(&path).map_err(|e| ConfigIssue { line: None, message: format!("設定ファイルを読めません: {e}") });
     let (settings, mut issues) = match read.and_then(|b| fude_core::settings::decode_config(&b)) {
+        // 設定パネルが書いた文面で、スライダーを動かし続けている（画面の値のほうが新しい）ので、戻さない。
+        // 動かし終えた書き込みのあとの読み直しで、手で直した分と知らせも反映される。
+        Ok(text) if cx.default_global::<PendingWrites>().skip_reload(&text) => return,
         Ok(text) => reload(&state.settings, &text),
         // 消えた・読めないときは今の値のまま。
         Err(issue) => (state.settings.clone(), vec![issue]),
@@ -149,7 +285,7 @@ pub fn reload_now(cx: &mut App) {
         return;
     }
     issues.extend(apply_global(cx, Some(&state.settings), &settings));
-    cx.set_global(ConfigState { settings, issues, path: Some(path) });
+    cx.set_global(ConfigState { settings, issues, path: Some(path), write_error: state.write_error });
     cx.refresh_windows();
 }
 
@@ -243,5 +379,49 @@ mod tests {
         use fude_core::settings::ConfigIssue;
         assert_eq!(issue_text(&ConfigIssue { line: Some(3), message: "x は y".into() }), "設定ファイルの 3 行目: x は y");
         assert_eq!(issue_text(&ConfigIssue { line: None, message: "x は y".into() }), "設定ファイル: x は y");
+    }
+
+    use fude_core::settings_edit::EditValue;
+    use fude_core::settings_panel::FileEdit;
+
+    #[test]
+    fn missing_config_starts_from_default() {
+        let out = next_file_text(None, &[FileEdit::Set(&["theme"], EditValue::Str("dracula".into()))]).unwrap();
+        assert!(out.contains("theme = \"dracula\""), "{out}");
+        assert!(out.contains("# accent ="), "既定の文面のコメントが残る");
+    }
+
+    #[test]
+    fn unreadable_config_is_not_written() {
+        let err = next_file_text(Some("theme = "), &[FileEdit::Set(&["theme"], EditValue::Str("oled".into()))]).unwrap_err();
+        assert!(err.contains("今のファイルを読めません"), "{err}");
+    }
+
+    #[test]
+    fn pending_slider_write_flushes_before_other_edit() {
+        let opacity = |v: f64| vec![FileEdit::Set(&["window", "background_opacity"], EditValue::Float(v))];
+        let blur = vec![FileEdit::Set(&["window", "blur"], EditValue::Bool(false))];
+        let mut p = PendingWrites::default();
+        assert!(p.push(opacity(0.5), true).is_empty());
+        assert!(p.push(opacity(0.6), true).is_empty());
+        let now = p.push(blur.clone(), false);
+        assert_eq!(now, [opacity(0.6), blur].concat());
+        assert!(p.take().is_empty());
+        assert!(p.push(opacity(0.7), true).is_empty());
+        assert_eq!(p.take(), opacity(0.7));
+    }
+
+    #[test]
+    fn own_write_is_skipped_only_while_slider_waits() {
+        let opacity = vec![FileEdit::Set(&["window", "background_opacity"], EditValue::Float(0.5))];
+        let mut p = PendingWrites::default();
+        p.wrote("a = 1\n".into());
+        // 待っている書き込みが無ければ、自分の文面でも読み直す（手で戻したとき、知らせを消すとき）。
+        assert!(!p.skip_reload("a = 1\n"));
+        assert!(p.push(opacity, true).is_empty());
+        assert!(p.skip_reload("a = 1\n"));
+        assert!(!p.skip_reload("a = 2\n"));
+        // 自分の書き込みでない読み直しが来たら、覚えた文面は捨てる。
+        assert!(!p.skip_reload("a = 1\n"));
     }
 }

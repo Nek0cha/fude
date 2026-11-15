@@ -88,6 +88,11 @@ impl WorkspaceView {
         if !should_handle_close(self.dialog_open()) {
             return;
         }
+        if self.workspace.projects().is_empty() && self.settings_on_home {
+            self.settings_on_home = false;
+            cx.notify();
+            return;
+        }
         let focus = self.focus_area(window, cx);
         let target = close_target(&self.workspace, focus, self.tree.open);
         self.request_close(target, window, cx);

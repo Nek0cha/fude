@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod claude_settings;
 pub mod close;
 pub mod drop_text;
 pub mod editor_tabs;
@@ -17,6 +18,7 @@ pub mod recent;
 pub mod session;
 pub mod settings;
 pub mod settings_edit;
+pub mod settings_panel;
 pub mod text;
 pub mod tree_history;
 pub mod workspace;
