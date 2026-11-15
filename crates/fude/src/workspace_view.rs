@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fude_core::keymap::{Command, Platform, context_bindings, default_bindings};
+use fude_core::keymap::{Binding, Command, Platform, bindings};
 use fude_core::recent::RecentList;
 use fude_core::session::{self, SessionData, WindowGeom};
-use fude_core::settings::{LastProjectClosed, Settings};
+use fude_core::settings::{ConfigIssue, LastProjectClosed, Settings};
 use fude_core::claude::{AgentState, Agents, HookCommand, HookSignal, hook_config, parse_terminal_id};
 use fude_core::workspace::{OpenMode, PaneId, Project, ProjectId, ProjectRoot, ShellKind, Tab, Workspace};
 use fude_core::motion::Fade;
@@ -50,67 +50,90 @@ gpui_kit::actions!(
     ]
 );
 
-/// Command と文脈を GPUI のキーバインドにする。
-fn binding(key: &'static str, command: Command, context: Option<&'static str>) -> KeyBinding {
+/// Command の GPUI のアクション。
+fn command_action(command: Command) -> Box<dyn Action> {
     use crate::file_view::{SaveFile, SendToClaude, ToggleMarkdownMode};
     use crate::tree_view::ToggleTree;
     match command {
-        Command::Close => KeyBinding::new(key, CloseItem, context),
-        Command::ToggleTree => KeyBinding::new(key, ToggleTree, context),
-        Command::Save => KeyBinding::new(key, SaveFile, context),
-        Command::SendToClaude => KeyBinding::new(key, SendToClaude, context),
-        Command::ToggleMarkdownMode => KeyBinding::new(key, ToggleMarkdownMode, context),
-        Command::OpenPalette => KeyBinding::new(key, OpenPalette, context),
-        Command::GoToFile => KeyBinding::new(key, GoToFile, context),
-        Command::FindInFiles => KeyBinding::new(key, FindInFiles, context),
-        Command::FindInTerminal => KeyBinding::new(key, FindInTerminal, context),
-        Command::ToggleRouteMap => KeyBinding::new(key, ToggleRouteMap, context),
-        other => default_binding(key, other),
-    }
-}
-
-/// fude_core の割り当て表を GPUI のキーバインドに変換して登録する。
-pub fn bind_keys(cx: &mut App) {
-    let platform = Platform::current();
-    let mut bindings: Vec<KeyBinding> =
-        default_bindings(platform).into_iter().map(|(key, command)| binding(key, command, None)).collect();
-    bindings.extend(context_bindings(platform).into_iter().map(|(key, command, context)| binding(key, command, Some(context))));
-    cx.bind_keys(bindings);
-}
-
-fn default_binding(key: &'static str, command: Command) -> KeyBinding {
-    match command {
-        Command::NewTab => KeyBinding::new(key, NewTab, None),
-        Command::SplitTab => KeyBinding::new(key, SplitTab, None),
-        Command::NextTab => KeyBinding::new(key, NextTab, None),
-        Command::PrevTab => KeyBinding::new(key, PrevTab, None),
-        Command::Copy => KeyBinding::new(key, CopySelection, Some("Terminal")),
-        Command::Paste => KeyBinding::new(key, PasteText, Some("Terminal")),
+        Command::Close => Box::new(CloseItem),
+        Command::ToggleTree => Box::new(ToggleTree),
+        Command::Save => Box::new(SaveFile),
+        Command::SendToClaude => Box::new(SendToClaude),
+        Command::ToggleMarkdownMode => Box::new(ToggleMarkdownMode),
+        Command::OpenPalette => Box::new(OpenPalette),
+        Command::GoToFile => Box::new(GoToFile),
+        Command::FindInFiles => Box::new(FindInFiles),
+        Command::FindInTerminal => Box::new(FindInTerminal),
+        Command::ToggleRouteMap => Box::new(ToggleRouteMap),
+        Command::NewTab => Box::new(NewTab),
+        Command::SplitTab => Box::new(SplitTab),
+        Command::NextTab => Box::new(NextTab),
+        Command::PrevTab => Box::new(PrevTab),
+        Command::Copy => Box::new(CopySelection),
+        Command::Paste => Box::new(PasteText),
         Command::ActivateProject(n) => match n {
-            1 => KeyBinding::new(key, ActivateProject1, None),
-            2 => KeyBinding::new(key, ActivateProject2, None),
-            3 => KeyBinding::new(key, ActivateProject3, None),
-            4 => KeyBinding::new(key, ActivateProject4, None),
-            5 => KeyBinding::new(key, ActivateProject5, None),
-            6 => KeyBinding::new(key, ActivateProject6, None),
-            7 => KeyBinding::new(key, ActivateProject7, None),
-            8 => KeyBinding::new(key, ActivateProject8, None),
-            _ => KeyBinding::new(key, ActivateProject9, None),
+            1 => Box::new(ActivateProject1),
+            2 => Box::new(ActivateProject2),
+            3 => Box::new(ActivateProject3),
+            4 => Box::new(ActivateProject4),
+            5 => Box::new(ActivateProject5),
+            6 => Box::new(ActivateProject6),
+            7 => Box::new(ActivateProject7),
+            8 => Box::new(ActivateProject8),
+            _ => Box::new(ActivateProject9),
         },
-        // 文脈の付くものは binding で扱う。
-        Command::Close
-        | Command::ToggleTree
-        | Command::Save
-        | Command::SendToClaude
-        | Command::ToggleMarkdownMode
-        | Command::OpenPalette
-        | Command::GoToFile
-        | Command::FindInFiles
-        | Command::FindInTerminal
-        | Command::ToggleRouteMap => {
-            unreachable!("binding で扱う")
-        }
     }
+}
+
+/// キーと文脈とアクションから KeyBinding を作る。KeyBinding::new は &'static str しか受けないため load を使う。
+fn load_binding(key: &str, action: Box<dyn Action>, context: Option<&'static str>, cx: &App) -> Option<KeyBinding> {
+    let predicate = context.map(|c| std::rc::Rc::new(KeyBindingContextPredicate::parse(c).expect("文脈の表記")));
+    KeyBinding::load(key, action, predicate, false, None, cx).ok()
+}
+
+/// GPUI が読めるキーの表記か（空白で区切った連続のキーも含む）。KeyBinding::new は読めない表記で落ちるため、先に確かめる。
+pub(crate) fn valid_key(key: &str, os: OperatingSystem) -> bool {
+    let mut parts = key.split_whitespace().peekable();
+    parts.peek().is_some() && parts.all(|k| Keystroke::parse_with_os(k, os).is_ok())
+}
+
+fn current_os() -> OperatingSystem {
+    if cfg!(target_os = "macos") { OperatingSystem::Mac } else { OperatingSystem::Windows }
+}
+
+/// 設定の上書きを当てた割り当て表のうち、読めるキーだけ。読めないキーは issue にする。
+pub(crate) fn valid_bindings(settings: &Settings) -> (Vec<Binding>, Vec<ConfigIssue>) {
+    let (list, mut issues) = bindings(Platform::current(), &settings.keybindings);
+    let (ok, bad): (Vec<Binding>, Vec<Binding>) = list.into_iter().partition(|b| valid_key(&b.key, current_os()));
+    issues.extend(bad.into_iter().map(|b| ConfigIssue { line: None, message: format!("keybindings の \"{}\" は読めないキーの表記です（{}）", b.key, b.command.name()) }));
+    (ok, issues)
+}
+
+/// fude_core の割り当て表（設定の上書きを当てたもの）を GPUI のキーバインドに変換して登録する。
+pub fn bind_keys(cx: &mut App, settings: &Settings) -> Vec<ConfigIssue> {
+    let (list, issues) = valid_bindings(settings);
+    let keys: Vec<KeyBinding> = list.iter().filter_map(|b| load_binding(&b.key, command_action(b.command), b.context, cx)).collect();
+    cx.bind_keys(keys);
+    issues
+}
+
+/// 設定が変わったときに割り当てを登録し直す。gpui-kit の部品のキーを消さないよう clear_key_bindings は使わず、
+/// 使わなくなったキーは NoAction で外し、新しい表を後から足す（後から足したものが優先される）。
+pub fn rebind_keys(cx: &mut App, old: &Settings, new: &Settings) -> Vec<ConfigIssue> {
+    let (new_list, issues) = valid_bindings(new);
+    if old.keybindings == new.keybindings {
+        return issues;
+    }
+    let (old_list, _) = valid_bindings(old);
+    let removed: Vec<KeyBinding> = old_list
+        .iter()
+        .filter(|o| !new_list.iter().any(|n| n.key == o.key && n.context == o.context))
+        .filter_map(|o| load_binding(&o.key, Box::new(NoAction), o.context, cx))
+        .collect();
+    cx.bind_keys(removed);
+    let added: Vec<KeyBinding> = new_list.iter().filter_map(|b| load_binding(&b.key, command_action(b.command), b.context, cx)).collect();
+    cx.bind_keys(added);
+    issues
 }
 
 /// ブランチ名の読み方。
@@ -1085,6 +1108,30 @@ impl Render for WorkspaceView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_notation_is_checked() {
+        use super::valid_key;
+        use gpui_kit::OperatingSystem::Windows;
+        assert!(valid_key("ctrl-shift-p", Windows));
+        assert!(valid_key("cmd-k cmd-s", Windows));
+        assert!(!valid_key("", Windows));
+        assert!(!valid_key("   ", Windows));
+    }
+
+    #[test]
+    fn bad_keys_become_issues() {
+        use super::valid_bindings;
+        use fude_core::settings::Settings;
+        let mut s = Settings::default();
+        let row = vec![("close".to_string(), vec!["".to_string(), "ctrl-q".to_string()])];
+        s.keybindings.windows = row.clone();
+        s.keybindings.macos = row;
+        let (list, issues) = valid_bindings(&s);
+        assert_eq!(issues.len(), 1);
+        assert!(list.iter().any(|b| b.key == "ctrl-q"));
+        assert!(!list.iter().any(|b| b.key.is_empty()));
+    }
+
     use super::geom_from_bounds;
     use fude_core::session::WindowGeom;
     use gpui_kit::{Bounds, WindowBounds, point, px, size};

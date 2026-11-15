@@ -140,7 +140,7 @@ fn main() {
             .expect("同梱の等幅フォントを読み込めない");
         cx.set_global(Theme::dark());
         theme::apply_component_theme(cx);
-        bind_keys(cx);
+        let _ = bind_keys(cx, &fude_core::settings::Settings::default());
         file_view::bind_file_view_keys(cx);
         tree_view::bind_tree_keys(cx);
         palette_view::bind_palette_keys(cx);

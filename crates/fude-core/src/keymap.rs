@@ -1,4 +1,6 @@
-//! プラットフォームごとのショートカットの割り当て表（設計書 §10）。
+//! プラットフォームごとのショートカットの割り当て表（設計書 §10）と、設定ファイルによる上書き。
+
+use crate::settings::{ConfigIssue, KeybindingOverrides};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Platform {
@@ -12,7 +14,7 @@ impl Platform {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
     NewTab,
     SplitTab,
@@ -44,6 +46,57 @@ pub enum Command {
     SendToClaude,
     /// Markdown の表示モードとソースモードの切り替え。ファイルの中だけで効く。
     ToggleMarkdownMode,
+}
+
+impl Command {
+    /// 設定ファイルに書く名前（snake_case）。
+    pub fn name(self) -> String {
+        let fixed = match self {
+            Command::NewTab => "new_tab",
+            Command::SplitTab => "split_tab",
+            Command::NextTab => "next_tab",
+            Command::PrevTab => "prev_tab",
+            Command::ActivateProject(n) => return format!("activate_project_{n}"),
+            Command::Copy => "copy",
+            Command::Paste => "paste",
+            Command::Close => "close",
+            Command::ToggleTree => "toggle_tree",
+            Command::Save => "save",
+            Command::OpenPalette => "open_palette",
+            Command::GoToFile => "go_to_file",
+            Command::FindInFiles => "find_in_files",
+            Command::FindInTerminal => "find_in_terminal",
+            Command::ToggleRouteMap => "toggle_route_map",
+            Command::SendToClaude => "send_to_claude",
+            Command::ToggleMarkdownMode => "toggle_markdown_mode",
+        };
+        fixed.to_string()
+    }
+
+    pub fn from_name(name: &str) -> Option<Command> {
+        if let Some(n) = name.strip_prefix("activate_project_") {
+            return n.parse::<u8>().ok().filter(|n| (1..=9).contains(n) && name.len() == "activate_project_".len() + 1).map(Command::ActivateProject);
+        }
+        const FIXED: [Command; 16] = [
+            Command::NewTab,
+            Command::SplitTab,
+            Command::NextTab,
+            Command::PrevTab,
+            Command::Copy,
+            Command::Paste,
+            Command::Close,
+            Command::ToggleTree,
+            Command::Save,
+            Command::OpenPalette,
+            Command::GoToFile,
+            Command::FindInFiles,
+            Command::FindInTerminal,
+            Command::ToggleRouteMap,
+            Command::SendToClaude,
+            Command::ToggleMarkdownMode,
+        ];
+        FIXED.into_iter().find(|c| c.name() == name)
+    }
 }
 
 /// ターミナル以外にフォーカスがあるときだけ効かせる文脈。
@@ -132,6 +185,48 @@ pub fn context_bindings(platform: Platform) -> Vec<(&'static str, Command, &'sta
             ("ctrl-alt-f", Command::FindInTerminal, TERMINAL),
         ],
     }
+}
+
+/// 登録するキー 1 つ。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Binding {
+    pub key: String,
+    pub command: Command,
+    pub context: Option<&'static str>,
+}
+
+/// 既定の割り当て表に、設定ファイルの今の OS の表の上書きを当てたもの。
+/// 書いた Command は既定の行をすべて消し、書いたキーで置き換える（[] なら外すだけ）。新しいキーの文脈は、その Command が
+/// default_bindings にあれば None（Copy と Paste は Terminal）、無ければ context_bindings の最初の行の文脈。
+/// 知らない Command の名前は捨てて issue を積む。キーの表記の検査は呼び出し側（GPUI）が行う。
+pub fn bindings(platform: Platform, overrides: &KeybindingOverrides) -> (Vec<Binding>, Vec<ConfigIssue>) {
+    let global_context = |c: Command| matches!(c, Command::Copy | Command::Paste).then_some(TERMINAL);
+    let defaults = default_bindings(platform);
+    let contexts = context_bindings(platform);
+    let mut list: Vec<Binding> = defaults
+        .iter()
+        .map(|&(k, c)| Binding { key: k.to_string(), command: c, context: global_context(c) })
+        .chain(contexts.iter().map(|&(k, c, ctx)| Binding { key: k.to_string(), command: c, context: Some(ctx) }))
+        .collect();
+    let table = match platform {
+        Platform::Windows => (&overrides.windows, "windows"),
+        Platform::MacOs => (&overrides.macos, "macos"),
+    };
+    let mut issues = Vec::new();
+    for (name, keys) in table.0 {
+        let Some(command) = Command::from_name(name) else {
+            issues.push(ConfigIssue { line: None, message: format!("keybindings.{}.{name} は知らない Command の名前です", table.1) });
+            continue;
+        };
+        let context = if defaults.iter().any(|&(_, c)| c == command) {
+            global_context(command)
+        } else {
+            contexts.iter().find(|&&(_, c, _)| c == command).map(|&(_, _, ctx)| ctx)
+        };
+        list.retain(|b| b.command != command);
+        list.extend(keys.iter().map(|k| Binding { key: k.clone(), command, context }));
+    }
+    (list, issues)
 }
 
 #[cfg(test)]
@@ -289,5 +384,81 @@ mod tests {
         assert!(context_bindings(Platform::MacOs).contains(&("cmd-e", Command::ToggleMarkdownMode, FILE_VIEW)));
         assert!(context_bindings(Platform::Windows).contains(&("ctrl-e", Command::ToggleMarkdownMode, FILE_VIEW)));
         assert!(!default_bindings(Platform::Windows).iter().any(|(k, _)| *k == "ctrl-e"));
+    }
+
+    fn overrides(windows: &[(&str, &[&str])], macos: &[(&str, &[&str])]) -> KeybindingOverrides {
+        let conv = |rows: &[(&str, &[&str])]| rows.iter().map(|(c, keys)| (c.to_string(), keys.iter().map(|k| k.to_string()).collect())).collect();
+        KeybindingOverrides { windows: conv(windows), macos: conv(macos) }
+    }
+
+    fn rows_of(list: &[Binding], command: Command) -> Vec<(String, Option<&'static str>)> {
+        list.iter().filter(|b| b.command == command).map(|b| (b.key.clone(), b.context)).collect()
+    }
+
+    #[test]
+    fn command_names_round_trip() {
+        for platform in BOTH {
+            let commands = default_bindings(platform).into_iter().map(|(_, c)| c).chain(context_bindings(platform).into_iter().map(|(_, c, _)| c));
+            for c in commands {
+                assert_eq!(Command::from_name(&c.name()), Some(c), "{c:?}");
+            }
+        }
+        assert_eq!(Command::ActivateProject(3).name(), "activate_project_3");
+        assert_eq!(Command::from_name("activate_project_0"), None);
+        assert_eq!(Command::from_name("activate_project_10"), None);
+    }
+
+    #[test]
+    fn no_overrides_equals_defaults() {
+        for platform in BOTH {
+            let (list, issues) = bindings(platform, &KeybindingOverrides::default());
+            assert!(issues.is_empty());
+            let got: HashSet<(String, Command, Option<&str>)> = list.into_iter().map(|b| (b.key, b.command, b.context)).collect();
+            let mut want: HashSet<(String, Command, Option<&str>)> = default_bindings(platform)
+                .into_iter()
+                .map(|(k, c)| (k.to_string(), c, matches!(c, Command::Copy | Command::Paste).then_some(TERMINAL)))
+                .collect();
+            want.extend(context_bindings(platform).into_iter().map(|(k, c, ctx)| (k.to_string(), c, Some(ctx))));
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn override_replaces_all_rows_of_command() {
+        let (list, _) = bindings(Platform::Windows, &overrides(&[("close", &["ctrl-q"])], &[]));
+        assert_eq!(rows_of(&list, Command::Close), vec![("ctrl-q".to_string(), None)]);
+    }
+
+    #[test]
+    fn context_only_command_keeps_its_context() {
+        let (list, _) = bindings(Platform::Windows, &overrides(&[("save", &["ctrl-alt-s"])], &[]));
+        assert_eq!(rows_of(&list, Command::Save), vec![("ctrl-alt-s".to_string(), Some(FILE_VIEW))]);
+    }
+
+    #[test]
+    fn copy_keeps_terminal_context() {
+        let (list, _) = bindings(Platform::MacOs, &overrides(&[], &[("copy", &["cmd-shift-c"])]));
+        assert_eq!(rows_of(&list, Command::Copy), vec![("cmd-shift-c".to_string(), Some(TERMINAL))]);
+    }
+
+    #[test]
+    fn empty_list_unbinds() {
+        let (list, issues) = bindings(Platform::Windows, &overrides(&[("toggle_tree", &[])], &[]));
+        assert!(issues.is_empty());
+        assert!(rows_of(&list, Command::ToggleTree).is_empty());
+    }
+
+    #[test]
+    fn other_platform_table_is_ignored() {
+        let (list, _) = bindings(Platform::Windows, &overrides(&[], &[("close", &[])]));
+        assert_eq!(rows_of(&list, Command::Close).len(), 2);
+    }
+
+    #[test]
+    fn unknown_command_is_an_issue() {
+        let (list, issues) = bindings(Platform::Windows, &overrides(&[("nope", &["ctrl-1"])], &[]));
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("nope"));
+        assert_eq!(list.len(), default_bindings(Platform::Windows).len() + context_bindings(Platform::Windows).len());
     }
 }
