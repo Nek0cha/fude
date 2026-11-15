@@ -106,11 +106,16 @@ fn exchange(conn: &mut Conn, req: &Request, payload: &[u8], timeout: Duration) -
 pub struct RemoteFs {
     client: Arc<RemoteClient>,
     root: String,
+    heavy: std::sync::RwLock<crate::ignored::HeavyDirs>,
 }
 
 impl RemoteFs {
     pub fn new(client: Arc<RemoteClient>, root: String) -> RemoteFs {
-        RemoteFs { client, root }
+        RemoteFs { client, root, heavy: std::sync::RwLock::new(Default::default()) }
+    }
+
+    fn heavy(&self) -> crate::ignored::HeavyDirs {
+        self.heavy.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn call(&self, req: Request, payload: &[u8]) -> io::Result<(Response, Vec<u8>)> {
@@ -165,8 +170,12 @@ fn unexpected(resp: Response) -> io::Error {
 }
 
 impl ProjectFs for RemoteFs {
+    fn set_heavy_dirs(&self, heavy: crate::ignored::HeavyDirs) {
+        *self.heavy.write().unwrap_or_else(|e| e.into_inner()) = heavy;
+    }
+
     fn list_dir(&self, rel: &RelPath) -> io::Result<Vec<DirEntry>> {
-        match self.call(Request::ListDir { root: self.root.clone(), path: rel.clone() }, &[])? {
+        match self.call(Request::ListDir { root: self.root.clone(), path: rel.clone(), heavy: self.heavy() }, &[])? {
             (Response::Entries, json) => serde_json::from_slice(&json)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("一覧を読めない: {e}"))),
             (resp, _) => Err(unexpected(resp)),
@@ -195,7 +204,7 @@ impl ProjectFs for RemoteFs {
     }
 
     fn walk_files(&self) -> io::Result<crate::WalkedFiles> {
-        match self.call(Request::WalkFiles { root: self.root.clone() }, &[])? {
+        match self.call(Request::WalkFiles { root: self.root.clone(), heavy: self.heavy() }, &[])? {
             (Response::Paths, json) => serde_json::from_slice(&json)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("一覧を読めない: {e}"))),
             (resp, _) => Err(unexpected(resp)),

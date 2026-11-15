@@ -17,6 +17,7 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub struct LocalFs {
     root: PathBuf,
+    heavy: std::sync::RwLock<ignored::HeavyDirs>,
 }
 
 /// walker が返すファイル（シンボリックリンクの先がファイルのものも）の、root からの相対パス。
@@ -30,18 +31,22 @@ fn walked_file(root: &Path, entry: &ignore::DirEntry) -> Option<RelPath> {
 
 /// walk_files の中身。外していないものを WALK_MAX 件まで歩き、そのあと外したものだけを ignored_max 件まで
 /// 集める（2 回歩くことで、外したものの山で外していないものが打ち切られないようにする）。
-pub(crate) fn walk_with_cap(root: &Path, tracked_max: usize, ignored_max: usize) -> io::Result<WalkedFiles> {
+pub(crate) fn walk_with_cap(root: &Path, heavy: &ignored::HeavyDirs, tracked_max: usize, ignored_max: usize) -> io::Result<WalkedFiles> {
     if !fs::metadata(root)?.is_dir() {
         return Err(io::Error::new(io::ErrorKind::NotADirectory, "ルートがフォルダではない"));
     }
     let in_repo = ignored::in_git_repo(root);
+    let heavy = std::sync::Arc::new(heavy.clone());
     // git のリポジトリでなければ、隠す名前のフォルダは名前だけで外す。
     let tracked_walker = WalkBuilder::new(root)
         .hidden(false)
         .parents(true)
-        .filter_entry(move |e| {
-            e.file_name() != ".git"
-                && !(e.file_type().is_some_and(|t| t.is_dir()) && ignored::hides_dir(&e.file_name().to_string_lossy(), false, in_repo))
+        .filter_entry({
+            let heavy = heavy.clone();
+            move |e| {
+                e.file_name() != ".git"
+                    && !(e.file_type().is_some_and(|t| t.is_dir()) && ignored::hides_dir(&heavy, &e.file_name().to_string_lossy(), false, in_repo))
+            }
         })
         .build();
     let mut tracked = Vec::new();
@@ -77,10 +82,11 @@ pub(crate) fn walk_with_cap(root: &Path, tracked_max: usize, ignored_max: usize)
         .hidden(false)
         .filter_entry({
             let tracked_dirs = tracked_dirs.clone();
+            let heavy = heavy.clone();
             move |e| {
                 e.file_name() != ".git"
                     && !(e.file_type().is_some_and(|t| t.is_dir())
-                        && ignored::is_hidden_dir(&e.file_name().to_string_lossy())
+                        && heavy.contains(&e.file_name().to_string_lossy())
                         && !tracked_dirs.contains(e.path()))
             }
         })
@@ -116,12 +122,21 @@ fn tracked_names(root: &Path, dir: &RelPath) -> HashSet<String> {
 
 impl LocalFs {
     pub fn new(root: PathBuf) -> LocalFs {
-        LocalFs { root }
+        LocalFs { root, heavy: std::sync::RwLock::new(ignored::HeavyDirs::default()) }
+    }
+
+    fn heavy(&self) -> ignored::HeavyDirs {
+        self.heavy.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
 impl ProjectFs for LocalFs {
+    fn set_heavy_dirs(&self, heavy: ignored::HeavyDirs) {
+        *self.heavy.write().unwrap_or_else(|e| e.into_inner()) = heavy;
+    }
+
     fn list_dir(&self, rel: &RelPath) -> io::Result<Vec<DirEntry>> {
+        let heavy = self.heavy();
         let dir = rel.to_path(&self.root);
         if !fs::metadata(&dir)?.is_dir() {
             return Err(io::Error::new(io::ErrorKind::NotADirectory, format!("フォルダではない: {}", rel.as_str())));
@@ -152,7 +167,8 @@ impl ProjectFs for LocalFs {
                 let names = index_names.get_or_insert_with(|| tracked_names(&self.root, rel));
                 is_ignored = !names.contains(&name);
             }
-            if is_dir && ignored::hides_dir(&name, is_ignored, in_repo) {
+            // ツリーに出す設定なら、隠すフォルダも外したものとして出す（開いたときに中を読む）。
+            if is_dir && !heavy.show_in_tree && ignored::hides_dir(&heavy, &name, is_ignored, in_repo) {
                 continue;
             }
             entries.push(DirEntry { name, is_dir, ignored: is_ignored });
@@ -206,7 +222,7 @@ impl ProjectFs for LocalFs {
     }
 
     fn walk_files(&self) -> io::Result<WalkedFiles> {
-        walk_with_cap(&self.root, WALK_MAX, IGNORED_FILES_MAX)
+        walk_with_cap(&self.root, &self.heavy(), WALK_MAX, IGNORED_FILES_MAX)
     }
 
     fn create_file(&self, rel: &RelPath) -> io::Result<()> {
@@ -394,6 +410,31 @@ mod tests {
     }
 
     #[test]
+    fn custom_names_replace_defaults() {
+        let dir = repo(true, &[(".gitignore", "node_modules/
+target-dev/
+"), ("node_modules/x.js", ""), ("target-dev/y", ""), ("src/a.rs", "")]);
+        let fs = LocalFs::new(dir.path().to_path_buf());
+        fs.set_heavy_dirs(crate::ignored::HeavyDirs::from_settings(Some(vec!["target-dev".into()]), false));
+        assert_eq!(marks(&fs, ""), vec![pair("node_modules", true), pair("src", false), pair(".gitignore", false)]);
+        let files = fs.walk_files().unwrap();
+        assert!(!files.ignored.iter().any(|r| r.as_str().starts_with("target-dev/")));
+        assert!(files.ignored.iter().any(|r| r.as_str() == "node_modules/x.js"));
+    }
+
+    #[test]
+    fn show_in_tree_lists_heavy_dirs_but_walk_skips_them() {
+        let dir = repo(true, &[(".gitignore", "node_modules/
+"), ("node_modules/x.js", ""), ("src/a.rs", "")]);
+        let fs = LocalFs::new(dir.path().to_path_buf());
+        fs.set_heavy_dirs(crate::ignored::HeavyDirs::from_settings(None, true));
+        assert_eq!(marks(&fs, ""), vec![pair("node_modules", true), pair("src", false), pair(".gitignore", false)]);
+        assert_eq!(marks(&fs, "node_modules"), vec![pair("x.js", true)]);
+        let files = fs.walk_files().unwrap();
+        assert!(files.ignored.is_empty(), "{:?}", files.ignored);
+    }
+
+    #[test]
     fn list_dir_keeps_tracked_vendor() {
         let dir = repo(true, &[("vendor/lib.go", "")]);
         assert_eq!(marks(&LocalFs::new(dir.path().to_path_buf()), ""), vec![pair("vendor", false)]);
@@ -526,7 +567,7 @@ mod tests {
         let logs = ["logs/1", "logs/2", "logs/3", "logs/4", "logs/5"];
         spec.extend(logs.iter().map(|p| (*p, "")));
         let dir = repo(true, &spec);
-        let files = walk_with_cap(dir.path(), WALK_MAX, 2).unwrap();
+        let files = walk_with_cap(dir.path(), &crate::ignored::HeavyDirs::default(), WALK_MAX, 2).unwrap();
         assert_eq!(strs(&files.tracked), vec![".gitignore", "a.rs", "b.rs"]);
         assert_eq!(files.ignored.len(), 2);
     }
@@ -535,7 +576,7 @@ mod tests {
     fn tracked_cap_leaves_ignored_empty() {
         // 外していないものが打ち切られたら、残りを外したものと取り違えないよう、外したものは集めない。
         let dir = repo(true, &[(".gitignore", "logs/\n"), ("a.rs", ""), ("b.rs", ""), ("logs/1", "")]);
-        let files = walk_with_cap(dir.path(), 2, 10).unwrap();
+        let files = walk_with_cap(dir.path(), &crate::ignored::HeavyDirs::default(), 2, 10).unwrap();
         assert_eq!(files.tracked.len(), 2);
         assert!(files.ignored.is_empty());
     }

@@ -37,13 +37,14 @@ pub(crate) struct ProjectLive {
 fn start_watcher(
     root: &ProjectRoot,
     hosts: &WslHosts,
+    heavy: fude_fs::ignored::HeavyDirs,
     on_batch: Box<dyn Fn(WatchBatch) + Send>,
 ) -> std::io::Result<Box<dyn Any>> {
     match root {
-        ProjectRoot::Local(path) => Ok(Box::new(fude_fs::watch::LocalWatcher::start(path.clone(), on_batch)?)),
+        ProjectRoot::Local(path) => Ok(Box::new(fude_fs::watch::LocalWatcher::start(path.clone(), heavy, on_batch)?)),
         #[cfg(windows)]
         ProjectRoot::Wsl { distro, path } => {
-            Ok(Box::new(fude_fs::wsl::WslWatcher::start(distro.clone(), hosts.bin().to_string(), path.clone(), on_batch)))
+            Ok(Box::new(fude_fs::wsl::WslWatcher::start(distro.clone(), hosts.bin().to_string(), path.clone(), heavy, on_batch)))
         }
         #[cfg(not(windows))]
         ProjectRoot::Wsl { .. } => {
@@ -81,7 +82,7 @@ impl WorkspaceView {
                 }
             };
             let (tx, mut rx) = futures::channel::mpsc::unbounded::<WatchBatch>();
-            let watcher = match start_watcher(&root, &hosts, Box::new(move |b| {
+            let watcher = match start_watcher(&root, &hosts, fude_fs::ignored::HeavyDirs::default(), Box::new(move |b| {
                 let _ = tx.unbounded_send(b);
             })) {
                 Ok(w) => Some(w),

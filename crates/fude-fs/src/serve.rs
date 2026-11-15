@@ -29,8 +29,11 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write, build_id: &str) ->
 fn handle(req: Request, payload: &[u8], build_id: &str) -> (Response, Vec<u8>) {
     let result = match req {
         Request::Version => Ok((Response::Version { id: build_id.to_string() }, Vec::new())),
-        Request::ListDir { root, path } => {
-            local(&root).and_then(|fs| fs.list_dir(&path)).and_then(|entries| {
+        Request::ListDir { root, path, heavy } => {
+            local(&root).and_then(|fs| {
+                fs.set_heavy_dirs(heavy);
+                fs.list_dir(&path)
+            }).and_then(|entries| {
             let json = serde_json::to_vec(&entries).map_err(io::Error::other)?;
             Ok((Response::Entries, json))
         })
@@ -42,7 +45,10 @@ fn handle(req: Request, payload: &[u8], build_id: &str) -> (Response, Vec<u8>) {
         Request::Branch { root } => {
             local(&root).and_then(|fs| fs.branch()).map(|name| (Response::Branch { name }, Vec::new()))
         }
-        Request::WalkFiles { root } => local(&root).and_then(|fs| fs.walk_files()).and_then(|paths| {
+        Request::WalkFiles { root, heavy } => local(&root).and_then(|fs| {
+            fs.set_heavy_dirs(heavy);
+            fs.walk_files()
+        }).and_then(|paths| {
             let json = serde_json::to_vec(&paths).map_err(io::Error::other)?;
             Ok((Response::Paths, json))
         }),
@@ -151,7 +157,7 @@ mod tests {
             (Request::Version, vec![]),
             (Request::Write { root: root.clone(), path: path.clone() }, data.clone()),
             (Request::Read { root: root.clone(), path: path.clone() }, vec![]),
-            (Request::ListDir { root: root.clone(), path: RelPath::root() }, vec![]),
+            (Request::ListDir { root: root.clone(), path: RelPath::root(), heavy: Default::default() }, vec![]),
             (Request::Branch { root: root.clone() }, vec![]),
         ]);
         assert_eq!(out.len(), 5);

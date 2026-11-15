@@ -145,6 +145,8 @@ pub trait ProjectFs: Send + Sync {
     /// rel の直下。外したもの（gitignore など）も ignored の印を付けて出し、隠しファイルも出し、.git と
     /// 外された重いフォルダ（ignored::HIDDEN_DIRS）は出さない。ディレクトリが先、各々名前順。
     fn list_dir(&self, rel: &RelPath) -> io::Result<Vec<DirEntry>>;
+    /// 隠すフォルダの一覧と、ツリーに出すか（設定が変わったら呼ぶ）。list_dir と walk_files が使う。
+    fn set_heavy_dirs(&self, heavy: ignored::HeavyDirs);
     fn read(&self, rel: &RelPath) -> io::Result<Vec<u8>>;
     /// 同じディレクトリの一時ファイルに書いてから rename する。
     fn write(&self, rel: &RelPath, data: &[u8]) -> io::Result<()>;

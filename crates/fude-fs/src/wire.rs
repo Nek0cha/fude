@@ -12,12 +12,22 @@ use crate::RelPath;
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Version,
-    ListDir { root: String, path: RelPath },
+    /// heavy は計画9a で足した（無い要求は既定の一覧として読む）。
+    ListDir {
+        root: String,
+        path: RelPath,
+        #[serde(default)]
+        heavy: crate::ignored::HeavyDirs,
+    },
     Read { root: String, path: RelPath },
     /// 中身は payload。
     Write { root: String, path: RelPath },
     Branch { root: String },
-    WalkFiles { root: String },
+    WalkFiles {
+        root: String,
+        #[serde(default)]
+        heavy: crate::ignored::HeavyDirs,
+    },
     CreateFile { root: String, path: RelPath },
     CreateDir { root: String, path: RelPath },
     Rename { root: String, from: RelPath, to: RelPath },
@@ -151,6 +161,14 @@ mod tests {
         assert_eq!(got, Request::Version);
         assert!(data.is_empty());
         assert!(read_frame::<Request>(&mut r).unwrap().is_none());
+    }
+
+    #[test]
+    fn old_request_without_heavy_reads_as_default() {
+        let req: Request = serde_json::from_value(serde_json::json!({"op": "list_dir", "root": "/w", "path": ""})).unwrap();
+        assert_eq!(req, Request::ListDir { root: "/w".into(), path: RelPath::root(), heavy: crate::ignored::HeavyDirs::default() });
+        let req: Request = serde_json::from_value(serde_json::json!({"op": "walk_files", "root": "/w"})).unwrap();
+        assert_eq!(req, Request::WalkFiles { root: "/w".into(), heavy: crate::ignored::HeavyDirs::default() });
     }
 
     #[test]

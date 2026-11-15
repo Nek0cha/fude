@@ -255,16 +255,24 @@ pub struct WslWatcher {
 }
 
 impl WslWatcher {
-    pub fn start(distro: String, bin: String, root: String, on_batch: Box<dyn Fn(crate::watch::WatchBatch) + Send>) -> WslWatcher {
+    /// heavy は `fude watch` の 3 つ目の引数（JSON）で渡す。
+    pub fn start(
+        distro: String,
+        bin: String,
+        root: String,
+        heavy: crate::ignored::HeavyDirs,
+        on_batch: Box<dyn Fn(crate::watch::WatchBatch) + Send>,
+    ) -> WslWatcher {
         use std::sync::atomic::Ordering;
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
         let (stop2, child2) = (stop.clone(), child.clone());
+        let heavy_json = serde_json::to_string(&heavy).unwrap_or_default();
         std::thread::spawn(move || {
             let mut attempt = 0u32;
             while !stop2.load(Ordering::Relaxed) {
-                let script = format!(r#"{RESOLVE}b=$(r "$1"); exec "$b" watch "$2""#);
-                let spawned = wsl_command(&distro, &script, &[&bin, &root])
+                let script = format!(r#"{RESOLVE}b=$(r "$1"); exec "$b" watch "$2" "$3""#);
+                let spawned = wsl_command(&distro, &script, &[&bin, &root, &heavy_json])
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())

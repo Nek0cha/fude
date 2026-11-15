@@ -9,6 +9,7 @@ use std::io;
 use std::path::Path;
 
 use ignore::WalkBuilder;
+use serde::{Deserialize, Serialize};
 
 use crate::RelPath;
 
@@ -38,8 +39,30 @@ pub const HIDDEN_DIRS: [&str; 22] = [
     ".angular",
 ];
 
-pub fn is_hidden_dir(name: &str) -> bool {
-    HIDDEN_DIRS.contains(&name)
+/// 隠すフォルダの名前の一覧と、それをツリーに出すか（設定の tree.heavy_dirs と tree.show_heavy_dirs）。
+/// 列挙（walk_files）と監視は show_in_tree に関係なく names を除く。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct HeavyDirs {
+    pub names: Vec<String>,
+    pub show_in_tree: bool,
+}
+
+impl Default for HeavyDirs {
+    fn default() -> Self {
+        HeavyDirs { names: HIDDEN_DIRS.iter().map(|s| s.to_string()).collect(), show_in_tree: false }
+    }
+}
+
+impl HeavyDirs {
+    /// 設定の値から作る。names を書かなければ既定の一覧。
+    pub fn from_settings(names: Option<Vec<String>>, show_in_tree: bool) -> HeavyDirs {
+        HeavyDirs { names: names.unwrap_or_else(|| HeavyDirs::default().names), show_in_tree }
+    }
+
+    /// 隠す名前か（完全一致、大文字小文字を区別）。
+    pub fn contains(&self, name: &str) -> bool {
+        self.names.iter().any(|n| n == name)
+    }
 }
 
 /// root かその祖先に .git（フォルダかファイル）があるか。無ければ .gitignore は効かない。
@@ -48,8 +71,8 @@ pub fn in_git_repo(root: &Path) -> bool {
 }
 
 /// フォルダを出すか。隠す名前のフォルダは、外されているか、git のリポジトリでなければ出さない。
-pub(crate) fn hides_dir(name: &str, ignored: bool, in_repo: bool) -> bool {
-    is_hidden_dir(name) && (ignored || !in_repo)
+pub(crate) fn hides_dir(heavy: &HeavyDirs, name: &str, ignored: bool, in_repo: bool) -> bool {
+    heavy.contains(name) && (ignored || !in_repo)
 }
 
 /// dir の直下で、外されずに残る名前（隠しファイルは残す、.git は除く。上位のフォルダの規則も効かせる）。
@@ -85,18 +108,29 @@ mod tests {
 
     #[test]
     fn hidden_names_are_exact() {
-        assert!(is_hidden_dir("node_modules"));
-        assert!(is_hidden_dir("Pods"));
-        assert!(!is_hidden_dir("pods"));
-        assert!(!is_hidden_dir("docs"));
+        let d = HeavyDirs::default();
+        assert!(d.contains("node_modules"));
+        assert!(d.contains("Pods"));
+        assert!(!d.contains("pods"));
+        assert!(!d.contains("docs"));
         assert_eq!(HIDDEN_DIRS.len(), 22);
     }
 
     #[test]
+    fn default_heavy_dirs_are_the_22() {
+        let d = HeavyDirs::default();
+        assert_eq!(d.names.len(), 22);
+        assert!(!d.show_in_tree);
+        assert_eq!(HeavyDirs::from_settings(None, true), HeavyDirs { show_in_tree: true, ..HeavyDirs::default() });
+        assert_eq!(HeavyDirs::from_settings(Some(vec!["gen".into()]), false).names, vec!["gen".to_string()]);
+    }
+
+    #[test]
     fn hides_only_ignored_or_outside_git() {
-        assert!(hides_dir("vendor", true, true));
-        assert!(!hides_dir("vendor", false, true));
-        assert!(hides_dir("vendor", false, false));
-        assert!(!hides_dir("docs", true, true));
+        let d = HeavyDirs::default();
+        assert!(hides_dir(&d, "vendor", true, true));
+        assert!(!hides_dir(&d, "vendor", false, true));
+        assert!(hides_dir(&d, "vendor", false, false));
+        assert!(!hides_dir(&d, "docs", true, true));
     }
 }
