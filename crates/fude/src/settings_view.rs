@@ -14,6 +14,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::config_runtime::{ConfigState, apply_edit};
+use crate::hook_targets::{HookOp, HookTarget, TargetState};
+use fude_core::claude_settings::HookStatus;
 use crate::theme::{Theme, size};
 
 /// 書体の候補を出す数。
@@ -77,7 +79,39 @@ pub struct SettingsView {
     mono_query: Entity<InputState>,
     /// 入っている書体（初めて描くときに一度だけ取る）。
     fonts: Option<Vec<String>>,
+    /// Claude Code の hook の登録先と、その状態（設計書 §5.4）。
+    targets: Vec<(HookTarget, TargetState)>,
+    /// WSL 側の fude の置き場所。
+    wsl_bin: String,
     _subs: Vec<Subscription>,
+}
+
+/// 登録先の状態の文と、押せるボタン（何をするか、文言）。
+pub(crate) fn target_row(state: &TargetState) -> (String, Vec<(HookOp, &'static str)>) {
+    match state {
+        TargetState::Unchecked => ("まだ調べていません".into(), vec![(HookOp::Check, "調べる")]),
+        TargetState::Checking => ("調べています…".into(), vec![]),
+        TargetState::Known(HookStatus::Registered) => {
+            ("登録済み".into(), vec![(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")])
+        }
+        TargetState::Known(HookStatus::NotRegistered) => ("まだ登録していません".into(), vec![(HookOp::Install, "登録する")]),
+        TargetState::Known(HookStatus::Outdated) => {
+            ("登録し直してください".into(), vec![(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")])
+        }
+        TargetState::Known(HookStatus::Unreadable(r)) => (format!("読めません: {r}"), vec![(HookOp::Check, "調べ直す")]),
+        TargetState::NotInstalled => {
+            ("まだ登録していません（登録するときに fude を WSL に置きます）".into(), vec![(HookOp::Install, "登録する")])
+        }
+    }
+}
+
+/// 登録先の名前。
+fn target_label(target: &HookTarget) -> String {
+    match target {
+        HookTarget::ThisPc if cfg!(target_os = "macos") => "この Mac".to_string(),
+        HookTarget::ThisPc => "Windows（この PC）".to_string(),
+        HookTarget::Wsl(d) => format!("WSL: {d}"),
+    }
 }
 
 impl SettingsView {
@@ -114,7 +148,11 @@ impl SettingsView {
                 }
             }));
         }
-        SettingsView {
+        #[cfg(windows)]
+        let wsl_bin = fude_fs::wsl::default_bin(&|k| std::env::var(k).ok());
+        #[cfg(not(windows))]
+        let wsl_bin = String::new();
+        let mut view = SettingsView {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             opacity,
@@ -122,8 +160,62 @@ impl SettingsView {
             ui_query,
             mono_query,
             fonts: None,
+            targets: vec![(HookTarget::ThisPc, TargetState::Unchecked)],
+            wsl_bin,
             _subs: subs,
+        };
+        view.run_target(HookTarget::ThisPc, HookOp::Check, cx);
+        view.reload_distros(cx);
+        view
+    }
+
+    /// target に op を裏で行い、終わったら状態を差し替える。
+    fn run_target(&mut self, target: HookTarget, op: HookOp, cx: &mut Context<Self>) {
+        let Some(slot) = self.targets.iter_mut().find(|(t, _)| *t == target) else { return };
+        if slot.1 == TargetState::Checking {
+            return;
         }
+        slot.1 = TargetState::Checking;
+        cx.notify();
+        let bin = self.wsl_bin.clone();
+        let job_target = target.clone();
+        let task = cx.background_spawn(async move { crate::hook_targets::run(&job_target, op, &bin) });
+        cx.spawn(async move |this, cx| {
+            let state = task.await;
+            this.update(cx, |this, cx| {
+                if let Some(slot) = this.targets.iter_mut().find(|(t, _)| *t == target) {
+                    slot.1 = state;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// WSL のディストリビューションの一覧を読み直す（Windows だけ）。調べた状態は、同じ名前なら残す。
+    fn reload_distros(&mut self, cx: &mut Context<Self>) {
+        if !cfg!(windows) {
+            return;
+        }
+        let task = cx.background_spawn(async { fude_term::list_distros() });
+        cx.spawn(async move |this, cx| {
+            let Ok(distros) = task.await else { return };
+            this.update(cx, |this, cx| {
+                let old = std::mem::take(&mut this.targets);
+                let state_of = |t: &HookTarget| old.iter().find(|(o, _)| o == t).map(|(_, s)| s.clone());
+                let mut targets = vec![(HookTarget::ThisPc, state_of(&HookTarget::ThisPc).unwrap_or(TargetState::Unchecked))];
+                for d in distros {
+                    let t = HookTarget::Wsl(d);
+                    let s = state_of(&t).unwrap_or(TargetState::Unchecked);
+                    targets.push((t, s));
+                }
+                this.targets = targets;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -369,6 +461,55 @@ impl SettingsView {
             .child(row("行の高さ", line_height, theme))
     }
 
+    fn render_hooks(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let rows = self.targets.iter().enumerate().map(|(i, (target, state))| {
+            let (text, actions) = target_row(state);
+            let color = match state {
+                TargetState::Known(HookStatus::Registered) => theme.fg_default,
+                TargetState::Known(HookStatus::Outdated | HookStatus::Unreadable(_)) => theme.warn,
+                _ => theme.fg_dim,
+            };
+            let buttons = actions.into_iter().enumerate().map(|(j, (op, label))| {
+                let target = target.clone();
+                small_button(SharedString::from(format!("hook-{i}-{j}")), label, theme)
+                    .on_click(cx.listener(move |this, _, _, cx| this.run_target(target.clone(), op, cx)))
+            });
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.))
+                .py(px(4.))
+                .child(div().w(px(160.)).flex_shrink_0().child(target_label(target)))
+                .child(div().flex_1().min_w_0().text_color(color).child(text))
+                .children(buttons)
+        });
+        let dev_note = std::env::var("FUDE_INSTANCE").ok().filter(|v| !v.is_empty()).map(|_| {
+            div()
+                .pb(px(6.))
+                .text_color(theme.warn)
+                .child("開発用のインスタンスです。登録すると普段の fude の hook を置き換えます")
+        });
+        div()
+            .child(heading("Claude Code の hook", theme))
+            .child(
+                div()
+                    .pb(px(6.))
+                    .text_color(theme.fg_dim)
+                    .child("ボタンを押したときだけ、Claude Code の settings.json に fude の hook を書きます。ほかの設定は残します。"),
+            )
+            .children(dev_note)
+            .children(rows)
+            .when(cfg!(windows), |d| {
+                d.child(
+                    div().pt(px(6.)).child(
+                        small_button("hook-reload-distros", "WSL の一覧を読み直す", theme)
+                            .on_click(cx.listener(|this, _, _, cx| this.reload_distros(cx))),
+                    ),
+                )
+            })
+    }
+
     fn render_cursor(&self, s: &Settings, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let shapes = [(CursorShape::Block, "ブロック"), (CursorShape::Bar, "縦線"), (CursorShape::Underline, "下線")];
         let shape = div().flex().flex_row().gap(px(6.)).children(shapes.into_iter().map(|(shape, label)| {
@@ -390,6 +531,7 @@ impl Render for SettingsView {
         let appearance = self.render_appearance(s, &theme, cx);
         let text = self.render_text(s, &theme, window, cx);
         let cursor = self.render_cursor(s, &theme, cx);
+        let hooks = self.render_hooks(&theme, cx);
         let open_config = state.path.clone().map(|path| {
             div().pt(px(24.)).child(
                 small_button("open-config", "設定ファイルを開く", &theme)
@@ -411,6 +553,7 @@ impl Render for SettingsView {
             .child(appearance)
             .child(text)
             .child(cursor)
+            .child(hooks)
             .children(open_config)
     }
 }
@@ -418,7 +561,9 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     // super::* は gpui の test 属性も持ち込むので、名前を挙げる。
-    use super::{filter_fonts, font_list, line_height_label, parse_hex_input, percent_label};
+    use super::{filter_fonts, font_list, line_height_label, parse_hex_input, percent_label, target_row};
+    use crate::hook_targets::{HookOp, TargetState};
+    use fude_core::claude_settings::HookStatus;
 
     #[test]
     fn opacity_percent_label() {
@@ -454,5 +599,28 @@ mod tests {
         assert_eq!(parse_hex_input(" FF0080 "), Some(0xff0080));
         assert_eq!(parse_hex_input("#ff008"), None);
         assert_eq!(parse_hex_input("red"), None);
+    }
+
+    #[test]
+    fn row_texts_for_each_state() {
+        let ops = |st: &TargetState| target_row(st).1.into_iter().map(|(op, label)| (op, label)).collect::<Vec<_>>();
+        assert_eq!(target_row(&TargetState::Unchecked).0, "まだ調べていません");
+        assert_eq!(ops(&TargetState::Unchecked), [(HookOp::Check, "調べる")]);
+        assert_eq!(target_row(&TargetState::Checking).0, "調べています…");
+        assert!(ops(&TargetState::Checking).is_empty());
+        let reg = TargetState::Known(HookStatus::Registered);
+        assert_eq!(target_row(&reg).0, "登録済み");
+        assert_eq!(ops(&reg), [(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")]);
+        let not = TargetState::Known(HookStatus::NotRegistered);
+        assert_eq!(target_row(&not).0, "まだ登録していません");
+        assert_eq!(ops(&not), [(HookOp::Install, "登録する")]);
+        let old = TargetState::Known(HookStatus::Outdated);
+        assert_eq!(target_row(&old).0, "登録し直してください");
+        assert_eq!(ops(&old), [(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")]);
+        let bad = TargetState::Known(HookStatus::Unreadable("x".into()));
+        assert_eq!(target_row(&bad).0, "読めません: x");
+        assert_eq!(ops(&bad), [(HookOp::Check, "調べ直す")]);
+        assert_eq!(target_row(&TargetState::NotInstalled).0, "まだ登録していません（登録するときに fude を WSL に置きます）");
+        assert_eq!(ops(&TargetState::NotInstalled), [(HookOp::Install, "登録する")]);
     }
 }
