@@ -523,7 +523,7 @@ impl SettingsView {
             .children(rows)
             .when(cfg!(windows), |d| {
                 d.child(
-                    div().pt(px(6.)).child(
+                    div().pt(px(6.)).flex().child(
                         small_button("hook-reload-distros", "WSL の一覧を読み直す", theme)
                             .on_click(cx.listener(|this, _, _, cx| this.reload_distros(cx))),
                     ),
@@ -554,7 +554,7 @@ impl Render for SettingsView {
         let cursor = self.render_cursor(s, &theme, cx);
         let hooks = self.render_hooks(&theme, cx);
         let open_config = state.path.clone().map(|path| {
-            div().pt(px(24.)).child(
+            div().pt(px(24.)).flex().child(
                 small_button("open-config", "設定ファイルを開く", &theme)
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(SettingsViewEvent::OpenConfig(path.clone())))),
             )

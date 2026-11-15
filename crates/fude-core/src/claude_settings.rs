@@ -128,7 +128,8 @@ pub fn uninstall(text: Option<&str>) -> Result<Option<String>, String> {
     if let Some(hooks) = p.root.get_mut("hooks").and_then(Value::as_object_mut) {
         remove_fude(hooks);
         if hooks.is_empty() {
-            p.root.remove("hooks");
+            // remove は preserve_order で末尾のキーと入れ替えるので、並びを保つ shift_remove を使う。
+            p.root.shift_remove("hooks");
         }
     }
     Ok((p.root != before).then(|| write(&p)))
@@ -384,6 +385,18 @@ mod tests {
 
         assert_eq!(uninstall(None), Ok(None));
         assert_eq!(uninstall(Some(r#"{"model": "x"}"#)), Ok(None));
+    }
+
+    #[test]
+    fn uninstall_keeps_order_of_other_keys() {
+        let only = install(Some(r#"{"a": 1}"#), &exec()).unwrap().unwrap();
+        let mut v = parsed(&only);
+        v.as_object_mut().unwrap().insert("b".into(), json!(2));
+        v.as_object_mut().unwrap().insert("c".into(), json!(3));
+        // a, hooks, b, c の並び。hooks を消しても c が b より前に来ない。
+        let out = uninstall(Some(&serde_json::to_string(&v).unwrap())).unwrap().unwrap();
+        let keys: Vec<String> = parsed(&out).as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["a", "b", "c"]);
     }
 
     #[test]
