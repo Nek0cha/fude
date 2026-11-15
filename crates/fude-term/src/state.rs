@@ -181,6 +181,7 @@ pub struct TermState {
     events: Listener,
     size: GridSize,
     search: Option<TermSearch>,
+    scrollback: usize,
 }
 
 impl TermState {
@@ -188,7 +189,24 @@ impl TermState {
         let events = Listener::default();
         let config = Config { scrolling_history: scrollback, ..Config::default() };
         let term = Term::new(config, &size.term_size(), events.clone());
-        TermState { term, parser: Processor::new(), events, size, search: None }
+        TermState { term, parser: Processor::new(), events, size, search: None, scrollback }
+    }
+
+    /// アプリが形を指定していないときのカーソルの形（設定の [cursor] shape）。アプリの DECSCUSR が優先する。
+    pub fn set_default_cursor(&mut self, shape: fude_core::settings::CursorShape) {
+        use alacritty_terminal::vte::ansi::CursorStyle;
+        use fude_core::settings::CursorShape as Setting;
+        let shape = match shape {
+            Setting::Block => CursorShape::Block,
+            Setting::Bar => CursorShape::Beam,
+            Setting::Underline => CursorShape::Underline,
+        };
+        let config = Config {
+            scrolling_history: self.scrollback,
+            default_cursor_style: CursorStyle { shape, blinking: false },
+            ..Config::default()
+        };
+        self.term.set_options(config);
     }
 
     /// PTY の出力を解析して画面に反映する。検索中なら、ずれた一致を探し直す。
@@ -642,5 +660,23 @@ mod tests {
     fn grid_size_from_pixels_clamps_minimum() {
         assert_eq!(GridSize::from_pixels(0., 0., 8., 18.), GridSize { cols: 2, rows: 1 });
         assert_eq!(GridSize::from_pixels(800., 360., 8., 18.), GridSize { cols: 100, rows: 20 });
+    }
+
+    #[test]
+    fn default_cursor_shape_applies_until_app_sets_one() {
+        use crate::state::CursorKind;
+        use fude_core::settings::CursorShape as Setting;
+        let mut t = TermState::new(GridSize { cols: 20, rows: 5 }, 100);
+        assert_eq!(snap(&t).cursor.map(|c| c.kind), Some(CursorKind::Block));
+        t.set_default_cursor(Setting::Bar);
+        assert_eq!(snap(&t).cursor.map(|c| c.kind), Some(CursorKind::Beam));
+        t.set_default_cursor(Setting::Underline);
+        assert_eq!(snap(&t).cursor.map(|c| c.kind), Some(CursorKind::Underline));
+        // アプリが DECSCUSR で指定したら、そちらが勝つ。
+        t.advance(b"\x1b[2 q");
+        assert_eq!(snap(&t).cursor.map(|c| c.kind), Some(CursorKind::Block));
+        // 既定に戻す指定（0）では設定の形に戻る。
+        t.advance(b"\x1b[0 q");
+        assert_eq!(snap(&t).cursor.map(|c| c.kind), Some(CursorKind::Underline));
     }
 }

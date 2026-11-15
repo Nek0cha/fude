@@ -3,7 +3,7 @@
 use fude_term::{CursorKind, SnapCell, Snapshot};
 use gpui_kit::*;
 
-use crate::theme::size::{TERM_FONT_SIZE, TERM_LINE_HEIGHT};
+use crate::theme::{term_font_size, term_line_height};
 use crate::theme::{Theme, mono_font};
 
 /// 1 セルの大きさ。
@@ -18,8 +18,8 @@ impl CellMetrics {
     pub fn measure(window: &Window) -> CellMetrics {
         let text = window.text_system();
         let font_id = text.resolve_font(&mono_font());
-        let cell_w = text.advance(font_id, TERM_FONT_SIZE, 'm').map_or(px(8.), |s| s.width);
-        CellMetrics { cell_w, line_h: TERM_LINE_HEIGHT }
+        let cell_w = text.advance(font_id, term_font_size(), 'm').map_or(px(8.), |s| s.width);
+        CellMetrics { cell_w, line_h: term_line_height() }
     }
 }
 
@@ -99,7 +99,7 @@ fn paint_spans(
 #[allow(clippy::too_many_arguments)]
 fn paint_glyph(text: String, run: TextRun, x: Pixels, y: Pixels, width: Pixels, line_h: Pixels, window: &mut Window, cx: &mut App) {
     let len = text.len();
-    let shaped = window.text_system().shape_line(text.into(), TERM_FONT_SIZE, &[TextRun { len, ..run }], None);
+    let shaped = window.text_system().shape_line(text.into(), term_font_size(), &[TextRun { len, ..run }], None);
     let dx = ((width - shaped.width) / 2.).max(px(0.));
     let _ = shaped.paint(point(x + dx, y), line_h, TextAlign::Left, None, window, cx);
 }
@@ -152,7 +152,7 @@ pub fn paint_terminal(
                 }
                 let run = text_run(cell, text.len(), fg_of(cell));
                 // 送り幅をセルの幅に固定して、升目からずれないようにする。
-                let shaped = window.text_system().shape_line(text.into(), TERM_FONT_SIZE, &[run], Some(m.cell_w));
+                let shaped = window.text_system().shape_line(text.into(), term_font_size(), &[run], Some(m.cell_w));
                 let _ = shaped.paint(point(origin.x + m.cell_w * start as f32, y), m.line_h, TextAlign::Left, None, window, cx);
             } else {
                 let mut text = String::from(cell.c);
@@ -216,7 +216,7 @@ fn paint_marked(
         underline: Some(UnderlineStyle { color: Some(theme.accent.into()), thickness: px(1.), wavy: false }),
         strikethrough: None,
     };
-    let shaped = window.text_system().shape_line(marked.to_string().into(), TERM_FONT_SIZE, &[run], None);
+    let shaped = window.text_system().shape_line(marked.to_string().into(), term_font_size(), &[run], None);
     window.paint_quad(fill(Bounds::new(at, size(shaped.width, m.line_h)), theme.bg_panel));
     let _ = shaped.paint(at, m.line_h, TextAlign::Left, None, window, cx);
 }

@@ -599,7 +599,7 @@ impl WorkspaceView {
 
     /// 既定のシェルで新しいタブを開き、`claude` と Enter を入力する。
     pub(crate) fn launch_claude(&mut self, cx: &mut Context<Self>) {
-        let Some(kind) = self.workspace.active_project().map(|p| p.default_shell()) else { return };
+        let Some(kind) = self.workspace.active_project().map(|p| self.workspace.new_terminal_shell(p)) else { return };
         if self.workspace.new_tab(kind).is_none() {
             return;
         }
@@ -722,7 +722,7 @@ impl WorkspaceView {
 
     /// 選択中のプロジェクトの既定のシェルでタブを作る。
     pub(crate) fn new_default_tab(&mut self) {
-        if let Some(kind) = self.workspace.active_project().map(|p| p.default_shell()) {
+        if let Some(kind) = self.workspace.active_project().map(|p| self.workspace.new_terminal_shell(p)) {
             self.workspace.new_tab(kind);
         }
     }

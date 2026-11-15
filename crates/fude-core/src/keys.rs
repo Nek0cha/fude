@@ -69,6 +69,13 @@ impl KeyOverrides {
         o
     }
 
+    /// 設定の terminal.shift_enter のバイト列を Shift+Enter で送る。
+    pub fn with_shift_enter(bytes: Vec<u8>) -> Self {
+        let mut o = Self::empty();
+        o.insert(KeyInput { code: KeyCode::Enter, mods: Modifiers { shift: true, ..Modifiers::default() } }, bytes);
+        o
+    }
+
     /// 上書きを追加する。同じキー入力がすでにあれば置き換える。
     pub fn insert(&mut self, key: KeyInput, bytes: Vec<u8>) {
         match self.entries.iter_mut().find(|(k, _)| *k == key) {
@@ -271,6 +278,13 @@ mod tests {
     fn shift_enter_without_override_is_cr() {
         let out = encode_key(&k(Enter, true, false, false), TermModes::default(), &KeyOverrides::empty()).unwrap();
         assert_eq!(out, b"\r");
+    }
+
+    #[test]
+    fn shift_enter_from_settings() {
+        let o = KeyOverrides::with_shift_enter(b"\\\r".to_vec());
+        assert_eq!(encode_key(&k(Enter, true, false, false), TermModes::default(), &o).unwrap(), b"\\\r");
+        assert_eq!(encode_key(&k(Enter, false, false, false), TermModes::default(), &o).unwrap(), b"\r");
     }
 
     #[test]
