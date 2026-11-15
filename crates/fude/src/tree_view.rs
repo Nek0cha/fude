@@ -1,7 +1,7 @@
 //! ファイルツリーの左パネル（設計書 §4.1、§4.3、§5.5）。レールの右に、メイン領域の上へ重ねて出す。
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use fude_core::workspace::ProjectId;
 use fude_fs::RelPath;
@@ -40,6 +40,8 @@ pub fn bind_tree_keys(cx: &mut App) {
 }
 
 const ROW_H: Pixels = px(24.);
+/// 監視の通知のあと、全ファイルの一覧を読み直すまでの待ち時間（続けて届いたら数え直す）。
+const FILE_LIST_DELAY: Duration = Duration::from_millis(500);
 const INDENT: f32 = 12.;
 
 /// 左パネルの状態。
@@ -61,6 +63,8 @@ pub(crate) struct TreeState {
     pub edit: Option<crate::tree_menu::TreeEdit>,
     /// プロジェクトごとの取り消しとやり直しの履歴（メモリだけ）。
     pub history: HashMap<ProjectId, fude_core::tree_history::TreeHistory<fude_fs::TrashTicket>>,
+    /// 全ファイルの一覧を読んでいる途中（待ち合わせを含む）。差し替えると前の分は捨てられる。
+    pub file_list_task: Option<Task<()>>,
     _filter_sub: Option<Subscription>,
 }
 
@@ -78,6 +82,7 @@ impl TreeState {
             menu: None,
             edit: None,
             history: HashMap::new(),
+            file_list_task: None,
             _filter_sub: None,
         }
     }
@@ -150,17 +155,21 @@ impl WorkspaceView {
         let Some(project) = self.workspace.active_project().map(|p| p.id) else { return };
         let model = self.tree.models.entry(project).or_default();
         model.set_filter(&query, None);
-        if model.filtering() && !model.has_file_list() {
-            self.load_file_list(project, cx);
+        if model.filtering() && !model.has_file_list() && self.tree.file_list_task.is_none() {
+            self.load_file_list(project, Duration::ZERO, cx);
         }
         cx.notify();
     }
 
-    fn load_file_list(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+    /// 全ファイルの一覧を delay のあとに裏で読む。続けて呼ばれたら前の分を捨て、最後の呼び出しから数え直す
+    /// （外したフォルダの変化が続くとき、重い walk_files を重ねて走らせないため）。
+    fn load_file_list(&mut self, project: ProjectId, delay: Duration, cx: &mut Context<Self>) {
         let Some(fs) = self.live_fs(project) else { return };
-        let task = cx.background_spawn(async move { fs.walk_files() });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
+        self.tree.file_list_task = Some(cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let result = cx.background_spawn(async move { fs.walk_files() }).await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(files) => {
@@ -169,11 +178,11 @@ impl WorkspaceView {
                     }
                     Err(e) => eprintln!("ファイルの一覧を読めない: {e}"),
                 }
+                this.tree.file_list_task = None;
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
+        }));
     }
 
     /// 監視の通知。読んだことのあるフォルダの中が変わったら読み直す。
@@ -186,7 +195,7 @@ impl WorkspaceView {
             self.load_tree_dir(project, dir, cx);
         }
         if refetch {
-            self.load_file_list(project, cx);
+            self.load_file_list(project, FILE_LIST_DELAY, cx);
         }
     }
 
