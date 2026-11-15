@@ -81,6 +81,22 @@ fn key_menu_position(list: Bounds<Pixels>, row_index: usize, scroll_y: Pixels) -
     point(list.origin.x + px(24.), y)
 }
 
+/// 新規か名前の変更が済んだあとの選択。新規は作ったものを選ぶ。名前の変更は、選んでいた行（とフォルダの中の行）
+/// を新しいパスに付け替え、それ以外の選択はそのまま。
+fn selection_after_edit(kind: EditKind, selected: Option<&RelPath>, target: &RelPath, dest: &RelPath) -> Option<RelPath> {
+    if kind != EditKind::Rename {
+        return Some(dest.clone());
+    }
+    let selected = selected?;
+    if selected == target {
+        return Some(dest.clone());
+    }
+    match selected.as_str().strip_prefix(target.as_str()).and_then(|rest| rest.strip_prefix('/')) {
+        Some(rest) => dest.join(rest).ok().or_else(|| Some(selected.clone())),
+        None => Some(selected.clone()),
+    }
+}
+
 fn label(action: TreeAction, os: Platform) -> &'static str {
     match (action, os) {
         (TreeAction::NewFile, _) => "新規ファイル",
@@ -396,6 +412,9 @@ impl WorkspaceView {
                         _ => TreeOp::Created { path: dest.as_str().to_string(), trashed: None },
                     };
                     this.tree_history(project).push(op);
+                    // 選択を新しいパスへ移す（古いパスは並びから消え、キーの操作が効かなくなるため）。
+                    let selected = selection_after_edit(kind, this.tree.selected.as_ref(), &target, &dest);
+                    this.select_tree_row(selected, cx);
                     // 作り先のフォルダを開いて読み直す（監視の通知を待たない）。
                     this.tree.models.entry(project).or_default().expand(&parent);
                     this.load_tree_dir(project, parent.clone(), cx);
@@ -520,7 +539,7 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{TreeAction, key_menu_position, menu_actions, new_item_parent, step_menu, tree_mention, validate_name};
+    use super::{EditKind, TreeAction, key_menu_position, menu_actions, new_item_parent, selection_after_edit, step_menu, tree_mention, validate_name};
     use gpui_kit::{Bounds, Pixels, point, px, size};
     use crate::tree_model::TreeRow;
     use fude_fs::RelPath;
@@ -557,6 +576,19 @@ mod tests {
     fn menu_actions_without_row_are_three() {
         assert_eq!(menu_actions(false), vec![TreeAction::NewFile, TreeAction::NewFolder, TreeAction::Reveal]);
         assert_eq!(menu_actions(true).len(), 7);
+    }
+
+    #[test]
+    fn selection_follows_rename_and_creation() {
+        let r = |p: &str| RelPath::new(p).unwrap();
+        // 名前を変えた行を選んでいれば、新しい名前を選ぶ。フォルダの中の行は付け替える。
+        assert_eq!(selection_after_edit(EditKind::Rename, Some(&r("a.txt")), &r("a.txt"), &r("b.txt")), Some(r("b.txt")));
+        assert_eq!(selection_after_edit(EditKind::Rename, Some(&r("d/x")), &r("d"), &r("e")), Some(r("e/x")));
+        assert_eq!(selection_after_edit(EditKind::Rename, Some(&r("dd")), &r("d"), &r("e")), Some(r("dd")));
+        assert_eq!(selection_after_edit(EditKind::Rename, None, &r("d"), &r("e")), None);
+        // 新規は作ったものを選ぶ。
+        assert_eq!(selection_after_edit(EditKind::NewFolder, Some(&r("a.txt")), &r("src"), &r("src/new")), Some(r("src/new")));
+        assert_eq!(selection_after_edit(EditKind::NewFile, None, &r("src"), &r("src/n.rs")), Some(r("src/n.rs")));
     }
 
     #[test]

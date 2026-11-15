@@ -333,8 +333,15 @@ impl WorkspaceView {
 
     /// ProjectFs が用意できたときに呼ぶ。ツリーが開いていれば読み始める。
     pub(crate) fn tree_live_ready(&mut self, project: ProjectId, cx: &mut Context<Self>) {
-        if self.tree.open && self.tree.models.entry(project).or_default().needs_load(&RelPath::root()) {
-            self.load_tree_dir(project, RelPath::root(), cx);
+        if !self.tree.open {
+            return;
+        }
+        let model = self.tree.models.entry(project).or_default();
+        let root = model.needs_load(&RelPath::root()).then(RelPath::root);
+        // 用意できる前に開いたフォルダ（開いているファイルの祖先など）も読む。
+        let dirs: Vec<RelPath> = root.into_iter().chain(model.unloaded_expanded()).collect();
+        for dir in dirs {
+            self.load_tree_dir(project, dir, cx);
         }
     }
 
