@@ -81,6 +81,22 @@ fn key_menu_position(list: Bounds<Pixels>, row_index: usize, scroll_y: Pixels) -
     point(list.origin.x + px(24.), y)
 }
 
+/// メニューの項目の光り方。キーで選んでいる間は選んだ項目だけを光らせ、ホバーとの二重の光りを避ける。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ItemLight {
+    Hover,
+    Selected,
+    Off,
+}
+
+fn item_light(index: Option<usize>, item: usize) -> ItemLight {
+    match index {
+        None => ItemLight::Hover,
+        Some(i) if i == item => ItemLight::Selected,
+        Some(_) => ItemLight::Off,
+    }
+}
+
 /// 新規か名前の変更が済んだあとの選択。新規は作ったものを選ぶ。名前の変更は、選んでいた行（とフォルダの中の行）
 /// を新しいパスに付け替え、それ以外の選択はそのまま。
 fn selection_after_edit(kind: EditKind, selected: Option<&RelPath>, target: &RelPath, dest: &RelPath) -> Option<RelPath> {
@@ -445,6 +461,8 @@ impl WorkspaceView {
                 let window_handle = window.window_handle();
                 let Some(fs) = this.live_fs(project) else { return };
                 let rel = row.rel.clone();
+                // 削除の後の選択を先に決めておく（監視の読み直しが先に済むと、消した行が並びから消えるため）。
+                let planned = crate::tree_nav::after_removal(&this.tree.rows, &row.rel);
                 this.tree_history(project).begin_op();
                 let task = cx.background_spawn(async move { fs.trash(&rel) });
                 let parent =
@@ -458,7 +476,7 @@ impl WorkspaceView {
                                 Ok(ticket) => {
                                     // 消した行を選んでいたら、次の行（無ければ前の行）へ移す。
                                     if this.tree.selected.as_ref() == Some(&row.rel) {
-                                        let next = crate::tree_nav::after_removal(&this.tree.rows, &row.rel);
+                                        let next = crate::tree_nav::next_after_delete(&this.tree.rows, &row.rel, planned);
                                         this.select_tree_row(next, cx);
                                     }
                                     this.load_tree_dir(project, parent, cx);
@@ -511,8 +529,21 @@ impl WorkspaceView {
                     .items_center()
                     .gap(px(8.))
                     .rounded(size::RADIUS_SM)
-                    // キーで選んでいる項目は、ホバーと同じ色にする。
-                    .bg(if index == Some(i) { theme.bg_hover } else { self.hover_bg(key, theme.bg_hover, now) })
+                    // キーで選んでいる項目は、ホバーと同じ色にする。キーで選んでいる間はほかの項目を光らせない。
+                    .bg(match item_light(index, i) {
+                        ItemLight::Hover => self.hover_bg(key, theme.bg_hover, now),
+                        ItemLight::Selected => theme.bg_hover,
+                        ItemLight::Off => Rgba { r: 0., g: 0., b: 0., a: 0. },
+                    })
+                    // キーで選んでいる間にマウスを動かしたら、その項目を選ぶ（光りを 1 つに保つ）。
+                    .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                        if let Some(menu) = this.tree.menu.as_mut()
+                            && menu.index.is_some_and(|ix| ix != i)
+                        {
+                            menu.index = Some(i);
+                            cx.notify();
+                        }
+                    }))
                     .text_color(color)
                     .child(icon(action_icon(action), theme.fg_dim))
                     .child(label(action, os))
@@ -539,7 +570,7 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditKind, TreeAction, key_menu_position, menu_actions, new_item_parent, selection_after_edit, step_menu, tree_mention, validate_name};
+    use super::{EditKind, ItemLight, TreeAction, item_light, key_menu_position, menu_actions, new_item_parent, selection_after_edit, step_menu, tree_mention, validate_name};
     use gpui_kit::{Bounds, Pixels, point, px, size};
     use crate::tree_model::TreeRow;
     use fude_fs::RelPath;
@@ -589,6 +620,15 @@ mod tests {
         // 新規は作ったものを選ぶ。
         assert_eq!(selection_after_edit(EditKind::NewFolder, Some(&r("a.txt")), &r("src"), &r("src/new")), Some(r("src/new")));
         assert_eq!(selection_after_edit(EditKind::NewFile, None, &r("src"), &r("src/n.rs")), Some(r("src/n.rs")));
+    }
+
+    #[test]
+    fn only_one_menu_item_lights() {
+        // マウスで出したメニューはホバーだけで光る。
+        assert_eq!(item_light(None, 2), ItemLight::Hover);
+        // キーで選んでいる間は、選んだ項目だけが光り、ほかはホバーしても光らない。
+        assert_eq!(item_light(Some(2), 2), ItemLight::Selected);
+        assert_eq!(item_light(Some(2), 3), ItemLight::Off);
     }
 
     #[test]

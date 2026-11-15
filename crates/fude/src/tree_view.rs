@@ -46,20 +46,6 @@ gpui_kit::actions!(
 /// 絞り込み欄の中の文脈。
 const TREE_FILTER_INPUT: &str = "TreeFilter > Input";
 
-/// ツリーの本体で打った文字。修飾キーが Shift だけか無しで、空白でない 1 文字のときだけ返す。
-pub(crate) fn typed_char(keystroke: &Keystroke) -> Option<&str> {
-    let m = &keystroke.modifiers;
-    if m.control || m.alt || m.platform || m.function {
-        return None;
-    }
-    let ch = keystroke.key_char.as_deref()?;
-    let mut chars = ch.chars();
-    let c = chars.next()?;
-    if chars.next().is_some() || c.is_whitespace() || c.is_control() {
-        return None;
-    }
-    Some(ch)
-}
 
 /// ツリーの取り消しとやり直しが効く文脈。入力欄と絞り込み欄の中では、入力欄の取り消しを優先する。
 const TREE_NOT_INPUT: &str = "Tree && !Input";
@@ -163,6 +149,10 @@ impl WorkspaceView {
                 InputEvent::Change => {
                     let query = state.read(cx).value().to_string();
                     this.set_tree_filter(query, cx);
+                    // ツリーの本体で打った文字（本体は欄を入力の受け手にしている）なら、そのまま欄へ移る。
+                    if this.tree.focus.is_focused(window) {
+                        state.update(cx, |s, cx| s.focus(window, cx));
+                    }
                 }
                 // 絞り込み欄の Enter は、先頭のファイルの候補を開く。
                 InputEvent::PressEnter { .. } => {
@@ -214,6 +204,8 @@ impl WorkspaceView {
     /// ターミナルへ戻すので使わない。
     pub(crate) fn open_tree_file(&mut self, project: ProjectId, rel: RelPath, window: &mut Window, cx: &mut Context<Self>) {
         self.tree.open = false;
+        // ビューを作り終えるまでの間（その間にタブを替えるとエディタへ移らない）も、キーが届くところに置く。
+        window.focus(&self.focus, cx);
         self.open_in_editor(project, rel.as_str().to_string(), None, None, window, cx);
         cx.notify();
     }
@@ -259,23 +251,6 @@ impl WorkspaceView {
         } else if let Some(project) = self.workspace.active_project().map(|p| p.id) {
             self.open_tree_file(project, row.rel, window, cx);
         }
-    }
-
-    /// 本体で打った文字を絞り込み欄の末尾に足し、欄へ移る。本体にフォーカスがあるときだけ（入力欄の中の
-    /// 打鍵は入力欄が受け取る）。
-    fn type_into_tree_filter(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tree.focus.is_focused(window) {
-            return;
-        }
-        let (Some(ch), Some(filter)) = (typed_char(&ev.keystroke), self.tree.filter.clone()) else { return };
-        let ch = ch.to_string();
-        filter.update(cx, |s, cx| {
-            // replace_all はカーソルを末尾に置き、Change を出す（絞り込みが動く）。
-            let value = format!("{}{ch}", s.value());
-            s.replace_all(value, window, cx);
-            s.focus(window, cx);
-        });
-        cx.stop_propagation();
     }
 
     /// 絞り込み欄からリストへ戻る。↓ は先頭の行を選ぶ。Esc は欄が空でなければ空にし、空ならツリーを閉じる。
@@ -484,11 +459,20 @@ impl WorkspaceView {
         }
         let measure = {
             let view = cx.entity().downgrade();
+            let focus = self.tree.focus.clone();
+            let filter = self.tree.filter.clone();
             canvas(
                 move |bounds, _, cx| {
                     view.update(cx, |this, _| this.tree.list_bounds = bounds).ok();
                 },
-                |_, _, _, _| {},
+                // 本体にフォーカスがある間は、絞り込み欄を文字の入力の受け手にする。打った文字も IME の変換も
+                // AltGr の文字も、そのまま欄に入る（入った時点で欄へフォーカスを移す）。受け手が無いと、GPUI は
+                // IME を窓から外してしまう。
+                move |bounds, _, window, cx| {
+                    if let Some(filter) = filter {
+                        window.handle_input(&focus, ElementInputHandler::new(bounds, filter), cx);
+                    }
+                },
             )
             .absolute()
             .inset_0()
@@ -621,8 +605,6 @@ impl WorkspaceView {
                 .on_action(cx.listener(|this, _: &TreeMenu, window, cx| this.open_tree_menu_by_key(window, cx)))
                 .on_action(cx.listener(|this, _: &TreeFilterDown, window, cx| this.leave_tree_filter(false, window, cx)))
                 .on_action(cx.listener(|this, _: &TreeFilterCancel, window, cx| this.leave_tree_filter(true, window, cx)))
-                // 本体で文字を打ったら、その文字から絞り込み欄に入る。
-                .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.type_into_tree_filter(ev, window, cx)))
                 // 絞り込み欄は、消すものが無いときに Esc を親へ回す。
                 .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| this.close_tree(window, cx)))
                 // 重ねて出したとき、下のターミナルにクリックを渡さない。
@@ -658,31 +640,5 @@ impl WorkspaceView {
                         .child(list),
                 ),
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::typed_char;
-    use gpui_kit::Keystroke;
-
-    fn key(spec: &'static str, ch: Option<&str>) -> Keystroke {
-        let mut k = Keystroke::parse(spec).unwrap();
-        k.key_char = ch.map(str::to_string);
-        k
-    }
-
-    #[test]
-    fn typed_char_accepts_plain_and_shift() {
-        assert_eq!(typed_char(&key("a", Some("a"))), Some("a"));
-        assert_eq!(typed_char(&key("shift-a", Some("A"))), Some("A"));
-    }
-
-    #[test]
-    fn typed_char_rejects_modifiers_and_space() {
-        assert_eq!(typed_char(&key("ctrl-a", Some("a"))), None);
-        assert_eq!(typed_char(&key("alt-a", Some("a"))), None);
-        assert_eq!(typed_char(&key("space", Some(" "))), None);
-        assert_eq!(typed_char(&key("f2", None)), None);
     }
 }

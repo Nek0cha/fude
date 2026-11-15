@@ -93,6 +93,12 @@ pub(crate) fn after_removal(rows: &[RowSlot], removed: &RelPath) -> Option<RelPa
     next.or_else(prev).map(|row| row.rel.clone())
 }
 
+/// 削除が済んだときに選ぶ行。消した行がまだ並びにあれば今の並びで決め、監視の読み直しで先に消えていれば
+/// 確認の前に決めておいた planned にする。
+pub(crate) fn next_after_delete(rows: &[RowSlot], removed: &RelPath, planned: Option<RelPath>) -> Option<RelPath> {
+    if selected_row(rows, Some(removed)).is_some() { after_removal(rows, removed) } else { planned }
+}
+
 /// 並びの先頭のファイルの行（フォルダは飛ばす）。
 pub(crate) fn first_file(rows: &[RowSlot]) -> Option<RelPath> {
     entries(rows).find(|(_, row)| !row.is_dir).map(|(_, row)| row.rel.clone())
@@ -108,7 +114,7 @@ pub(crate) fn page_rows(list_height: f32, row_height: f32) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Horizontal, NavKey, after_removal, first_file, horizontal, move_selection, page_rows};
+    use super::{Horizontal, NavKey, after_removal, first_file, horizontal, move_selection, next_after_delete, page_rows};
     use crate::tree_model::{RowSlot, TreeRow};
     use fude_fs::RelPath;
 
@@ -220,6 +226,16 @@ mod tests {
         assert_eq!(after_removal(&rows, &rel("a.txt")), Some(rel("b.txt")));
         assert_eq!(after_removal(&rows, &rel("b.txt")), Some(rel("a.txt")));
         assert_eq!(after_removal(&[entry("a.txt", 0, false, false)], &rel("a.txt")), None);
+    }
+
+    #[test]
+    fn next_after_delete_falls_back_to_planned() {
+        let rows = sample();
+        // 消した行がまだ並びにあれば、今の並びで決める。
+        assert_eq!(next_after_delete(&rows, &rel("a.txt"), Some(rel("e"))), Some(rel("b.txt")));
+        // 監視の読み直しで先に消えていたら、確認の前に決めておいた行にする。
+        assert_eq!(next_after_delete(&rows, &rel("gone"), Some(rel("e"))), Some(rel("e")));
+        assert_eq!(next_after_delete(&rows, &rel("gone"), None), None);
     }
 
     #[test]
