@@ -6,6 +6,7 @@ pub fn language_for(rel: &str) -> Option<&'static str> {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     match name {
         "Makefile" | "makefile" | "GNUmakefile" => return Some("make"),
+        "Gemfile" | "Rakefile" => return Some("ruby"),
         _ => {}
     }
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase())?;
@@ -27,6 +28,11 @@ pub fn language_for(rel: &str) -> Option<&'static str> {
         "cpp" | "cc" | "cxx" | "hpp" | "hh" => "cpp",
         "sql" => "sql",
         "lua" => "lua",
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "rb" | "rake" | "gemspec" => "ruby",
+        "php" | "phtml" => "php",
+        // Swift と C# は gpui-kit 0.9.1 の色付けの規則が空なので入れない。
         _ => return None,
     })
 }
@@ -48,5 +54,15 @@ mod tests {
         assert_eq!(language_for("Makefile"), Some("make"));
         assert_eq!(language_for("README"), None);
         assert_eq!(language_for("a.unknown"), None);
+    }
+
+    #[test]
+    fn language_for_jvm_and_scripting() {
+        assert_eq!(language_for("src/Main.java"), Some("java"));
+        assert_eq!(language_for("app/A.kt"), Some("kotlin"));
+        assert_eq!(language_for("build.gradle.kts"), Some("kotlin"));
+        assert_eq!(language_for("lib/a.rb"), Some("ruby"));
+        assert_eq!(language_for("Gemfile"), Some("ruby"));
+        assert_eq!(language_for("index.php"), Some("php"));
     }
 }
