@@ -79,6 +79,58 @@ pub fn set_value(text: &str, path: &[&str], value: EditValue) -> Result<String, 
     Ok(format!("{bom}{out}"))
 }
 
+/// text の path の項目を消した文面を返す（「自動」「テーマの色に戻す」のため）。行ごと消し、ほかの行とコメントは残す。
+/// 項目が無ければ元のまま。インライン表やドット付きのキーは toml_edit で消す。
+pub fn remove_value(text: &str, path: &[&str]) -> Result<String, EditError> {
+    if matches!(parse(text), ParseOutcome::Unreadable(_)) {
+        return Err(EditError::Unreadable);
+    }
+    let (bom, body) = match text.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", text),
+    };
+    let (key, tables) = path.split_last().expect("path は空でない");
+    let mut doc: DocumentMut = body.parse().map_err(|_| EditError::Unreadable)?;
+    let Some(item) = item_mut(doc.as_item_mut(), tables) else {
+        return Ok(text.to_string());
+    };
+    let Some(table) = item.as_table_like_mut() else { return Ok(text.to_string()) };
+    if table.get(key).is_none() {
+        return Ok(text.to_string());
+    }
+    // 表の見出しの下に `key = ...` の 1 行で書いてあれば、その行だけを消す（前のコメントを残すため）。
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let header = tables.join(".");
+    let mut in_table = tables.is_empty();
+    let mut found = None;
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(name) = header_name(line) {
+            in_table = name == header;
+            continue;
+        }
+        let is_key = line.trim_start().strip_prefix(key).is_some_and(|r| r.trim_start().starts_with('='));
+        if in_table && is_key {
+            found = Some(i);
+            break;
+        }
+    }
+    let out = match found {
+        Some(i) => lines.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, l)| *l).collect::<String>(),
+        None => {
+            table.remove(key);
+            let mut out = doc.to_string();
+            if body.contains("\r\n") {
+                out = out.replace("\r\n", "\n").replace('\n', "\r\n");
+            }
+            out
+        }
+    };
+    if matches!(parse(&out), ParseOutcome::Unreadable(_)) {
+        return Err(EditError::WouldBreak);
+    }
+    Ok(format!("{bom}{out}"))
+}
+
 /// names の先の項目（表かインライン表）。Item::get_mut は無いキーを作ってしまうので、TableLike で探す。
 fn item_mut<'a>(mut item: &'a mut Item, names: &[&str]) -> Option<&'a mut Item> {
     for name in names {
@@ -228,6 +280,20 @@ mod tests {
     fn default_value_is_still_written() {
         let out = set_value(DEFAULT_CONFIG, &["theme"], EditValue::Str("fude".into())).unwrap();
         assert!(out.lines().any(|l| l == "theme = \"fude\""));
+    }
+
+    #[test]
+    fn remove_value_drops_line_and_keeps_comments() {
+        let text = "# a\naccent = \"#ff0080\"  # c\ntheme = \"fude\"\n";
+        assert_eq!(remove_value(text, &["accent"]).unwrap(), "# a\ntheme = \"fude\"\n");
+        let crlf = text.replace('\n', "\r\n");
+        assert_eq!(remove_value(&crlf, &["accent"]).unwrap(), "# a\r\ntheme = \"fude\"\r\n");
+        assert_eq!(remove_value(text, &["font", "line_height"]).unwrap(), text);
+        let nested = "[font]\n# line_height = 18\nline_height = 22\nsize = 14\n";
+        assert_eq!(remove_value(nested, &["font", "line_height"]).unwrap(), "[font]\n# line_height = 18\nsize = 14\n");
+        let inline = "font = { size = 14, line_height = 22 }\n";
+        assert!(!remove_value(inline, &["font", "line_height"]).unwrap().contains("line_height"));
+        assert_eq!(remove_value("theme = ", &["theme"]), Err(EditError::Unreadable));
     }
 
     #[test]

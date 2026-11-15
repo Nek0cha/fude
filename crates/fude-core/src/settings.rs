@@ -64,6 +64,23 @@ impl ThemeId {
         }
     }
 
+    /// 設定パネルに出す名前。
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeId::Fude => "fude",
+            ThemeId::Oled => "OLED",
+            ThemeId::GithubDark => "GitHub Dark",
+            ThemeId::GithubDarkDimmed => "GitHub Dark Dimmed",
+            ThemeId::OneDarkPro => "One Dark Pro",
+            ThemeId::Dracula => "Dracula",
+            ThemeId::TokyoNight => "Tokyo Night",
+            ThemeId::TokyoNightStorm => "Tokyo Night Storm",
+            ThemeId::CatppuccinMocha => "Catppuccin Mocha",
+            ThemeId::CatppuccinMacchiato => "Catppuccin Macchiato",
+            ThemeId::CatppuccinFrappe => "Catppuccin Frappé",
+        }
+    }
+
     pub fn from_name(name: &str) -> Option<ThemeId> {
         ThemeId::ALL.into_iter().find(|id| id.name() == name)
     }
@@ -108,6 +125,8 @@ pub struct FontSettings {
     pub size: f32,
     /// ターミナルとエディタの行の高さ（px）。書かなければ size の 1.3 倍。
     pub line_height: f32,
+    /// 行の高さを設定ファイルに書いたか（書いていなければ、文字の大きさに合わせて変わる）。
+    pub line_height_explicit: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -172,7 +191,7 @@ impl Default for Settings {
             theme: ThemeId::Fude,
             accent: None,
             window: WindowSettings { background_opacity: DEFAULT_OPACITY, blur: true },
-            font: FontSettings { ui: None, mono: DEFAULT_MONO.into(), size: DEFAULT_FONT_SIZE, line_height: line_height_for(DEFAULT_FONT_SIZE) },
+            font: FontSettings { ui: None, mono: DEFAULT_MONO.into(), size: DEFAULT_FONT_SIZE, line_height: line_height_for(DEFAULT_FONT_SIZE), line_height_explicit: false },
             cursor: CursorSettings { shape: CursorShape::Block, blink: false },
             terminal: TerminalSettings { shell: NativeShell::Auto, wsl_distro: None, shift_enter: b"\x1b\r".to_vec() },
             close: CloseSettings { confirm_running: true, on_last_project: LastProjectClosed::Home },
@@ -313,7 +332,9 @@ pub fn parse(text: &str) -> ParseOutcome {
             let ok = Some(v).filter(|v| *v >= f64::from(size) && *v <= 64.0);
             r.check(ok, line, "font.line_height", "文字の大きさ以上、64 以下の数で書いてください")
         })
-        .map_or(line_height_for(size), |v| v as f32);
+        .map(|v| v as f32);
+    let line_height_explicit = line_height.is_some();
+    let line_height = line_height.unwrap_or(line_height_for(size));
 
     let shape = r
         .string(cursor, Some("cursor"), "shape")
@@ -379,7 +400,7 @@ pub fn parse(text: &str) -> ParseOutcome {
         theme,
         accent,
         window: WindowSettings { background_opacity, blur },
-        font: FontSettings { ui, mono, size, line_height },
+        font: FontSettings { ui, mono, size, line_height, line_height_explicit },
         cursor: CursorSettings { shape, blink },
         terminal: TerminalSettings { shell, wsl_distro, shift_enter },
         close: CloseSettings { confirm_running, on_last_project },
@@ -602,6 +623,22 @@ mod tests {
         let (settings, issues) = ok("[font]\nsize = 40\n");
         assert_eq!(settings.font.size, 14.0);
         assert_eq!(issues.len(), 1);
+    }
+
+    #[test]
+    fn line_height_explicit_only_when_written() {
+        assert!(!ok("[font]\nsize = 14\n").0.font.line_height_explicit);
+        assert!(ok("[font]\nsize = 14\nline_height = 22\n").0.font.line_height_explicit);
+        assert!(!ok("[font]\nsize = 14\nline_height = 10\n").0.font.line_height_explicit);
+        assert!(!Settings::default().font.line_height_explicit);
+    }
+
+    #[test]
+    fn every_theme_has_label() {
+        let labels: std::collections::HashSet<&str> = ThemeId::ALL.iter().map(|t| t.label()).collect();
+        assert_eq!(labels.len(), ThemeId::ALL.len());
+        assert!(labels.iter().all(|l| !l.is_empty()));
+        assert_eq!(ThemeId::CatppuccinFrappe.label(), "Catppuccin Frappé");
     }
 
     #[test]
