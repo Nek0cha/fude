@@ -171,6 +171,20 @@ pub fn mono_font() -> Font {
     font(fonts().mono)
 }
 
+/// 起動時の GPUI Kit の既定の構文の色。構文の色を持たないテーマに戻したときに使う
+/// （apply_component_theme は今の色を写して書き換えるので、写しておかないと直前のテーマの色が残る）。
+struct KitDefaultSyntax(gpui_kit::component::highlighter::SyntaxColors);
+
+impl Global for KitDefaultSyntax {}
+
+/// テーマの構文の色。持たなければ GPUI Kit の既定の色。
+fn syntax_for(
+    palette: Option<&crate::themes::SyntaxPalette>,
+    default: &gpui_kit::component::highlighter::SyntaxColors,
+) -> gpui_kit::component::highlighter::SyntaxColors {
+    palette.map_or_else(|| default.clone(), kit_syntax)
+}
+
 /// fude の構文の色を GPUI Kit の SyntaxColors にする。ThemeStyle のフィールドが非公開なので JSON から作る。
 pub fn kit_syntax(p: &crate::themes::SyntaxPalette) -> gpui_kit::component::highlighter::SyntaxColors {
     let c = |v: u32| serde_json::json!({ "color": format!("#{v:06x}") });
@@ -212,6 +226,14 @@ pub fn apply_component_theme(cx: &mut gpui_kit::App) {
     use gpui_kit::component::{Theme as KitTheme, ThemeMode};
     let fude = *cx.global::<Theme>();
     KitTheme::change(ThemeMode::Dark, None, cx);
+    let default = match cx.try_global::<KitDefaultSyntax>() {
+        Some(d) => d.0.clone(),
+        None => {
+            let d = KitTheme::global(cx).highlight_theme.style.syntax.clone();
+            cx.set_global(KitDefaultSyntax(d.clone()));
+            d
+        }
+    };
     let t = KitTheme::global_mut(cx);
     let clear = gpui_kit::hsla(0., 0., 0., 0.);
     let fonts = fonts();
@@ -236,9 +258,7 @@ pub fn apply_component_theme(cx: &mut gpui_kit::App) {
     highlight.style.editor_foreground = Some(fude.fg_default.into());
     highlight.style.editor_line_number = Some(gpui_kit::Hsla::from(fude.fg_dim).opacity(0.6));
     highlight.style.editor_active_line_number = Some(fude.fg_dim.into());
-    if let Some(syntax) = &fude.syntax {
-        highlight.style.syntax = kit_syntax(syntax);
-    }
+    highlight.style.syntax = syntax_for(fude.syntax.as_ref(), &default);
     t.highlight_theme = std::sync::Arc::new(highlight);
 }
 
@@ -251,6 +271,16 @@ mod tests {
         assert_eq!(ease_out_quint(0.0), 0.0);
         assert_eq!(ease_out_quint(1.0), 1.0);
         assert!(ease_out_quint(0.5) > 0.9);
+    }
+
+    /// 構文の色を持たないテーマ（fude、oled）は、直前のテーマの色ではなく GPUI Kit の既定の色にする。
+    #[test]
+    fn theme_without_syntax_uses_kit_default() {
+        use super::{kit_syntax, syntax_for};
+        let dracula = crate::themes::colors(fude_core::settings::ThemeId::Dracula).syntax.unwrap();
+        let default = gpui_kit::component::highlighter::SyntaxColors::default();
+        assert_eq!(syntax_for(None, &default), default);
+        assert_eq!(syntax_for(Some(&dracula), &default), kit_syntax(&dracula));
     }
 
     #[test]
