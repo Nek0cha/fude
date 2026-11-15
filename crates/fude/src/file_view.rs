@@ -21,6 +21,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::dialog::error_text;
+use crate::image_preview::{
+    ImageKind, MediaKind, image_body, image_caption, image_kind, media_body, media_kind, raster_error, raster_size,
+};
 use crate::language::language_for;
 use crate::md_preview::MdPreview;
 use crate::theme::{Theme, mono_font, popup_shadow, size, ui_font};
@@ -47,6 +50,28 @@ pub(crate) fn initial_mode(mark: Option<GitMark>) -> FileMode {
 /// 差分／全体の切り替えを出すか（Git で変更があるファイルだけ）。
 pub(crate) fn has_diff(mark: Option<GitMark>) -> bool {
     matches!(mark, Some(GitMark::Modified | GitMark::Added | GitMark::Deleted))
+}
+
+/// 表示／ソースの切り替えを持つか（Markdown と SVG）。
+pub(crate) fn has_view_toggle(rel: &str) -> bool {
+    is_markdown(rel) || image_kind(rel) == Some(ImageKind::Svg)
+}
+
+/// 差分の切り替えを出すか。ラスター画像は差分を出さない。
+pub(crate) fn diff_available(rel: &str, mark: Option<GitMark>) -> bool {
+    has_diff(mark) && !matches!(image_kind(rel), Some(ImageKind::Raster(_))) && media_kind(rel).is_none()
+}
+
+/// SVG を画像として出すか。text_loaded は中身を文字として読めたか（誤りの文を出していないか）、
+/// showing_diff は差分を出しているか。
+pub(crate) fn svg_as_image(text_loaded: bool, showing_diff: bool, md: MdMode) -> bool {
+    text_loaded && !showing_diff && md == MdMode::Preview
+}
+
+/// 表示／ソースを切り替えたあと、FileView 自体にフォーカスを移すか。image_after は切り替え後に
+/// エディタを描かないか、editor_focused は切り替え前にエディタがフォーカスを持っていたか。
+pub(crate) fn focus_view_after_toggle(image_after: bool, editor_focused: bool) -> bool {
+    image_after && editor_focused
 }
 
 /// 保存が終わった時点のエディタの中身 current が、保存した中身 saved と違えば未保存のまま。
@@ -215,6 +240,10 @@ enum Body {
     Loading,
     Error(String),
     Text { doc: TextDoc, editor: Entity<EditorState>, gutter: GutterDecorationCollection },
+    /// ラスター画像（編集しない）。caption は下に添える文。
+    Image { image: Arc<Image>, caption: String },
+    /// 動画と音声（中身は読まない）。
+    Media(MediaKind),
 }
 
 pub struct FileView {
@@ -242,6 +271,10 @@ pub struct FileView {
     pub(crate) md_mode: MdMode,
     /// Markdown のプレビュー。Markdown を読み込んだら作る。
     preview: Option<MdPreview>,
+    /// SVG の「表示」に出す画像と、下に添える文。表示するときに、古ければ作り直す。
+    svg_image: Option<(Arc<Image>, String)>,
+    /// エディタの中身か名前が変わり、svg_image が古い。
+    svg_stale: bool,
     /// エディタ列の幅（論理ピクセル）。表示モードで並べるかを決める。
     column_w: f32,
     /// ピン列に留めているか。描くたびに持ち主が渡す。
@@ -278,6 +311,8 @@ impl FileView {
             auto_mode: false,
             md_mode: MdMode::Preview,
             preview: None,
+            svg_image: None,
+            svg_stale: true,
             column_w: 1000.0,
             pinned: false,
             blocks: None,
@@ -287,6 +322,8 @@ impl FileView {
             focus: cx.focus_handle(),
             _subs: Vec::new(),
         };
+        // 閉じたら、GPUI に残る画像の読み込み済みの中身を捨てる。
+        this._subs.push(cx.on_release(|this, cx| this.drop_images(cx)));
         this.load(cx);
         this
     }
@@ -340,6 +377,8 @@ impl FileView {
             p.set_md_rel(rel.clone());
         }
         self.rel = rel;
+        // 名前の変更で SVG になったときも、表示するときに絵を作る。
+        self.svg_stale = true;
         self.on_external_change(cx);
         cx.notify();
     }
@@ -366,23 +405,67 @@ impl FileView {
         is_markdown(&self.rel)
     }
 
+    fn is_svg(&self) -> bool {
+        image_kind(&self.rel) == Some(ImageKind::Svg)
+    }
+
+    /// SVG を画像として出しているか。
+    fn svg_shown(&self) -> bool {
+        self.is_svg() && svg_as_image(matches!(self.body, Body::Text { .. }), self.showing_diff(), self.md_mode)
+    }
+
+    /// エディタを描かず、画像だけを出しているか。
+    fn image_only(&self) -> bool {
+        self.svg_shown() || matches!(self.body, Body::Image { .. }) || self.layout() == MdBody::PreviewOnly
+    }
+
+    /// 画像の読み込み済みの中身を GPUI から捨てる（作り直すときと閉じるとき）。
+    fn drop_images(&mut self, cx: &mut App) {
+        if let Some((image, _)) = self.svg_image.take() {
+            image.remove_asset(cx);
+        }
+        if let Body::Image { image, .. } = &self.body {
+            image.clone().remove_asset(cx);
+        }
+    }
+
+    /// SVG の「表示」に出す画像を、古ければエディタの中身から作り直す。
+    fn refresh_svg_image(&mut self, cx: &mut App) {
+        if !self.svg_shown() || (!self.svg_stale && self.svg_image.is_some()) {
+            return;
+        }
+        let Body::Text { editor, .. } = &self.body else { return };
+        let text = editor.read(cx).value().to_string();
+        if let Some((old, _)) = self.svg_image.take() {
+            old.remove_asset(cx);
+        }
+        let caption = image_caption(None, text.len());
+        self.svg_image = Some((Arc::new(Image::from_bytes(ImageFormat::Svg, text.into_bytes())), caption));
+        self.svg_stale = false;
+    }
+
     /// 差分を出しているか（差分の表示中で、差分がある）。
     fn showing_diff(&self) -> bool {
         self.mode == FileMode::Diff && self.diff.is_some()
     }
 
     /// 表示モードかソースモードにする。差分の表示中なら、全体の表示に切り替えてから。
-    pub(crate) fn set_md_mode(&mut self, md: MdMode, cx: &mut Context<Self>) {
+    pub(crate) fn set_md_mode(&mut self, md: MdMode, window: &mut Window, cx: &mut Context<Self>) {
+        let editor_focused = self.source_focused(window, cx);
         if self.mode == FileMode::Diff {
             self.set_mode(FileMode::Full, cx);
         }
         self.md_mode = md;
+        // エディタが描かれなくなると、フォーカスが宙に浮いて ⌘E や Esc が届かなくなる。
+        if focus_view_after_toggle(self.image_only(), editor_focused) {
+            window.focus(&self.focus, cx);
+        }
         cx.notify();
     }
 
     /// ⌘E / Ctrl+E。差分の表示中は全体の表示にするだけ（今のモードのまま）。Markdown でなければ何もしない。
-    pub(crate) fn toggle_md_mode(&mut self, cx: &mut Context<Self>) {
-        if !self.is_md() {
+    pub(crate) fn toggle_md_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !has_view_toggle(&self.rel) {
             return;
         }
         if self.showing_diff() {
@@ -390,7 +473,7 @@ impl FileView {
             return;
         }
         let next = if self.md_mode == MdMode::Preview { MdMode::Source } else { MdMode::Preview };
-        self.set_md_mode(next, cx);
+        self.set_md_mode(next, window, cx);
     }
 
     /// 本文の出し方。
@@ -401,6 +484,11 @@ impl FileView {
 
     /// Markdown のテキストを読み込んだら、プレビューを作るか中身を替える。
     fn sync_preview(&mut self, cx: &mut Context<Self>) {
+        if self.is_svg() {
+            // 作り直すのは表示するとき（打つたびには作らない）。
+            self.svg_stale = true;
+            return;
+        }
         let Body::Text { editor, .. } = &self.body else { return };
         if !self.is_md() {
             return;
@@ -567,6 +655,12 @@ impl FileView {
 
     /// ファイルと差分を裏で読む。
     fn load(&mut self, cx: &mut Context<Self>) {
+        // 動画と音声は大きいことが多く、ここでは再生もしないので読まない。
+        if let Some(kind) = media_kind(&self.rel) {
+            self.body = Body::Media(kind);
+            cx.notify();
+            return;
+        }
         let fs = self.fs.clone();
         let rel = self.rel_path();
         let task = cx.background_spawn(async move { fs.read(&rel?) });
@@ -579,7 +673,7 @@ impl FileView {
     }
 
     fn load_diff(&mut self, cx: &mut Context<Self>) {
-        if !has_diff(self.mark) {
+        if !diff_available(&self.rel, self.mark) {
             self.diff = None;
             self.update_gutter(&[], cx);
             return;
@@ -664,6 +758,19 @@ impl FileView {
                 return;
             }
         };
+        if let Some(ImageKind::Raster(format)) = image_kind(&self.rel) {
+            self.drop_images(cx);
+            self.body = match raster_error(bytes.len()) {
+                Some(msg) => Body::Error(msg),
+                None => {
+                    let caption = image_caption(raster_size(&bytes), bytes.len());
+                    Body::Image { image: Arc::new(Image::from_bytes(format, bytes.clone())), caption }
+                }
+            };
+            self.disk = Some(bytes);
+            cx.notify();
+            return;
+        }
         let doc = match decode_text(&bytes) {
             Ok(doc) => doc,
             Err(e) => {
@@ -762,7 +869,7 @@ impl FileView {
     /// 全体の表示で選んでいる行（1 始まり）。差分の表示や、選んでいないときは None。
     fn selected_lines(&self, cx: &App) -> Option<(u32, u32)> {
         let Body::Text { editor, .. } = &self.body else { return None };
-        if self.mode == FileMode::Diff && self.diff.is_some() {
+        if self.svg_shown() || (self.mode == FileMode::Diff && self.diff.is_some()) {
             return None;
         }
         let e = editor.read(cx);
@@ -778,7 +885,7 @@ impl FileView {
     /// 選択の右上に重ねる小さなボタン。選択が空か、見えていないときは出さない。
     fn render_selection_button(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let Body::Text { editor, .. } = &self.body else { return None };
-        if matches!(self.layout(), MdBody::Diff | MdBody::PreviewOnly) {
+        if self.svg_shown() || matches!(self.layout(), MdBody::Diff | MdBody::PreviewOnly) {
             return None;
         }
         let e = editor.read(cx);
@@ -826,6 +933,9 @@ impl FileView {
 
     /// 監視からの「このファイルが変わった」。自分の保存と同じ中身なら何もしない。
     pub fn on_external_change(&mut self, cx: &mut Context<Self>) {
+        if media_kind(&self.rel).is_some() {
+            return;
+        }
         let fs = self.fs.clone();
         let rel = self.rel_path();
         let task = cx.background_spawn(async move { fs.read(&rel?) });
@@ -912,7 +1022,7 @@ impl FileView {
         let segments = |a: Stateful<Div>, b: Stateful<Div>| {
             div().flex().flex_row().p(px(2.)).rounded(size::RADIUS_SM).border_1().border_color(theme.border_subtle).child(a).child(b)
         };
-        if has_diff(self.mark) {
+        if diff_available(&self.rel, self.mark) {
             let diff_on = self.mode == FileMode::Diff;
             row = row.child(segments(
                 seg("fv-diff", "差分", diff_on).on_click(cx.listener(|this, _, _, cx| this.set_mode(FileMode::Diff, cx))),
@@ -943,15 +1053,17 @@ impl FileView {
                     .child(icon(IconName::Pin, color))
                     .on_click(cx.listener(|this, _, _, cx| cx.emit(FileViewEvent::TogglePin(this.rel.clone())))),
             );
+        }
+        if has_view_toggle(&self.rel) {
             // 差分の表示中は、どちらも選んでいない見た目にする。
             let shown = !self.showing_diff();
             let preview_on = shown && self.md_mode == MdMode::Preview;
             let source_on = shown && self.md_mode == MdMode::Source;
             row = row.child(segments(
                 seg("fv-md-preview", "表示", preview_on)
-                    .on_click(cx.listener(|this, _, _, cx| this.set_md_mode(MdMode::Preview, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.set_md_mode(MdMode::Preview, window, cx))),
                 seg("fv-md-source", "ソース", source_on)
-                    .on_click(cx.listener(|this, _, _, cx| this.set_md_mode(MdMode::Source, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.set_md_mode(MdMode::Source, window, cx))),
             ));
         }
         row.child(
@@ -1028,8 +1140,20 @@ impl Render for FileView {
         if layout == MdBody::Split {
             self.sync_scroll(window, cx);
         }
-        let body: AnyElement = match (layout, &self.diff, &self.body) {
+        self.refresh_svg_image(cx);
+        let svg = self.svg_image.clone().filter(|_| self.svg_shown());
+        let image_only = self.image_only();
+        let body: AnyElement = if let Some((image, caption)) = svg {
+            image_body(image, caption, &theme).into_any_element()
+        } else {
+            match (layout, &self.diff, &self.body) {
             (MdBody::Diff, Some(state), _) => Diff::new(state).into_any_element(),
+            (_, _, Body::Image { image, caption }) => image_body(image.clone(), caption.clone(), &theme).into_any_element(),
+            (_, _, Body::Media(kind)) => {
+                let mut path = self.root.host_path();
+                path.extend(self.rel.split('/'));
+                media_body(*kind, &theme, move |_, cx| cx.open_with_system(&path)).into_any_element()
+            }
             (_, _, Body::Text { editor, .. }) => {
                 let source = || Editor::new(editor).bordered(false).appearance(false).h_full();
                 let preview = self.render_preview(cx);
@@ -1074,6 +1198,7 @@ impl Render for FileView {
                 .child(msg.clone())
                 .into_any_element(),
             (_, _, Body::Loading) => div().size_full().into_any_element(),
+            }
         };
         div()
             .id("file-view")
@@ -1089,9 +1214,13 @@ impl Render for FileView {
                 this.on_dropped(vec![entry.location.clone()], window, cx);
             }))
             .when(self.is_md(), |d| d.drag_over::<crate::drag::DraggedEntry>(move |s, _, _, _| s.border_1().border_color(accent)))
+            // 画像だけのときは中のエディタが無いので、押したら FileView 自体にフォーカスを当てる。
+            .when(image_only, |d| {
+                d.on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)))
+            })
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_from_key(cx)))
             .on_action(cx.listener(|this, _: &SendToClaude, _, cx| this.send_to_claude(cx)))
-            .on_action(cx.listener(|this, _: &ToggleMarkdownMode, _, cx| this.toggle_md_mode(cx)))
+            .on_action(cx.listener(|this, _: &ToggleMarkdownMode, window, cx| this.toggle_md_mode(window, cx)))
             // ソースにフォーカスがあるキーで動かしたら、ソースがスクロールを先導する（プレビューを読んでいるキーでは奪わない）。
             .on_key_down(cx.listener(|this, _: &KeyDownEvent, window, cx| {
                 if !this.source_focused(window, cx) {
@@ -1119,7 +1248,10 @@ impl Render for FileView {
 
 #[cfg(test)]
 mod tests {
-    use super::{MdBody, MdMode, dirty_after_save, has_diff, initial_mode, md_body, open_error_text};
+    use super::{
+        MdBody, MdMode, diff_available, dirty_after_save, has_diff, has_view_toggle, initial_mode, md_body, open_error_text,
+        focus_view_after_toggle, svg_as_image,
+    };
     use fude_core::panel::FileMode;
     use fude_core::text::OpenError;
     use fude_fs::git::GitMark;
@@ -1162,5 +1294,40 @@ mod tests {
         assert_eq!(md_body(true, FileMode::Full, MdMode::Source, 800.0), MdBody::Editor);
         assert_eq!(md_body(true, FileMode::Diff, MdMode::Preview, 800.0), MdBody::Diff);
         assert_eq!(md_body(false, FileMode::Diff, MdMode::Preview, 800.0), MdBody::Diff);
+    }
+
+    #[test]
+    fn view_toggle_for_markdown_and_svg() {
+        assert!(has_view_toggle("docs/a.md"));
+        assert!(has_view_toggle("icons/a.SVG"));
+        assert!(!has_view_toggle("a.png"));
+        assert!(!has_view_toggle("src/main.rs"));
+    }
+
+    #[test]
+    fn raster_images_have_no_diff() {
+        assert!(!diff_available("a.png", Some(GitMark::Modified)));
+        assert!(diff_available("a.svg", Some(GitMark::Modified)));
+        assert!(diff_available("a.rs", Some(GitMark::Added)));
+        assert!(!diff_available("a.svg", None));
+        assert!(!diff_available("clip.mp4", Some(GitMark::Modified)));
+        assert!(!diff_available("voice.mp3", Some(GitMark::Added)));
+    }
+
+    #[test]
+    fn svg_shows_image_in_preview_outside_diff() {
+        assert!(svg_as_image(true, false, MdMode::Preview));
+        assert!(!svg_as_image(true, false, MdMode::Source));
+        assert!(!svg_as_image(true, true, MdMode::Preview));
+        // 読めなかった（誤りの文を出している）ときは、前の絵を出さない。
+        assert!(!svg_as_image(false, false, MdMode::Preview));
+    }
+
+    #[test]
+    fn focus_moves_to_view_when_editor_disappears() {
+        // ソースにフォーカスがあるまま絵に替わると、エディタが描かれずフォーカスが宙に浮く。
+        assert!(focus_view_after_toggle(true, true));
+        assert!(!focus_view_after_toggle(true, false));
+        assert!(!focus_view_after_toggle(false, true));
     }
 }

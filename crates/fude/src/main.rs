@@ -15,6 +15,7 @@ mod editor_tabs_view;
 mod file_icons;
 mod file_view;
 mod home;
+mod image_preview;
 mod hook_cli;
 mod hook_targets;
 mod hover;
