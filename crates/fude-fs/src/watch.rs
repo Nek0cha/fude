@@ -1,9 +1,10 @@
 //! プロジェクトのファイルの変更を監視する。
 //!
-//! 監視する範囲: ignore の歩き方で得た「無視されないディレクトリ」の集合を持ち、変わったものの親がその集合に
-//! 無ければ捨てる（node_modules や target を読み込まないため。設計書 §2 のアンチゴール）。Linux はその集合の
-//! 各ディレクトリを再帰なしで監視し（inotify の監視数を無視するディレクトリで使い切らないため）、ほかの OS は
-//! ルートを再帰で監視して集合で絞る。`.git` は HEAD、index、refs の変化だけを `git` の印として知らせる。
+//! 監視する範囲: 外していないディレクトリと、外したディレクトリ（IGNORED_DIRS_MAX 個まで。計画8d）の集合を
+//! 持ち、変わったものの親がその集合に無ければ捨てる。外された重いフォルダ（ignored::HIDDEN_DIRS）は入れない
+//! （node_modules や target を読み込まないため。設計書 §2 のアンチゴール）。Linux はその集合の各ディレクトリを
+//! 再帰なしで監視し（inotify の監視数を使い切らないため）、ほかの OS はルートを再帰で監視して集合で絞る。
+//! `.git` は HEAD、index、refs の変化だけを `git` の印として、外す規則の変化を `rules` の印として知らせる。
 
 use std::collections::{BTreeSet, HashSet};
 use std::io;
@@ -27,6 +28,71 @@ pub struct WatchBatch {
     pub changed: Vec<RelPath>,
     /// .git の HEAD、index、refs が変わった（ブランチや状態を読み直す）。
     pub git: bool,
+    /// 外す規則（.gitignore、.ignore、.rgignore、.git/info/exclude）が変わった（外したかの印を読み直す）。
+    #[serde(default)]
+    pub rules: bool,
+}
+
+/// 監視する、外したフォルダの数の上限（Linux の inotify の見張りを使い切らないため）。
+pub const IGNORED_DIRS_MAX: usize = 2_000;
+
+/// 監視するフォルダ。ignored は、そのうち外したフォルダ（上限を数えるため）。
+struct WatchSet {
+    dirs: HashSet<PathBuf>,
+    ignored: HashSet<PathBuf>,
+}
+
+fn is_dir_entry(e: &ignore::DirEntry) -> bool {
+    e.file_type().is_some_and(|t| t.is_dir())
+}
+
+/// start の下の、外したフォルダ（隠す名前のフォルダとその中、.git は除く）を、skip に無いものから max 個まで。
+fn ignored_dirs(start: &Path, skip: &HashSet<PathBuf>, max: usize) -> Vec<PathBuf> {
+    if max == 0 {
+        return Vec::new();
+    }
+    let walker = WalkBuilder::new(start)
+        .standard_filters(false)
+        .hidden(false)
+        .filter_entry(|e| e.file_name() != ".git" && !(is_dir_entry(e) && crate::ignored::is_hidden_dir(&e.file_name().to_string_lossy())))
+        .build();
+    let mut out = Vec::new();
+    for e in walker.flatten().filter(is_dir_entry) {
+        let path = e.into_path();
+        if skip.contains(&path) {
+            continue;
+        }
+        out.push(path);
+        if out.len() >= max {
+            eprintln!("監視する外したフォルダが {max} 個に達したので、残りは見張らない");
+            break;
+        }
+    }
+    out
+}
+
+/// start の下で監視するフォルダ。外していないフォルダはすべて、外したフォルダは ignored_max 個まで。
+fn watch_set(start: &Path, root: &Path, ignored_max: usize) -> WatchSet {
+    let dirs = walk_dirs(start, crate::ignored::in_git_repo(root));
+    let ignored: HashSet<PathBuf> = ignored_dirs(start, &dirs, ignored_max).into_iter().collect();
+    WatchSet { dirs: dirs.union(&ignored).cloned().collect(), ignored }
+}
+
+/// watch_set のフォルダの集合（試験用の入口）。
+#[cfg(test)]
+fn watch_dirs(start: &Path, root: &Path, ignored_max: usize) -> HashSet<PathBuf> {
+    watch_set(start, root, ignored_max).dirs
+}
+
+/// 外す規則のファイルか（root からの相対パス）。
+fn is_rules_file(rel: &Path) -> bool {
+    if rel == Path::new(".git").join("info").join("exclude") {
+        return true;
+    }
+    if rel.starts_with(".git") {
+        return false;
+    }
+    matches!(rel.file_name().and_then(|n| n.to_str()), Some(".gitignore" | ".ignore" | ".rgignore"))
 }
 
 type OnBatch = Box<dyn Fn(WatchBatch) + Send>;
@@ -43,13 +109,13 @@ impl LocalWatcher {
     pub fn start(root: PathBuf, on_batch: OnBatch) -> io::Result<LocalWatcher> {
         let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
         let mut watcher = notify::recommended_watcher(tx).map_err(io::Error::other)?;
-        let dirs = walk_dirs(&root);
+        let set = watch_set(&root, &root, IGNORED_DIRS_MAX);
         let git_dir = root.join(".git");
         if PER_DIR {
-            for dir in &dirs {
+            for dir in &set.dirs {
                 let _ = watcher.watch(dir, RecursiveMode::NonRecursive);
             }
-            for dir in [git_dir.clone(), git_dir.join("refs").join("heads")] {
+            for dir in [git_dir.clone(), git_dir.join("refs").join("heads"), git_dir.join("info")] {
                 let _ = watcher.watch(&dir, RecursiveMode::NonRecursive);
             }
         } else {
@@ -66,17 +132,20 @@ impl LocalWatcher {
         };
         std::thread::Builder::new()
             .name("fude-watch".into())
-            .spawn(move || worker(root, dirs, rx, extra, on_batch))?;
+            .spawn(move || worker(root, set, rx, extra, on_batch))?;
         Ok(LocalWatcher { _watcher: watcher })
     }
 }
 
-/// root の下の、無視されないディレクトリ（start 自身を含む）。.git は含めない。
-fn walk_dirs(start: &Path) -> HashSet<PathBuf> {
+/// start の下の、外していないディレクトリ（start 自身を含む）。.git は含めない。git のリポジトリでなければ、
+/// 隠す名前のフォルダは名前だけで除く。
+fn walk_dirs(start: &Path, in_repo: bool) -> HashSet<PathBuf> {
     WalkBuilder::new(start)
         .hidden(false)
         .parents(true)
-        .filter_entry(|e| e.file_name() != ".git")
+        .filter_entry(move |e| {
+            e.file_name() != ".git" && !(is_dir_entry(e) && crate::ignored::hides_dir(&e.file_name().to_string_lossy(), false, in_repo))
+        })
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_dir()))
@@ -120,13 +189,16 @@ fn changes_content(ev: &notify::Event) -> bool {
 
 fn worker(
     root: PathBuf,
-    mut dirs: HashSet<PathBuf>,
+    set: WatchSet,
     rx: mpsc::Receiver<notify::Result<notify::Event>>,
     mut extra: Option<(RecommendedWatcher, mpsc::Receiver<notify::Result<notify::Event>>)>,
     on_batch: OnBatch,
 ) {
+    let WatchSet { mut dirs, ignored: mut ignored_set } = set;
+    let in_repo = crate::ignored::in_git_repo(&root);
     let mut changed: BTreeSet<String> = BTreeSet::new();
     let mut git = false;
+    let mut rules = false;
     let mut first: Option<Instant> = None;
     loop {
         let wait = first.map_or(Duration::from_millis(100), |t| BATCH.saturating_sub(t.elapsed()));
@@ -143,7 +215,10 @@ fn worker(
             for path in ev.paths {
                 let Ok(rel) = path.strip_prefix(&root) else { continue };
                 if rel.starts_with(".git") {
-                    if is_git_signal(rel) {
+                    if is_rules_file(rel) {
+                        rules = true;
+                        first.get_or_insert_with(Instant::now);
+                    } else if is_git_signal(rel) {
                         git = true;
                         first.get_or_insert_with(Instant::now);
                     }
@@ -153,8 +228,24 @@ fn worker(
                 if !dirs.contains(parent) {
                     continue;
                 }
-                if path.is_dir() && !dirs.contains(&path) && not_ignored(&path) {
-                    let added = walk_dirs(&path);
+                if is_rules_file(rel) {
+                    rules = true;
+                }
+                if path.is_dir() && !dirs.contains(&path) {
+                    // 外したフォルダの中にできたフォルダも、外したものとして数える。
+                    let is_ignored = ignored_set.contains(parent) || !not_ignored(&path);
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let added: HashSet<PathBuf> = if crate::ignored::hides_dir(&name, is_ignored, in_repo) {
+                        HashSet::new()
+                    } else if is_ignored {
+                        let found = ignored_dirs(&path, &dirs, IGNORED_DIRS_MAX.saturating_sub(ignored_set.len()));
+                        ignored_set.extend(found.iter().cloned());
+                        found.into_iter().collect()
+                    } else {
+                        let sub = watch_set(&path, &root, IGNORED_DIRS_MAX.saturating_sub(ignored_set.len()));
+                        ignored_set.extend(sub.ignored);
+                        sub.dirs
+                    };
                     if let Some((w, _)) = extra.as_mut() {
                         for d in &added {
                             let _ = w.watch(d, RecursiveMode::NonRecursive);
@@ -180,6 +271,7 @@ fn worker(
             let batch = WatchBatch {
                 changed: std::mem::take(&mut changed).iter().filter_map(|p| RelPath::new(p).ok()).collect(),
                 git: std::mem::take(&mut git),
+                rules: std::mem::take(&mut rules),
             };
             first = None;
             on_batch(batch);
@@ -291,8 +383,59 @@ mod tests {
     }
 
     #[test]
+    fn ignored_dir_is_reported() {
+        // 外したフォルダ（隠す名前でないもの）の中の変化も知らせる（計画8d）。
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "docs/\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        let (_w, rx) = start(dir.path());
+        std::fs::write(dir.path().join("docs").join("plan.md"), "x").unwrap();
+        let got = wait_for(&rx, Duration::from_secs(2), |b| changed(b).contains(&"docs/plan.md".to_string()));
+        assert!(changed(&got).contains(&"docs/plan.md".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn watch_dirs_caps_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "a/\nb/\nc/\n").unwrap();
+        for d in ["a", "b", "c", "src/ui"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let dirs = watch_dirs(root, root, 2);
+        let ignored = ["a", "b", "c"].iter().filter(|d| dirs.contains(&root.join(d))).count();
+        assert_eq!(ignored, 2, "{dirs:?}");
+        for d in [root.to_path_buf(), root.join("src"), root.join("src").join("ui")] {
+            assert!(dirs.contains(&d), "{dirs:?}");
+        }
+    }
+
+    #[test]
+    fn rules_change_sets_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "a/\n").unwrap();
+        let (_w, rx) = start(dir.path());
+        std::fs::write(dir.path().join(".gitignore"), "a/\nb/\n").unwrap();
+        let got = wait_for(&rx, Duration::from_secs(2), |b| b.iter().any(|x| x.rules));
+        assert!(got.iter().any(|b| b.rules), "{got:?}");
+    }
+
+    #[test]
+    fn is_rules_file_names() {
+        for p in [".gitignore", "src/.ignore", ".rgignore", ".git/info/exclude"] {
+            assert!(is_rules_file(Path::new(p)), "{p}");
+        }
+        for p in ["a.rs", ".git/HEAD", "gitignore"] {
+            assert!(!is_rules_file(Path::new(p)), "{p}");
+        }
+    }
+
+    #[test]
     fn batch_roundtrips_as_json_line() {
-        let b = WatchBatch { changed: vec![RelPath::new("a/b c.rs").unwrap()], git: true };
+        let b = WatchBatch { changed: vec![RelPath::new("a/b c.rs").unwrap()], git: true, rules: true };
         let line = serde_json::to_string(&b).unwrap();
         assert!(!line.contains('\n'));
         assert_eq!(serde_json::from_str::<WatchBatch>(&line).unwrap(), b);
