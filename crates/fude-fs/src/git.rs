@@ -156,6 +156,18 @@ pub fn line_marks(patch: &str) -> Vec<LineMark> {
     marks
 }
 
+/// root で git が管理しているファイル（インデックスにあるもの。`git add -f` したものも含む）の、root からの
+/// 相対パス（"/" 区切り）。under を渡すと、そのフォルダの下だけ。リポジトリでない、git が無い → Ok(None)。
+pub fn index_files(root: &Path, under: Option<&RelPath>) -> io::Result<Option<Vec<String>>> {
+    let mut args = vec!["ls-files", "-z", "--cached", "--"];
+    let dir = under.filter(|u| !u.is_root()).map(|u| u.as_str().to_string());
+    if let Some(dir) = &dir {
+        args.push(dir);
+    }
+    let Some(out) = run_git(root, &args)? else { return Ok(None) };
+    Ok(Some(out.split(|b| *b == 0).filter(|p| !p.is_empty()).map(|p| String::from_utf8_lossy(p).into_owned()).collect()))
+}
+
 /// root の Git の状態。リポジトリでない、git が無い → Ok(None)。
 pub fn git_status(root: &Path) -> io::Result<Option<GitStatus>> {
     let Some(prefix) = run_git(root, &["rev-parse", "--show-prefix"])? else { return Ok(None) };
