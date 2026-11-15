@@ -14,6 +14,8 @@ pub(crate) struct TreeRow {
     pub is_dir: bool,
     pub expanded: bool,
     pub mark: Option<GitMark>,
+    /// gitignore などで外されている（計画8d）。薄く描く。
+    pub ignored: bool,
 }
 
 /// ツリーに描く 1 行。名前の入力欄（計画8b）も行として並べる。
@@ -62,30 +64,36 @@ pub(crate) struct TreeModel {
 #[derive(Default)]
 struct PathTree {
     dirs: BTreeMap<String, PathTree>,
-    files: Vec<String>,
+    /// ファイルの名前と、外したものか。
+    files: Vec<(String, bool)>,
 }
 
 impl PathTree {
-    fn insert(&mut self, parts: &[&str]) {
+    fn insert(&mut self, parts: &[&str], ignored: bool) {
         match parts {
             [] => {}
-            [file] => self.files.push(file.to_string()),
-            [dir, rest @ ..] => self.dirs.entry(dir.to_string()).or_default().insert(rest),
+            [file] => self.files.push((file.to_string(), ignored)),
+            [dir, rest @ ..] => self.dirs.entry(dir.to_string()).or_default().insert(rest, ignored),
         }
+    }
+
+    /// 中のファイルがすべて外したものか（フォルダの行を薄くするか）。
+    fn all_ignored(&self) -> bool {
+        self.files.iter().all(|(_, ignored)| *ignored) && self.dirs.values().all(PathTree::all_ignored)
     }
 
     fn rows(&self, prefix: &str, depth: usize, status: Option<&GitStatus>, out: &mut Vec<TreeRow>) {
         for (name, sub) in &self.dirs {
             let rel = join(prefix, name);
-            out.push(row(&rel, name, depth, true, true, status));
+            out.push(row(&rel, name, depth, true, true, status, sub.all_ignored()));
             sub.rows(&rel, depth + 1, status, out);
         }
         let mut files = self.files.clone();
         files.sort();
-        files.dedup();
-        for name in files {
+        files.dedup_by(|a, b| a.0 == b.0);
+        for (name, ignored) in files {
             let rel = join(prefix, &name);
-            out.push(row(&rel, &name, depth, false, false, status));
+            out.push(row(&rel, &name, depth, false, false, status, ignored));
         }
     }
 }
@@ -94,10 +102,10 @@ fn join(prefix: &str, name: &str) -> String {
     if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") }
 }
 
-fn row(rel: &str, name: &str, depth: usize, is_dir: bool, expanded: bool, status: Option<&GitStatus>) -> TreeRow {
+fn row(rel: &str, name: &str, depth: usize, is_dir: bool, expanded: bool, status: Option<&GitStatus>, ignored: bool) -> TreeRow {
     let rel = RelPath::new(rel).unwrap_or_else(|_| RelPath::root());
     let mark = if is_dir { None } else { status.and_then(|s| s.mark(&rel)) };
-    TreeRow { rel, name: name.to_string(), depth, is_dir, expanded, mark }
+    TreeRow { rel, name: name.to_string(), depth, is_dir, expanded, mark, ignored }
 }
 
 fn parent_of(rel: &RelPath) -> String {
@@ -192,10 +200,11 @@ impl TreeModel {
         if self.filtering() {
             let Some(all) = &self.all_files else { return out };
             let mut tree = PathTree::default();
-            for f in all.tracked.iter().chain(&all.ignored) {
+            let files = all.tracked.iter().map(|f| (f, false)).chain(all.ignored.iter().map(|f| (f, true)));
+            for (f, ignored) in files {
                 let name = f.as_str().rsplit('/').next().unwrap_or_default();
                 if name.to_lowercase().contains(&self.filter) {
-                    tree.insert(&f.as_str().split('/').collect::<Vec<_>>());
+                    tree.insert(&f.as_str().split('/').collect::<Vec<_>>(), ignored);
                 }
             }
             tree.rows("", 0, status, &mut out);
@@ -204,25 +213,39 @@ impl TreeModel {
         if self.changed_only {
             let mut tree = PathTree::default();
             for (p, _) in status.map(|s| s.entries.as_slice()).unwrap_or_default() {
-                tree.insert(&p.as_str().split('/').collect::<Vec<_>>());
+                tree.insert(&p.as_str().split('/').collect::<Vec<_>>(), false);
             }
             tree.rows("", 0, status, &mut out);
             return out;
         }
-        self.dir_rows("", 0, status, &mut out);
+        self.dir_rows("", 0, status, false, &mut out);
         out
     }
 
-    fn dir_rows(&self, dir: &str, depth: usize, status: Option<&GitStatus>, out: &mut Vec<TreeRow>) {
+    /// parent_ignored は dir が外されているか。外したフォルダの子は、すべて外したものとして描く。
+    fn dir_rows(&self, dir: &str, depth: usize, status: Option<&GitStatus>, parent_ignored: bool, out: &mut Vec<TreeRow>) {
         let Some(entries) = self.children.get(dir) else { return };
         for e in entries {
             let rel = join(dir, &e.name);
             let expanded = e.is_dir && self.expanded.contains(&rel);
-            out.push(row(&rel, &e.name, depth, e.is_dir, expanded, status));
+            let ignored = parent_ignored || e.ignored;
+            out.push(row(&rel, &e.name, depth, e.is_dir, expanded, status, ignored));
             if expanded {
-                self.dir_rows(&rel, depth + 1, status, out);
+                self.dir_rows(&rel, depth + 1, status, ignored, out);
             }
         }
+    }
+
+    /// 外す規則が変わったとき。読んだフォルダをすべて読み直し待ちにして返し（浅い順）、全ファイルの一覧も捨てる。
+    pub fn invalidate_all(&mut self) -> Vec<RelPath> {
+        self.all_files = None;
+        let mut dirs: Vec<&String> = self.children.keys().collect();
+        dirs.sort_by_key(|d| (if d.is_empty() { 0 } else { d.matches('/').count() + 1 }, d.as_str()));
+        let dirs: Vec<RelPath> = dirs.into_iter().filter_map(|d| RelPath::new(d).ok()).collect();
+        for d in &dirs {
+            self.stale.insert(d.as_str().to_string());
+        }
+        dirs
     }
 }
 
@@ -326,7 +349,7 @@ mod tests {
 
     fn slot_row(p: &str, depth: usize, is_dir: bool) -> TreeRow {
         let rel = rel(p);
-        TreeRow { name: p.rsplit('/').next().unwrap().into(), rel, depth, is_dir, expanded: is_dir, mark: None }
+        TreeRow { name: p.rsplit('/').next().unwrap().into(), rel, depth, is_dir, expanded: is_dir, mark: None, ignored: false }
     }
 
     /// 作り先のフォルダと祖先をすべて開き、読む必要のあるものを返す（絞り込みからの新規、計画8b）。
@@ -364,5 +387,52 @@ mod tests {
         let slots = rows_with_edit(rows, None);
         assert_eq!(slots.len(), 3);
         assert!(slots.iter().all(|s| matches!(s, RowSlot::Entry(_))));
+    }
+
+    fn ignored_entry(name: &str, is_dir: bool) -> DirEntry {
+        DirEntry { name: name.into(), is_dir, ignored: true }
+    }
+
+    #[test]
+    fn rows_carry_ignored_mark() {
+        let mut m = TreeModel::default();
+        m.set_children(&RelPath::root(), vec![ignored_entry("docs", true), entry("src", true)]);
+        let rows = m.rows(None);
+        assert!(rows[0].ignored);
+        assert!(!rows[1].ignored);
+    }
+
+    #[test]
+    fn children_of_ignored_dir_are_ignored() {
+        let mut m = TreeModel::default();
+        m.set_children(&RelPath::root(), vec![ignored_entry("docs", true)]);
+        m.toggle(&rel("docs"));
+        m.set_children(&rel("docs"), vec![entry("a.md", false)]);
+        let rows = m.rows(None);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].ignored);
+    }
+
+    #[test]
+    fn filter_rows_mark_ignored_files_and_dirs() {
+        let mut m = TreeModel::default();
+        let all = fude_fs::WalkedFiles { tracked: vec![rel("src/plan.rs")], ignored: vec![rel("docs/plan.md")] };
+        m.set_filter("plan", Some(&all));
+        let marks: Vec<(String, bool)> = m.rows(None).into_iter().map(|r| (r.rel.as_str().to_string(), r.ignored)).collect();
+        assert_eq!(
+            marks,
+            vec![("docs".into(), true), ("docs/plan.md".into(), true), ("src".into(), false), ("src/plan.rs".into(), false)]
+        );
+    }
+
+    #[test]
+    fn invalidate_all_marks_loaded_dirs() {
+        let mut m = TreeModel::default();
+        m.set_children(&RelPath::root(), vec![entry("src", true)]);
+        m.set_children(&rel("src"), vec![entry("a.rs", false)]);
+        m.set_filter("", Some(&fude_fs::WalkedFiles::default()));
+        assert_eq!(m.invalidate_all(), vec![RelPath::root(), rel("src")]);
+        assert!(m.needs_load(&RelPath::root()) && m.needs_load(&rel("src")));
+        assert!(!m.has_file_list());
     }
 }

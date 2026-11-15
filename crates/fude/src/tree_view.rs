@@ -179,7 +179,8 @@ impl WorkspaceView {
     /// 監視の通知。読んだことのあるフォルダの中が変わったら読み直す。
     pub(crate) fn on_tree_changed(&mut self, project: ProjectId, batch: &WatchBatch, cx: &mut Context<Self>) {
         let Some(model) = self.tree.models.get_mut(&project) else { return };
-        let dirs = model.invalidate(&batch.changed);
+        // 外す規則が変わったら、読んだフォルダをすべて読み直して印を直す。
+        let dirs = if batch.rules { model.invalidate_all() } else { model.invalidate(&batch.changed) };
         let refetch = model.filtering();
         for dir in dirs {
             self.load_tree_dir(project, dir, cx);
@@ -360,6 +361,8 @@ impl WorkspaceView {
                             .when(is_selected, |d| d.bg(theme.bg_hover))
                             .hover(|s| s.bg(theme.bg_hover))
                             .opacity(if deleted { 0.5 } else { 1.0 })
+                            // git で外したもの（計画8d）は文字を薄くする（消した行の不透明度とは別）。
+                            .when(row.ignored, |d| d.text_color(theme.fg_dim))
                             .child(lead)
                             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(row.name.clone()))
                             .children(mark)

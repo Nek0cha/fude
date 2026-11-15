@@ -446,7 +446,7 @@ mod tests {
 
     fn row(rel: &str, is_dir: bool) -> TreeRow {
         let rel = RelPath::new(rel).unwrap();
-        TreeRow { name: rel.as_str().rsplit('/').next().unwrap().into(), rel, depth: 0, is_dir, expanded: false, mark: None }
+        TreeRow { name: rel.as_str().rsplit('/').next().unwrap().into(), rel, depth: 0, is_dir, expanded: false, mark: None, ignored: false }
     }
 
     #[test]
