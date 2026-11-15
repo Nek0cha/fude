@@ -185,6 +185,10 @@ impl WorkspaceView {
     /// 設定パネルを開く。選んでいるプロジェクトのエディタ列に設定のタブを開き（ほかのプロジェクトのものは閉じる）、
     /// プロジェクトが無ければホーム画面の代わりに出す。
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // チュートリアルの上の Ctrl+, は何もしない（9c §5.7）。
+        if self.tutorial.is_some() {
+            return;
+        }
         let view = match &self.settings_view {
             Some(v) => {
                 v.update(cx, |v, cx| v.reopened(cx));

@@ -87,6 +87,15 @@ fn command_action(command: Command) -> Box<dyn Action> {
     }
 }
 
+/// キーで出た action が、チュートリアルを閉じる命令か（9c §5.6）。fude の命令のアクションだけを見る（入力欄の操作などは閉じない）。
+fn closes_on_action(action: &dyn Action) -> bool {
+    Command::FIXED
+        .into_iter()
+        .chain((1..=9).map(Command::ActivateProject))
+        .filter(|c| crate::tutorial_view::key_command_closes(*c))
+        .any(|c| command_action(c).partial_eq(action))
+}
+
 /// キーと文脈とアクションから KeyBinding を作る。KeyBinding::new は &'static str しか受けないため load を使う。
 fn load_binding(key: &str, action: Box<dyn Action>, context: Option<&'static str>, cx: &App) -> Option<KeyBinding> {
     let predicate = context.map(|c| std::rc::Rc::new(KeyBindingContextPredicate::parse(c).expect("文脈の表記")));
@@ -346,6 +355,10 @@ pub struct WorkspaceView {
     pub(crate) settings_view: Option<Entity<crate::settings_view::SettingsView>>,
     /// hook の登録先の状態（設定パネルとチュートリアルで共有する。初めて要るときに作る）。
     pub(crate) hook_board: Option<Entity<crate::hook_targets::HookBoard>>,
+    /// 出しているチュートリアル（9c）。出している間は、レールの右の全体をこれで置き換える。
+    pub(crate) tutorial: Option<Entity<crate::tutorial_view::TutorialView>>,
+    /// 一度作ったチュートリアル（もう一度見るときに使い回す）。
+    tutorial_cache: Option<Entity<crate::tutorial_view::TutorialView>>,
     /// プロジェクトが無いとき、ホーム画面の代わりに設定パネルを出している。
     pub(crate) settings_on_home: bool,
     /// コマンドパレット。
@@ -359,12 +372,13 @@ pub struct WorkspaceView {
     _activation: Subscription,
     _bounds: Subscription,
     _quit: Subscription,
+    _keystrokes: Subscription,
 }
 
 impl WorkspaceView {
     /// 起動時にセッションは戻さない（設計書 §5.10 の B 案）。startup.open があれば開く。
     pub fn new(startup: Startup, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let Startup { session_path, last_session, recent_path, recent, open, tutorial: _ } = startup;
+        let Startup { session_path, last_session, recent_path, recent, open, tutorial } = startup;
         let vertical_tabs = last_session.as_ref().is_some_and(|s| s.vertical_tabs);
         let workspace = Workspace::default();
         let activation = cx.observe_window_activation(window, |this, window, cx| {
@@ -396,6 +410,15 @@ impl WorkspaceView {
                 false
             })
             .unwrap_or(true)
+        });
+        // チュートリアルを出している間にキーで命令を出したら、閉じて結果を見せる（9c §5.6）。
+        let keystrokes = cx.observe_keystrokes(|this, ev, window, cx| {
+            if this.tutorial.is_some()
+                && let Some(action) = &ev.action
+                && closes_on_action(action.as_ref())
+            {
+                this.leave_tutorial(window, cx);
+            }
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -437,6 +460,8 @@ impl WorkspaceView {
             searches: HashMap::new(),
             settings_view: None,
             hook_board: None,
+            tutorial: None,
+            tutorial_cache: None,
             settings_on_home: false,
             dialog: None,
             allow_close: false,
@@ -462,12 +487,16 @@ impl WorkspaceView {
             _activation: activation,
             _bounds: bounds,
             _quit: quit,
+            _keystrokes: keystrokes,
         };
         this.workspace.set_local_shell(&this.settings.terminal);
         match open {
             InitialOpen::Project { root, shell } => this.open_project(root, shell, cx),
             InitialOpen::File { file, root_hint } => this.open_file(file, root_hint, None, window, cx),
             InitialOpen::Nothing => {}
+        }
+        if tutorial {
+            this.show_tutorial(window, cx);
         }
         this.refresh_active_branch(cx);
         this.load_distros(cx);
@@ -752,6 +781,58 @@ impl WorkspaceView {
         view.update(cx, |v, cx| v.open_search(window, cx));
     }
 
+    /// チュートリアルを 1 ページ目から出す（初回の起動と、パレットの「チュートリアルをもう一度」。9c §5.6）。
+    pub(crate) fn show_tutorial(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = match &self.tutorial_cache {
+            Some(v) => {
+                v.update(cx, |v, cx| v.restart(cx));
+                v.clone()
+            }
+            None => {
+                let board = self.hook_board(cx);
+                let v = cx.new(|cx| crate::tutorial_view::TutorialView::new(board, window, cx));
+                cx.subscribe_in(&v, window, |this, _, ev: &crate::tutorial_view::TutorialEvent, window, cx| match ev {
+                    crate::tutorial_view::TutorialEvent::Finished => this.finish_tutorial(window, cx),
+                })
+                .detach();
+                self.tutorial_cache = Some(v.clone());
+                v
+            }
+        };
+        let focus = view.read(cx).focus_handle();
+        window.focus(&focus, cx);
+        self.tutorial = Some(view);
+        cx.notify();
+    }
+
+    /// チュートリアルを出していれば閉じて true。印と設定ファイルは書かない（途中で抜けた扱い）。
+    /// フォーカスは、最後に使ったターミナル（無ければワークスペース自身）に戻す。
+    pub(crate) fn leave_tutorial(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.tutorial.take().is_none() {
+            return false;
+        }
+        window.focus(&self.focus, cx);
+        self.refocus_pane();
+        cx.notify();
+        true
+    }
+
+    /// 「はじめる」か「飛ばす」。印を付け、設定ファイルが無ければ作り、フェードして元の画面に戻る（§5.5）。
+    fn finish_tutorial(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let env = |k: &str| std::env::var(k).ok();
+        if let Some(path) = fude_core::tutorial::tutorial_path(Platform::current(), &env)
+            && let Err(e) = crate::tutorial_view::write_mark(&path)
+        {
+            eprintln!("チュートリアルの印を書けない: {e}");
+        }
+        crate::config_runtime::ensure_config_file(cx);
+        if self.leave_tutorial(window, cx) {
+            let now = Instant::now();
+            self.screen_fade = Fade::settled(0.0);
+            self.screen_fade.animate_to(1.0, SCREEN_FADE, ease_out, now);
+        }
+    }
+
     /// hook の登録先の状態を返す（無ければ作る）。
     pub(crate) fn hook_board(&mut self, cx: &mut Context<Self>) -> Entity<crate::hook_targets::HookBoard> {
         self.hook_board.get_or_insert_with(|| cx.new(crate::hook_targets::HookBoard::new)).clone()
@@ -772,8 +853,14 @@ impl WorkspaceView {
     /// 2 つ目の起動から届いた要求。Open ならプロジェクトを開いて（開いていれば切り替えて）、どちらも前面に出す。
     pub(crate) fn handle_message(&mut self, msg: Message, window: &mut Window, cx: &mut Context<Self>) {
         match msg {
-            Message::Open { root, shell } => self.open_project(root, shell, cx),
-            Message::OpenFile { file, root_hint } => self.open_file(file, root_hint, None, window, cx),
+            Message::Open { root, shell } => {
+                self.leave_tutorial(window, cx);
+                self.open_project(root, shell, cx);
+            }
+            Message::OpenFile { file, root_hint } => {
+                self.leave_tutorial(window, cx);
+                self.open_file(file, root_hint, None, window, cx);
+            }
             Message::Activate => {}
             // hook の信号は前面に出さない。
             Message::Hook { terminal, signal } => {
@@ -992,7 +1079,9 @@ impl WorkspaceView {
             }
             self.terminals.insert(id, (view, sub));
         }
+        // チュートリアルを出している間は、裏のターミナルにフォーカスを移さない（閉じたときに移す）。
         if self.focused_pane != Some(target)
+            && self.tutorial.is_none()
             && let Some((view, _)) = self.terminals.get(&target)
         {
             self.focused_pane = Some(target);
@@ -1159,6 +1248,17 @@ impl Render for WorkspaceView {
         let palette = self.render_palette(window, cx, now);
         let wait_frame = self.render_wait_frame(&theme, now);
         let config_notice = self.render_config_notice(&theme, cx);
+        // チュートリアルはレールの右の全体を置き換える（9c §5.6）。
+        let body: Vec<AnyElement> = match self.tutorial.clone() {
+            Some(tutorial) => vec![div().flex_1().min_w_0().h_full().child(tutorial).into_any_element()],
+            None => {
+                let mut v: Vec<AnyElement> = Vec::new();
+                v.extend(route_map.map(IntoElement::into_any_element));
+                v.extend(vertical_tabs.map(IntoElement::into_any_element));
+                v.push(div().flex_1().min_w_0().h_full().child(main).into_any_element());
+                v
+            }
+        };
 
         div()
             .id("workspace")
@@ -1212,9 +1312,7 @@ impl Render for WorkspaceView {
                     .min_h_0()
                     .relative()
                     .child(rail)
-                    .children(route_map)
-                    .children(vertical_tabs)
-                    .child(div().flex_1().min_w_0().h_full().child(main)),
+                    .children(body),
             )
             .children(config_notice)
             .children(menu)

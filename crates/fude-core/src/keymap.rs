@@ -76,30 +76,32 @@ impl Command {
         fixed.to_string()
     }
 
+    /// 番号を持たない命令の一覧（ActivateProject を除く全部）。
+    pub const FIXED: [Command; 17] = [
+        Command::NewTab,
+        Command::SplitTab,
+        Command::NextTab,
+        Command::PrevTab,
+        Command::Copy,
+        Command::Paste,
+        Command::Close,
+        Command::ToggleTree,
+        Command::Save,
+        Command::OpenPalette,
+        Command::GoToFile,
+        Command::FindInFiles,
+        Command::FindInTerminal,
+        Command::ToggleRouteMap,
+        Command::SendToClaude,
+        Command::ToggleMarkdownMode,
+        Command::OpenSettings,
+    ];
+
     pub fn from_name(name: &str) -> Option<Command> {
         if let Some(n) = name.strip_prefix("activate_project_") {
             return n.parse::<u8>().ok().filter(|n| (1..=9).contains(n) && name.len() == "activate_project_".len() + 1).map(Command::ActivateProject);
         }
-        const FIXED: [Command; 17] = [
-            Command::NewTab,
-            Command::SplitTab,
-            Command::NextTab,
-            Command::PrevTab,
-            Command::Copy,
-            Command::Paste,
-            Command::Close,
-            Command::ToggleTree,
-            Command::Save,
-            Command::OpenPalette,
-            Command::GoToFile,
-            Command::FindInFiles,
-            Command::FindInTerminal,
-            Command::ToggleRouteMap,
-            Command::SendToClaude,
-            Command::ToggleMarkdownMode,
-            Command::OpenSettings,
-        ];
-        FIXED.into_iter().find(|c| c.name() == name)
+        Command::FIXED.into_iter().find(|c| c.name() == name)
     }
 }
 

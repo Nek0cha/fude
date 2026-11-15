@@ -511,6 +511,10 @@ impl WorkspaceView {
     /// コマンドを実行する。キーと同じアクションを、戻したフォーカスの位置へ送る。
     fn run_palette_command(&mut self, command: PaletteCommand, window: &mut Window, cx: &mut Context<Self>) {
         use crate::workspace_view::{CloseItem, FindInTerminal, NewTab, NextTab, PrevTab, SplitTab};
+        // チュートリアルを出していれば、先に閉じてから実行する（9c §5.6）。
+        if crate::tutorial_view::closes_tutorial(command) {
+            self.leave_tutorial(window, cx);
+        }
         let action: Box<dyn Action> = match command {
             PaletteCommand::NewTerminal => Box::new(NewTab),
             PaletteCommand::SplitTerminal => Box::new(SplitTab),
@@ -548,8 +552,7 @@ impl WorkspaceView {
             PaletteCommand::ToggleVerticalTabs => return self.toggle_vertical_tabs(cx),
             PaletteCommand::UndoTreeOp => return self.undo_tree_op(window, cx),
             PaletteCommand::RedoTreeOp => return self.redo_tree_op(window, cx),
-            // 中身は計画9c の Task 7 で入れる。
-            PaletteCommand::ShowTutorial => return,
+            PaletteCommand::ShowTutorial => return self.show_tutorial(window, cx),
         };
         window.dispatch_action(action, cx);
     }

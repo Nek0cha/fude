@@ -23,7 +23,9 @@ impl WorkspaceView {
     pub(crate) fn render_title_row(&mut self, window: &mut Window, cx: &mut Context<Self>, now: Instant) -> Div {
         // 縦に並べているときは、上の列にターミナルのタブを出さない（＋や分割、ピルは残す）。
         let vertical = self.vertical_tabs;
-        let mut tabs: Vec<AnyElement> = match self.workspace.active_project().filter(|_| !vertical) {
+        // チュートリアルを出している間は、ホーム画面と同じくタブとピルを出さない（9c §5.6）。
+        let covered = self.tutorial.is_some();
+        let mut tabs: Vec<AnyElement> = match self.workspace.active_project().filter(|_| !vertical && !covered) {
             Some(p) => {
                 let active = p.active_tab;
                 p.tabs
@@ -81,8 +83,8 @@ impl WorkspaceView {
             }));
 
         // プロジェクトが無い（ホーム画面）ときは、タブ、＋、分割、ピルを出さない。タブが 0 枚なら分割も出さない。
-        let has_project = self.workspace.active_project().is_some();
-        let has_tabs = self.workspace.active_project().is_some_and(|p| !p.tabs.is_empty());
+        let has_project = !covered && self.workspace.active_project().is_some();
+        let has_tabs = has_project && self.workspace.active_project().is_some_and(|p| !p.tabs.is_empty());
         div()
             .flex()
             .flex_row()
@@ -117,9 +119,9 @@ impl WorkspaceView {
                 )
             })
             .child(self.drag_area("title-gap", cx).flex_1().h_full().min_w(px(24.)))
-            .children(self.render_changes_button(cx, now))
-            .child(div().w(px(6.)).flex_shrink_0())
-            .child(self.render_pill(cx))
+            .when(!covered, |row| {
+                row.children(self.render_changes_button(cx, now)).child(div().w(px(6.)).flex_shrink_0()).child(self.render_pill(cx))
+            })
             .child(div().w(px(8.)).h_full().flex_shrink_0())
             .when(cfg!(windows), |row| row.child(self.render_caption_buttons(window, cx, now)))
             .when(!cfg!(windows), |row| row.child(div().w(px(8.)).flex_shrink_0()))

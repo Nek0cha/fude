@@ -32,7 +32,10 @@ impl WorkspaceView {
             .rounded(size::RADIUS_MD)
             .bg(self.hover_bg(HoverKey::AddProject, theme.bg_hover, now))
             .child(icon(IconName::Plus, theme.fg_dim))
-            .on_click(cx.listener(|this, _, _, cx| this.prompt_open_project(cx)));
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.leave_tutorial(window, cx);
+                this.prompt_open_project(cx)
+            }));
 
         div()
             .w(size::RAIL_W)
@@ -106,7 +109,8 @@ impl WorkspaceView {
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseDownEvent, window, cx| this.open_project_menu(id, ev.position, window, cx)),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.leave_tutorial(window, cx);
                 this.workspace.activate_project(id);
                 this.refresh_active_branch(cx);
                 cx.notify();

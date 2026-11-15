@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use fude_core::keymap::{Command, KeyHints, Platform, key_hints};
-use fude_core::palette::key_label;
+use fude_core::palette::{PaletteCommand, key_label};
 use fude_core::tutorial::{DONE_TEXT, StartupTutorial, is_done, startup_tutorial};
 use gpui_kit::*;
 
@@ -31,6 +31,17 @@ pub(crate) fn decide_startup(home_launch: bool, mark: Option<&Path>, recent_empt
         write_mark(p).ok();
     }
     decision
+}
+
+/// パレットの命令を実行する前に、チュートリアルを閉じるか（§5.6）。もう一度見る命令と設定（何もしない）は閉じない。
+pub(crate) fn closes_tutorial(command: PaletteCommand) -> bool {
+    !matches!(command, PaletteCommand::ShowTutorial | PaletteCommand::OpenSettings)
+}
+
+/// キーの命令で、チュートリアルを閉じるか（§5.6、§5.7）。パレットを開くだけでは画面は変わらないので閉じない。
+/// Ctrl+, は何もしない。コピーと貼り付けはターミナルの中だけで効くので閉じない。
+pub(crate) fn key_command_closes(command: Command) -> bool {
+    !matches!(command, Command::OpenPalette | Command::OpenSettings | Command::Copy | Command::Paste)
 }
 
 /// ページ（§5.2）。
@@ -368,7 +379,27 @@ impl Render for TutorialView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Nav, Page, decide_startup, step, tree_text, write_mark};
+    use super::{Nav, Page, closes_tutorial, decide_startup, key_command_closes, step, tree_text, write_mark};
+    use fude_core::keymap::Command;
+    use fude_core::palette::PaletteCommand;
+
+    #[test]
+    fn leave_tutorial_on_command() {
+        assert!(!closes_tutorial(PaletteCommand::ShowTutorial));
+        assert!(!closes_tutorial(PaletteCommand::OpenSettings));
+        for c in [PaletteCommand::ToggleTree, PaletteCommand::GoToFile, PaletteCommand::OpenFolder, PaletteCommand::NewTerminal] {
+            assert!(closes_tutorial(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn leave_tutorial_on_key() {
+        assert!(!key_command_closes(Command::OpenPalette), "パレットを開くだけでは閉じない");
+        assert!(!key_command_closes(Command::OpenSettings), "チュートリアルの上の Ctrl+, は何もしない");
+        for c in [Command::ToggleTree, Command::GoToFile, Command::NewTab, Command::ActivateProject(2), Command::FindInFiles] {
+            assert!(key_command_closes(c), "{c:?}");
+        }
+    }
     use fude_core::keymap::KeyHints;
     use fude_core::tutorial::{StartupTutorial, is_done};
 
