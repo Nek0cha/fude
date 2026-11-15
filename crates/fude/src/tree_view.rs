@@ -36,7 +36,8 @@ gpui_kit::actions!(
         TreeRight,
         TreeOpen,
         TreeRename,
-        TreeDelete
+        TreeDelete,
+        TreeMenu
     ]
 );
 
@@ -67,10 +68,15 @@ pub fn bind_tree_keys(cx: &mut App) {
         KeyBinding::new("enter", TreeOpen, Some(TREE_NOT_INPUT)),
         KeyBinding::new("f2", TreeRename, Some(TREE_NOT_INPUT)),
         KeyBinding::new(delete, TreeDelete, Some(TREE_NOT_INPUT)),
+        KeyBinding::new("shift-f10", TreeMenu, Some(TREE_NOT_INPUT)),
     ]);
+    // Windows のメニューキー（VK_APPS）は GPUI では "menu" として届く。
+    if fude_core::keymap::Platform::current() == fude_core::keymap::Platform::Windows {
+        cx.bind_keys([KeyBinding::new("menu", TreeMenu, Some(TREE_NOT_INPUT))]);
+    }
 }
 
-const ROW_H: Pixels = px(24.);
+pub(crate) const ROW_H: Pixels = px(24.);
 const INDENT: f32 = 12.;
 
 /// 左パネルの状態。
@@ -91,7 +97,7 @@ pub(crate) struct TreeState {
     /// 行の一覧の位置と大きさ（描画のたびに測る）。
     pub list_bounds: Bounds<Pixels>,
     /// 右クリックメニューと、その対象の行（None は何も無いところ）。
-    pub menu: Option<(Option<TreeRow>, crate::popup::Popup)>,
+    pub menu: Option<crate::tree_menu::TreeMenuState>,
     /// 新規や名前の変更で、名前を入れている途中。
     pub edit: Option<crate::tree_menu::TreeEdit>,
     /// プロジェクトごとの取り消しとやり直しの履歴（メモリだけ）。
@@ -540,6 +546,7 @@ impl WorkspaceView {
                 .on_action(cx.listener(|this, _: &TreeDelete, window, cx| {
                     this.tree_action_on_selected(crate::tree_menu::TreeAction::Delete, window, cx)
                 }))
+                .on_action(cx.listener(|this, _: &TreeMenu, window, cx| this.open_tree_menu_by_key(window, cx)))
                 // 絞り込み欄は、消すものが無いときに Esc を親へ回す。
                 .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| this.close_tree(window, cx)))
                 // 重ねて出したとき、下のターミナルにクリックを渡さない。

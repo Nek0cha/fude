@@ -44,6 +44,43 @@ const ACTIONS: [TreeAction; 7] = [
     TreeAction::Reveal,
 ];
 
+/// 開いているツリーのメニュー。row が None なら何も無いところのメニュー。index はキーで選んでいる項目
+/// （マウスで出したときは None）。
+pub(crate) struct TreeMenuState {
+    pub row: Option<TreeRow>,
+    pub popup: Popup,
+    pub index: Option<usize>,
+}
+
+/// メニューに並べる項目。行が無いところでは、新規とエクスプローラー（Finder）で表示だけ。
+fn menu_actions(has_row: bool) -> Vec<TreeAction> {
+    ACTIONS
+        .iter()
+        .copied()
+        .filter(|a| has_row || matches!(a, TreeAction::NewFile | TreeAction::NewFolder | TreeAction::Reveal))
+        .collect()
+}
+
+/// ↑↓ で動かした先の項目。選択が無ければ ↓ は先頭、↑ は末尾。端で止まる。
+fn step_menu(index: Option<usize>, len: usize, down: bool) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    Some(match (index, down) {
+        (None, true) => 0,
+        (None, false) => last,
+        (Some(i), true) => (i + 1).min(last),
+        (Some(i), false) => i.saturating_sub(1),
+    })
+}
+
+/// キーで出すメニューの左上。行の左端から 24px 右、行の下端。scroll_y は一覧のスクロールのずれ（下へ送ると負）。
+/// 見えていない行は Nearest で一覧の端まで送られるので、一覧の中に収める。
+fn key_menu_position(list: Bounds<Pixels>, row_index: usize, scroll_y: Pixels) -> Point<Pixels> {
+    let row_h = crate::tree_view::ROW_H;
+    let y = list.origin.y + row_h * (row_index as f32 + 1.) + scroll_y;
+    let y = y.max(list.origin.y + row_h).min(list.origin.y + list.size.height);
+    point(list.origin.x + px(24.), y)
+}
+
 fn label(action: TreeAction, os: Platform) -> &'static str {
     match (action, os) {
         (TreeAction::NewFile, _) => "新規ファイル",
@@ -142,12 +179,52 @@ impl WorkspaceView {
     }
 
     pub(crate) fn open_tree_menu(&mut self, row: Option<TreeRow>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        self.tree.menu = Some((row, Popup::open(position, window, cx)));
+        self.tree.menu = Some(TreeMenuState { row, popup: Popup::open(position, window, cx), index: None });
         cx.notify();
     }
 
+    /// Shift+F10 とメニューキー。選んでいる行の下に出し、先頭の項目を選んでおく。選択が並びに無ければ、
+    /// 何も無いところのメニューを一覧の左上に出す。
+    pub(crate) fn open_tree_menu_by_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let list = self.tree.list_bounds;
+        let selected = crate::tree_nav::selected_row(&self.tree.rows, self.tree.selected.as_ref()).map(|(ix, row)| (ix, row.clone()));
+        let (row, position) = match selected {
+            Some((ix, row)) => {
+                self.tree.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                let scroll_y = self.tree.scroll.0.borrow().base_handle.offset().y;
+                (Some(row), key_menu_position(list, ix, scroll_y))
+            }
+            None => (None, list.origin + point(px(24.), px(24.))),
+        };
+        self.tree.menu = Some(TreeMenuState { row, popup: Popup::open(position, window, cx), index: Some(0) });
+        cx.notify();
+    }
+
+    /// キーでメニューを操作する。Esc で閉じ、↑↓ で選び、Enter で選んだ項目を行う。
+    fn tree_menu_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.tree.menu.as_mut() else { return };
+        if menu.popup.closing() {
+            return;
+        }
+        let actions = menu_actions(menu.row.is_some());
+        match key {
+            "escape" => self.close_tree_menu(window, cx),
+            "up" | "down" => {
+                menu.index = step_menu(menu.index, actions.len(), key == "down");
+                cx.notify();
+            }
+            "enter" => {
+                if let Some(action) = menu.index.and_then(|i| actions.get(i).copied()) {
+                    let row = menu.row.clone();
+                    self.run_tree_action(row, action, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn close_tree_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tree.menu.as_mut().is_some_and(|(_, m)| m.close(Instant::now())) {
+        if self.tree.menu.as_mut().is_some_and(|m| m.popup.close(Instant::now())) {
             window.focus(&self.tree.focus, cx);
             cx.notify();
         }
@@ -388,8 +465,8 @@ impl WorkspaceView {
     }
 
     pub(crate) fn render_tree_menu(&mut self, window: &mut Window, cx: &mut Context<Self>, now: Instant) -> Option<Deferred> {
-        let (row, menu) = self.tree.menu.as_ref()?;
-        let row = row.clone();
+        let state = self.tree.menu.as_ref()?;
+        let (row, menu, index) = (state.row.clone(), &state.popup, state.index);
         if menu.is_gone(now) {
             self.tree.menu = None;
             return None;
@@ -400,10 +477,8 @@ impl WorkspaceView {
         let theme = *cx.global::<Theme>();
         let closing = menu.closing();
         let os = Platform::current();
-        let items: Vec<AnyElement> = ACTIONS
-            .iter()
-            .copied()
-            .filter(|a| row.is_some() || matches!(a, TreeAction::NewFile | TreeAction::NewFolder | TreeAction::Reveal))
+        let items: Vec<AnyElement> = menu_actions(row.is_some())
+            .into_iter()
             .enumerate()
             .map(|(i, action)| {
                 let key = HoverKey::MenuItem(MENU_HOVER + i);
@@ -417,12 +492,13 @@ impl WorkspaceView {
                     .items_center()
                     .gap(px(8.))
                     .rounded(size::RADIUS_SM)
-                    .bg(self.hover_bg(key, theme.bg_hover, now))
+                    // キーで選んでいる項目は、ホバーと同じ色にする。
+                    .bg(if index == Some(i) { theme.bg_hover } else { self.hover_bg(key, theme.bg_hover, now) })
                     .text_color(color)
                     .child(icon(action_icon(action), theme.fg_dim))
                     .child(label(action, os))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.tree.menu.as_ref().is_some_and(|(_, m)| m.closing()) {
+                        if this.tree.menu.as_ref().is_some_and(|m| m.popup.closing()) {
                             return;
                         }
                         this.run_tree_action(row.clone(), action, window, cx);
@@ -433,9 +509,8 @@ impl WorkspaceView {
         let body = menu
             .frame("tree-menu", &theme, now)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "escape" {
-                    this.close_tree_menu(window, cx);
-                }
+                let key = ev.keystroke.key.clone();
+                this.tree_menu_key(&key, window, cx);
             }))
             .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_tree_menu(window, cx)))
             .children(if closing { Vec::new() } else { items });
@@ -445,7 +520,8 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{new_item_parent, tree_mention, validate_name};
+    use super::{TreeAction, key_menu_position, menu_actions, new_item_parent, step_menu, tree_mention, validate_name};
+    use gpui_kit::{Bounds, Pixels, point, px, size};
     use crate::tree_model::TreeRow;
     use fude_fs::RelPath;
 
@@ -475,5 +551,38 @@ mod tests {
     fn tree_mention_marks_folders() {
         assert_eq!(tree_mention(&row("src/main.rs", false)), "@src/main.rs ");
         assert_eq!(tree_mention(&row("src/ui", true)), "@src/ui/ ");
+    }
+
+    #[test]
+    fn menu_actions_without_row_are_three() {
+        assert_eq!(menu_actions(false), vec![TreeAction::NewFile, TreeAction::NewFolder, TreeAction::Reveal]);
+        assert_eq!(menu_actions(true).len(), 7);
+    }
+
+    #[test]
+    fn step_menu_stops_at_ends() {
+        assert_eq!(step_menu(None, 7, true), Some(0));
+        assert_eq!(step_menu(None, 7, false), Some(6));
+        assert_eq!(step_menu(Some(6), 7, true), Some(6));
+        assert_eq!(step_menu(Some(0), 7, false), Some(0));
+        assert_eq!(step_menu(Some(2), 7, true), Some(3));
+        assert_eq!(step_menu(None, 0, true), None);
+    }
+
+    fn list() -> Bounds<Pixels> {
+        Bounds { origin: point(px(100.), px(50.)), size: size(px(200.), px(240.)) }
+    }
+
+    #[test]
+    fn key_menu_position_below_row() {
+        // 3 行目（0 始まりで 2）、1 行分下へ送ってある。
+        assert_eq!(key_menu_position(list(), 2, px(-24.)), point(px(124.), px(98.)));
+    }
+
+    #[test]
+    fn key_menu_position_stays_in_list() {
+        // 見えていない行は Nearest で端まで送られるので、その端に出す。
+        assert_eq!(key_menu_position(list(), 0, px(-240.)), point(px(124.), px(74.)));
+        assert_eq!(key_menu_position(list(), 50, px(0.)), point(px(124.), px(290.)));
     }
 }
