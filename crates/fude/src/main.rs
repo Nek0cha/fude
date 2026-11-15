@@ -47,6 +47,7 @@ mod tree_model;
 mod tree_nav;
 mod tree_undo;
 mod tree_view;
+mod tutorial_demo;
 mod tutorial_view;
 mod vertical_tabs;
 mod workspace_view;
