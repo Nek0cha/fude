@@ -31,6 +31,32 @@ pub(crate) fn image_kind(rel: &str) -> Option<ImageKind> {
     })
 }
 
+/// ここでは再生しない、動画と音声のファイル。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MediaKind {
+    Video,
+    Audio,
+}
+
+/// 拡張子から動画か音声かを決める（大文字小文字を問わない）。どちらでもなければ None。
+pub(crate) fn media_kind(rel: &str) -> Option<MediaKind> {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    let (_, ext) = name.rsplit_once('.')?;
+    match ext.to_ascii_lowercase().as_str() {
+        "mp4" | "mov" | "webm" | "mkv" | "avi" | "m4v" => Some(MediaKind::Video),
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" => Some(MediaKind::Audio),
+        _ => None,
+    }
+}
+
+/// 動画と音声のタブに出す文。
+pub(crate) fn media_message(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Video => "動画はここでは再生できません",
+        MediaKind::Audio => "音声はここでは再生できません",
+    }
+}
+
 /// ラスター画像の頭だけを読んで、幅と高さを求める。読めなければ None。
 pub(crate) fn raster_size(bytes: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
@@ -82,9 +108,39 @@ pub(crate) fn image_body(image: Arc<Image>, caption: String, theme: &Theme) -> D
         .child(div().flex_shrink_0().w_full().flex().justify_center().text_size(px(12.)).text_color(dim).child(caption))
 }
 
+/// 動画と音声のタブの本文。文と「既定のアプリで開く」ボタン。on_open はボタンを押したときに呼ぶ。
+pub(crate) fn media_body(kind: MediaKind, theme: &Theme, on_open: impl Fn(&mut Window, &mut App) + 'static) -> Div {
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(12.))
+        .font(ui_font())
+        .child(div().text_color(theme.fg_dim).child(media_message(kind)))
+        .child(
+            div()
+                .id("fv-open-system")
+                .h(px(28.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme.border_subtle)
+                .text_color(theme.fg_default)
+                .hover(|s| s.bg(theme.bg_hover))
+                .child("既定のアプリで開く")
+                .on_click(move |_, window, cx| on_open(window, cx)),
+        )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ImageKind, MAX_RASTER_BYTES, image_caption, image_kind, raster_error, raster_size};
+    use super::{
+        ImageKind, MAX_RASTER_BYTES, MediaKind, image_caption, image_kind, media_kind, media_message, raster_error, raster_size,
+    };
     use gpui_kit::ImageFormat;
 
     /// 3 × 2 の PNG。
@@ -124,5 +180,24 @@ mod tests {
     fn raster_limit() {
         assert_eq!(raster_error(MAX_RASTER_BYTES), None);
         assert_eq!(raster_error(60 * 1024 * 1024).as_deref(), Some("大きすぎるため開けない（60.0 MB）"));
+    }
+
+    #[test]
+    fn media_from_extension() {
+        for v in ["a.mp4", "b.MOV", "c.webm", "d.mkv", "e.avi", "f.m4v"] {
+            assert_eq!(media_kind(v), Some(MediaKind::Video), "{v}");
+        }
+        for a in ["a.mp3", "b.WAV", "c.flac", "d.ogg", "e.m4a", "f.aac", "g.opus"] {
+            assert_eq!(media_kind(a), Some(MediaKind::Audio), "{a}");
+        }
+        assert_eq!(media_kind("a.png"), None);
+        assert_eq!(media_kind("mp4"), None);
+        assert_eq!(media_kind("clip.mp4/notes.md"), None);
+    }
+
+    #[test]
+    fn media_messages() {
+        assert_eq!(media_message(MediaKind::Video), "動画はここでは再生できません");
+        assert_eq!(media_message(MediaKind::Audio), "音声はここでは再生できません");
     }
 }

@@ -21,7 +21,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::dialog::error_text;
-use crate::image_preview::{ImageKind, image_body, image_caption, image_kind, raster_error, raster_size};
+use crate::image_preview::{
+    ImageKind, MediaKind, image_body, image_caption, image_kind, media_body, media_kind, raster_error, raster_size,
+};
 use crate::language::language_for;
 use crate::md_preview::MdPreview;
 use crate::theme::{Theme, mono_font, popup_shadow, size, ui_font};
@@ -57,7 +59,7 @@ pub(crate) fn has_view_toggle(rel: &str) -> bool {
 
 /// 差分の切り替えを出すか。ラスター画像は差分を出さない。
 pub(crate) fn diff_available(rel: &str, mark: Option<GitMark>) -> bool {
-    has_diff(mark) && !matches!(image_kind(rel), Some(ImageKind::Raster(_)))
+    has_diff(mark) && !matches!(image_kind(rel), Some(ImageKind::Raster(_))) && media_kind(rel).is_none()
 }
 
 /// SVG を画像として出すか。text_loaded は中身を文字として読めたか（誤りの文を出していないか）、
@@ -240,6 +242,8 @@ enum Body {
     Text { doc: TextDoc, editor: Entity<EditorState>, gutter: GutterDecorationCollection },
     /// ラスター画像（編集しない）。caption は下に添える文。
     Image { image: Arc<Image>, caption: String },
+    /// 動画と音声（中身は読まない）。
+    Media(MediaKind),
 }
 
 pub struct FileView {
@@ -651,6 +655,12 @@ impl FileView {
 
     /// ファイルと差分を裏で読む。
     fn load(&mut self, cx: &mut Context<Self>) {
+        // 動画と音声は大きいことが多く、ここでは再生もしないので読まない。
+        if let Some(kind) = media_kind(&self.rel) {
+            self.body = Body::Media(kind);
+            cx.notify();
+            return;
+        }
         let fs = self.fs.clone();
         let rel = self.rel_path();
         let task = cx.background_spawn(async move { fs.read(&rel?) });
@@ -923,6 +933,9 @@ impl FileView {
 
     /// 監視からの「このファイルが変わった」。自分の保存と同じ中身なら何もしない。
     pub fn on_external_change(&mut self, cx: &mut Context<Self>) {
+        if media_kind(&self.rel).is_some() {
+            return;
+        }
         let fs = self.fs.clone();
         let rel = self.rel_path();
         let task = cx.background_spawn(async move { fs.read(&rel?) });
@@ -1136,6 +1149,11 @@ impl Render for FileView {
             match (layout, &self.diff, &self.body) {
             (MdBody::Diff, Some(state), _) => Diff::new(state).into_any_element(),
             (_, _, Body::Image { image, caption }) => image_body(image.clone(), caption.clone(), &theme).into_any_element(),
+            (_, _, Body::Media(kind)) => {
+                let mut path = self.root.host_path();
+                path.extend(self.rel.split('/'));
+                media_body(*kind, &theme, move |_, cx| cx.open_with_system(&path)).into_any_element()
+            }
             (_, _, Body::Text { editor, .. }) => {
                 let source = || Editor::new(editor).bordered(false).appearance(false).h_full();
                 let preview = self.render_preview(cx);
@@ -1292,6 +1310,8 @@ mod tests {
         assert!(diff_available("a.svg", Some(GitMark::Modified)));
         assert!(diff_available("a.rs", Some(GitMark::Added)));
         assert!(!diff_available("a.svg", None));
+        assert!(!diff_available("clip.mp4", Some(GitMark::Modified)));
+        assert!(!diff_available("voice.mp3", Some(GitMark::Added)));
     }
 
     #[test]
