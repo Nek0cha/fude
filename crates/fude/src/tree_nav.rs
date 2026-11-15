@@ -94,6 +94,7 @@ pub(crate) fn after_removal(rows: &[RowSlot], removed: &RelPath) -> Option<RelPa
 }
 
 /// 並びの先頭のファイルの行（フォルダは飛ばす）。
+#[allow(dead_code)] // 絞り込み欄の Enter（Task 4）で使う。
 pub(crate) fn first_file(rows: &[RowSlot]) -> Option<RelPath> {
     entries(rows).find(|(_, row)| !row.is_dir).map(|(_, row)| row.rel.clone())
 }

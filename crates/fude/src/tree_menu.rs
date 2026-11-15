@@ -153,7 +153,7 @@ impl WorkspaceView {
         }
     }
 
-    fn run_tree_action(&mut self, row: Option<TreeRow>, action: TreeAction, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_tree_action(&mut self, row: Option<TreeRow>, action: TreeAction, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tree_menu(window, cx);
         let Some(project) = self.workspace.active_project().map(|p| p.id) else { return };
         match action {
@@ -360,6 +360,11 @@ impl WorkspaceView {
                             this.tree_history(project).end_op();
                             match result {
                                 Ok(ticket) => {
+                                    // 消した行を選んでいたら、次の行（無ければ前の行）へ移す。
+                                    if this.tree.selected.as_ref() == Some(&row.rel) {
+                                        let next = crate::tree_nav::after_removal(&this.tree.rows, &row.rel);
+                                        this.select_tree_row(next, cx);
+                                    }
                                     this.load_tree_dir(project, parent, cx);
                                     if ticket.id.is_empty() {
                                         let message = format!("{} をゴミ箱に移しましたが、取り消しには使えません。", row.name);

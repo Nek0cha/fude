@@ -19,7 +19,26 @@ use crate::title_row::icon;
 use crate::tree_model::{RowSlot, TreeModel, TreeRow, rows_with_edit};
 use crate::workspace_view::WorkspaceView;
 
-gpui_kit::actions!(tree, [ToggleTree, CloseTree, TreeUndo, TreeRedo]);
+gpui_kit::actions!(
+    tree,
+    [
+        ToggleTree,
+        CloseTree,
+        TreeUndo,
+        TreeRedo,
+        TreeUp,
+        TreeDown,
+        TreeHome,
+        TreeEnd,
+        TreePageUp,
+        TreePageDown,
+        TreeLeft,
+        TreeRight,
+        TreeOpen,
+        TreeRename,
+        TreeDelete
+    ]
+);
 
 /// ツリーの取り消しとやり直しが効く文脈。入力欄と絞り込み欄の中では、入力欄の取り消しを優先する。
 const TREE_NOT_INPUT: &str = "Tree && !Input";
@@ -28,14 +47,26 @@ const TREE_NOT_INPUT: &str = "Tree && !Input";
 /// 取り消しとやり直し（計画8b）は ⌘Z / ⌘⇧Z、Windows は Ctrl+Z / Ctrl+Shift+Z。
 pub fn bind_tree_keys(cx: &mut App) {
     // 開閉のキーは fude_core::keymap（workspace_view::bind_keys）で登録する。
-    let (undo, redo) = match fude_core::keymap::Platform::current() {
-        fude_core::keymap::Platform::MacOs => ("cmd-z", "cmd-shift-z"),
-        fude_core::keymap::Platform::Windows => ("ctrl-z", "ctrl-shift-z"),
+    let (undo, redo, delete) = match fude_core::keymap::Platform::current() {
+        fude_core::keymap::Platform::MacOs => ("cmd-z", "cmd-shift-z", "cmd-backspace"),
+        fude_core::keymap::Platform::Windows => ("ctrl-z", "ctrl-shift-z", "delete"),
     };
     cx.bind_keys([
         KeyBinding::new("escape", CloseTree, Some("Tree")),
         KeyBinding::new(undo, TreeUndo, Some(TREE_NOT_INPUT)),
         KeyBinding::new(redo, TreeRedo, Some(TREE_NOT_INPUT)),
+        // キーでの操作（計画8c）。入力欄の中では入力欄が受け取る。
+        KeyBinding::new("up", TreeUp, Some(TREE_NOT_INPUT)),
+        KeyBinding::new("down", TreeDown, Some(TREE_NOT_INPUT)),
+        KeyBinding::new("home", TreeHome, Some(TREE_NOT_INPUT)),
+        KeyBinding::new("end", TreeEnd, Some(TREE_NOT_INPUT)),
+        KeyBinding::new("pageup", TreePageUp, Some(TREE_NOT_INPUT)),
+        KeyBinding::new("pagedown", TreePageDown, Some(TREE_NOT_INPUT)),
+        KeyBinding::new("left", TreeLeft, Some(TREE_NOT_INPUT)),
+        KeyBinding::new("right", TreeRight, Some(TREE_NOT_INPUT)),
+        KeyBinding::new("enter", TreeOpen, Some(TREE_NOT_INPUT)),
+        KeyBinding::new("f2", TreeRename, Some(TREE_NOT_INPUT)),
+        KeyBinding::new(delete, TreeDelete, Some(TREE_NOT_INPUT)),
     ]);
 }
 
@@ -53,8 +84,12 @@ pub(crate) struct TreeState {
     pub scroll: UniformListScrollHandle,
     /// 次の描画で、名前の入力欄の行が見える位置までスクロールする。
     pub scroll_to_edit: bool,
-    /// 選択中（最後にクリックした）行。
+    /// 選択中の行（クリックかキーで選んだもの）。並びに無ければ、無いものとして扱う。
     pub selected: Option<RelPath>,
+    /// 次の描画で、選択の行が見える位置までスクロールする（並びに現れるまで持ち越す）。
+    pub scroll_to_selected: bool,
+    /// 行の一覧の位置と大きさ（描画のたびに測る）。
+    pub list_bounds: Bounds<Pixels>,
     /// 右クリックメニューと、その対象の行（None は何も無いところ）。
     pub menu: Option<(Option<TreeRow>, crate::popup::Popup)>,
     /// 新規や名前の変更で、名前を入れている途中。
@@ -75,6 +110,8 @@ impl TreeState {
             scroll: UniformListScrollHandle::new(),
             scroll_to_edit: false,
             selected: None,
+            scroll_to_selected: false,
+            list_bounds: Bounds::default(),
             menu: None,
             edit: None,
             history: HashMap::new(),
@@ -105,8 +142,92 @@ impl WorkspaceView {
         if self.tree.models.entry(project).or_default().needs_load(&RelPath::root()) {
             self.load_tree_dir(project, RelPath::root(), cx);
         }
+        self.select_active_file(project, cx);
         window.focus(&self.tree.focus, cx);
         cx.notify();
+    }
+
+    /// 開いているファイルの行を選ぶ。親フォルダが閉じていれば開いて読む。絞り込み中と「変更だけ」の表示では、
+    /// 並びにあるときだけ選ぶ。全体検索のタブやタブが無いときは、今の選択のまま（並びに無ければ ↓ で先頭へ）。
+    fn select_active_file(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        let active = self.workspace.active_project().and_then(|p| p.editor.active()).filter(|i| !i.is_search());
+        let Some(rel) = active.and_then(|i| RelPath::new(&i.rel).ok()) else { return };
+        let model = self.tree.models.entry(project).or_default();
+        if model.filtering() || model.changed_only() {
+            if crate::tree_nav::selected_row(&self.tree.rows, Some(&rel)).is_some() {
+                self.select_tree_row(Some(rel), cx);
+            }
+            return;
+        }
+        let parent = rel.as_str().rsplit_once('/').and_then(|(p, _)| RelPath::new(p).ok());
+        for dir in parent.map(|p| model.reveal(&p)).unwrap_or_default() {
+            self.load_tree_dir(project, dir, cx);
+        }
+        self.select_tree_row(Some(rel), cx);
+    }
+
+    /// 選択を入れ替え、次の描画でその行まで送る。
+    pub(crate) fn select_tree_row(&mut self, rel: Option<RelPath>, cx: &mut Context<Self>) {
+        self.tree.scroll_to_selected = rel.is_some();
+        self.tree.selected = rel;
+        cx.notify();
+    }
+
+    /// ファイルを開き、ツリーを閉じてエディタにフォーカスを移す（計画8c の案 A）。close_tree はフォーカスを
+    /// ターミナルへ戻すので使わない。
+    pub(crate) fn open_tree_file(&mut self, project: ProjectId, rel: RelPath, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree.open = false;
+        self.open_in_editor(project, rel.as_str().to_string(), None, None, window, cx);
+        cx.notify();
+    }
+
+    fn tree_nav(&mut self, key: crate::tree_nav::NavKey, cx: &mut Context<Self>) {
+        let page = crate::tree_nav::page_rows(f32::from(self.tree.list_bounds.size.height), f32::from(ROW_H));
+        let next = crate::tree_nav::move_selection(&self.tree.rows, self.tree.selected.as_ref(), key, page);
+        if next.is_some() {
+            self.select_tree_row(next, cx);
+        }
+    }
+
+    /// ← と →。絞り込み中と「変更だけ」の表示では何もしない（クリックでも開閉できないため）。
+    fn tree_horizontal(&mut self, right: bool, cx: &mut Context<Self>) {
+        use crate::tree_nav::Horizontal;
+        let Some(project) = self.workspace.active_project().map(|p| p.id) else { return };
+        let model = self.tree.models.entry(project).or_default();
+        if model.filtering() || model.changed_only() {
+            return;
+        }
+        match crate::tree_nav::horizontal(&self.tree.rows, self.tree.selected.as_ref(), right, true) {
+            Horizontal::Expand(dir) | Horizontal::Collapse(dir) => {
+                if model.toggle(&dir) && model.needs_load(&dir) {
+                    self.load_tree_dir(project, dir, cx);
+                }
+                cx.notify();
+            }
+            Horizontal::Select(rel) => self.select_tree_row(Some(rel), cx),
+            Horizontal::Nothing => {}
+        }
+    }
+
+    /// 選択の行。並びに無ければ None。
+    fn selected_tree_row(&self) -> Option<TreeRow> {
+        crate::tree_nav::selected_row(&self.tree.rows, self.tree.selected.as_ref()).map(|(_, row)| row.clone())
+    }
+
+    /// Enter。フォルダは開閉、ファイルは開いてツリーを閉じる。
+    fn tree_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.selected_tree_row() else { return };
+        if row.is_dir {
+            self.click_row(row, window, cx);
+        } else if let Some(project) = self.workspace.active_project().map(|p| p.id) {
+            self.open_tree_file(project, row.rel, window, cx);
+        }
+    }
+
+    fn tree_action_on_selected(&mut self, action: crate::tree_menu::TreeAction, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(row) = self.selected_tree_row() {
+            self.run_tree_action(Some(row), action, window, cx);
+        }
     }
 
     pub(crate) fn close_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -277,6 +398,23 @@ impl WorkspaceView {
         {
             self.tree.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
         }
+        if self.tree.scroll_to_selected
+            && let Some((ix, _)) = crate::tree_nav::selected_row(&self.tree.rows, self.tree.selected.as_ref())
+        {
+            self.tree.scroll_to_selected = false;
+            self.tree.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+        let measure = {
+            let view = cx.entity().downgrade();
+            canvas(
+                move |bounds, _, cx| {
+                    view.update(cx, |this, _| this.tree.list_bounds = bounds).ok();
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
 
         let toggle_changed = div()
             .id("tree-changed-only")
@@ -387,6 +525,21 @@ impl WorkspaceView {
                 .on_action(cx.listener(|this, _: &CloseTree, window, cx| this.close_tree(window, cx)))
                 .on_action(cx.listener(|this, _: &TreeUndo, window, cx| this.undo_tree_op(window, cx)))
                 .on_action(cx.listener(|this, _: &TreeRedo, window, cx| this.redo_tree_op(window, cx)))
+                .on_action(cx.listener(|this, _: &TreeUp, _, cx| this.tree_nav(crate::tree_nav::NavKey::Up, cx)))
+                .on_action(cx.listener(|this, _: &TreeDown, _, cx| this.tree_nav(crate::tree_nav::NavKey::Down, cx)))
+                .on_action(cx.listener(|this, _: &TreeHome, _, cx| this.tree_nav(crate::tree_nav::NavKey::Home, cx)))
+                .on_action(cx.listener(|this, _: &TreeEnd, _, cx| this.tree_nav(crate::tree_nav::NavKey::End, cx)))
+                .on_action(cx.listener(|this, _: &TreePageUp, _, cx| this.tree_nav(crate::tree_nav::NavKey::PageUp, cx)))
+                .on_action(cx.listener(|this, _: &TreePageDown, _, cx| this.tree_nav(crate::tree_nav::NavKey::PageDown, cx)))
+                .on_action(cx.listener(|this, _: &TreeLeft, _, cx| this.tree_horizontal(false, cx)))
+                .on_action(cx.listener(|this, _: &TreeRight, _, cx| this.tree_horizontal(true, cx)))
+                .on_action(cx.listener(|this, _: &TreeOpen, window, cx| this.tree_open_selected(window, cx)))
+                .on_action(cx.listener(|this, _: &TreeRename, window, cx| {
+                    this.tree_action_on_selected(crate::tree_menu::TreeAction::Rename, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &TreeDelete, window, cx| {
+                    this.tree_action_on_selected(crate::tree_menu::TreeAction::Delete, window, cx)
+                }))
                 // 絞り込み欄は、消すものが無いときに Esc を親へ回す。
                 .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| this.close_tree(window, cx)))
                 // 重ねて出したとき、下のターミナルにクリックを渡さない。
@@ -401,6 +554,7 @@ impl WorkspaceView {
                 .child(
                     div()
                         .id("tree-body")
+                        .relative()
                         .flex_1()
                         .min_h_0()
                         .flex()
@@ -409,6 +563,7 @@ impl WorkspaceView {
                             MouseButton::Right,
                             cx.listener(|this, ev: &MouseDownEvent, window, cx| this.open_tree_menu(None, ev.position, window, cx)),
                         )
+                        .child(measure)
                         .child(list),
                 ),
         )
