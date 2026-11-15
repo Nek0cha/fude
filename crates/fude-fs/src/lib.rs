@@ -126,8 +126,20 @@ pub struct FileMeta {
     pub modified_ms: u64,
 }
 
-/// walk_files で返す件数の上限。
+/// walk_files で返す件数の上限（外していないもの）。
 pub const WALK_MAX: usize = 200_000;
+
+/// walk_files で返す、外したファイルの件数の上限。外したもので上限に達しても、外していないものは減らさない。
+pub const IGNORED_FILES_MAX: usize = 20_000;
+
+/// walk_files の結果。各々名前順。⌘P では tracked の後ろに ignored を続ける（同じ点数なら外したものが後ろ）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalkedFiles {
+    /// 外していないファイル（.git を除く）。WALK_MAX 件まで。
+    pub tracked: Vec<RelPath>,
+    /// 外したファイル（隠す名前のフォルダの中は除く）。IGNORED_FILES_MAX 件まで。
+    pub ignored: Vec<RelPath>,
+}
 
 pub trait ProjectFs: Send + Sync {
     /// rel の直下。外したもの（gitignore など）も ignored の印を付けて出し、隠しファイルも出し、.git と
@@ -138,8 +150,8 @@ pub trait ProjectFs: Send + Sync {
     fn write(&self, rel: &RelPath, data: &[u8]) -> io::Result<()>;
     /// ブランチ名（fude_core::git_head::read_branch と同じ規則）。
     fn branch(&self) -> io::Result<Option<String>>;
-    /// gitignore を尊重した全ファイル（.git を除く）。名前順。WALK_MAX 件で打ち切る。
-    fn walk_files(&self) -> io::Result<Vec<RelPath>>;
+    /// 全ファイルを、外していないものと外したものに分けて返す（WalkedFiles を参照）。
+    fn walk_files(&self) -> io::Result<WalkedFiles>;
     /// 空のファイルを作る。あれば AlreadyExists。
     fn create_file(&self, rel: &RelPath) -> io::Result<()>;
     /// フォルダを作る（途中のフォルダも）。最後の段が既にあれば AlreadyExists。

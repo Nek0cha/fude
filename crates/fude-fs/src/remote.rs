@@ -194,7 +194,7 @@ impl ProjectFs for RemoteFs {
         }
     }
 
-    fn walk_files(&self) -> io::Result<Vec<RelPath>> {
+    fn walk_files(&self) -> io::Result<crate::WalkedFiles> {
         match self.call(Request::WalkFiles { root: self.root.clone() }, &[])? {
             (Response::Paths, json) => serde_json::from_slice(&json)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("一覧を読めない: {e}"))),
@@ -468,13 +468,13 @@ mod tests {
         fs.create_file(&rel("repo/src/a.rs")).unwrap();
         assert_eq!(fs.create_file(&rel("repo/src/a.rs")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
         fs.rename(&rel("repo/src/a.rs"), &rel("repo/src/b.rs")).unwrap();
-        assert_eq!(fs.walk_files().unwrap(), vec![rel("repo/src/b.rs")]);
+        assert_eq!(fs.walk_files().unwrap().tracked, vec![rel("repo/src/b.rs")]);
         assert!(!fs.metadata(&rel("repo/src/b.rs")).unwrap().is_dir);
         let file = dir.path().join("repo").join("src").join("b.rs");
         let root = find_root(&c, &file.to_string_lossy()).unwrap();
         assert_eq!(std::path::PathBuf::from(root), dir.path().join("repo"));
         assert!(find_root(&c, "relative/x").is_err());
         fs.remove(&rel("repo/src")).unwrap();
-        assert!(fs.walk_files().unwrap().is_empty());
+        assert!(fs.walk_files().unwrap().tracked.is_empty());
     }
 }

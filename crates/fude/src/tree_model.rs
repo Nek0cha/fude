@@ -54,7 +54,7 @@ pub(crate) struct TreeModel {
     stale: HashSet<String>,
     expanded: HashSet<String>,
     filter: String,
-    all_files: Option<Vec<RelPath>>,
+    all_files: Option<fude_fs::WalkedFiles>,
     changed_only: bool,
 }
 
@@ -152,10 +152,10 @@ impl TreeModel {
     }
 
     /// ファイル名で絞り込む（大文字小文字を区別しない部分一致）。all_files は全ファイルの一覧（無ければ、届くまで何も出さない）。
-    pub fn set_filter(&mut self, query: &str, all_files: Option<&[RelPath]>) {
+    pub fn set_filter(&mut self, query: &str, all_files: Option<&fude_fs::WalkedFiles>) {
         self.filter = query.trim().to_lowercase();
         if let Some(all) = all_files {
-            self.all_files = Some(all.to_vec());
+            self.all_files = Some(all.clone());
         }
     }
 
@@ -192,7 +192,7 @@ impl TreeModel {
         if self.filtering() {
             let Some(all) = &self.all_files else { return out };
             let mut tree = PathTree::default();
-            for f in all {
+            for f in all.tracked.iter().chain(&all.ignored) {
                 let name = f.as_str().rsplit('/').next().unwrap_or_default();
                 if name.to_lowercase().contains(&self.filter) {
                     tree.insert(&f.as_str().split('/').collect::<Vec<_>>());
@@ -271,7 +271,7 @@ mod tests {
     fn filter_shows_matches_with_ancestors() {
         let mut m = TreeModel::default();
         m.set_children(&RelPath::root(), vec![entry("src", true), entry("README.md", false)]);
-        let all = vec![rel("README.md"), rel("src/main.rs"), rel("src/ui/Button.tsx")];
+        let all = fude_fs::WalkedFiles { tracked: vec![rel("README.md"), rel("src/main.rs"), rel("src/ui/Button.tsx")], ignored: vec![] };
         m.set_filter("button", Some(&all));
         let rows = m.rows(None);
         assert_eq!(shape(&rows), vec![("src".into(), 0, true), ("src/ui".into(), 1, true), ("src/ui/Button.tsx".into(), 2, false)]);

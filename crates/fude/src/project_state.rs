@@ -187,7 +187,7 @@ impl WorkspaceView {
         let task = cx.background_spawn(async move { fs.walk_files() });
         live.files_task = Some(cx.spawn(async move |this, cx| {
             let files = match task.await {
-                Ok(files) => files.into_iter().map(String::from).collect::<Vec<String>>(),
+                Ok(files) => palette_paths(files),
                 Err(e) => {
                     eprintln!("ファイルの一覧を読めない: {e}");
                     return;
@@ -208,5 +208,23 @@ impl WorkspaceView {
     /// project の ProjectFs（用意できていれば）。
     pub(crate) fn live_fs(&self, project: ProjectId) -> Option<Arc<dyn ProjectFs>> {
         self.live.get(&project)?.fs.clone()
+    }
+}
+
+/// ⌘P の一覧。外していないものの後ろに外したものを続ける（あいまい検索は同じ点数なら並びの順なので、
+/// 外したものが後ろに来る）。
+pub(crate) fn palette_paths(files: fude_fs::WalkedFiles) -> Vec<String> {
+    files.tracked.into_iter().chain(files.ignored).map(String::from).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::palette_paths;
+    use fude_fs::{RelPath, WalkedFiles};
+
+    #[test]
+    fn palette_paths_put_ignored_last() {
+        let files = WalkedFiles { tracked: vec![RelPath::new("b").unwrap()], ignored: vec![RelPath::new("a").unwrap()] };
+        assert_eq!(palette_paths(files), vec!["b".to_string(), "a".to_string()]);
     }
 }

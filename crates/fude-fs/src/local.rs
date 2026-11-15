@@ -3,19 +3,80 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fude_core::git_head::read_branch;
 use ignore::WalkBuilder;
 
-use crate::{DirEntry, FileMeta, ProjectFs, RelPath, TrashTicket, WALK_MAX, ignored};
+use crate::{DirEntry, FileMeta, IGNORED_FILES_MAX, ProjectFs, RelPath, TrashTicket, WALK_MAX, WalkedFiles, ignored};
 
 /// 一時ファイルの名前を、同じプロセスの中の同時の書き込みで重ねないための通し番号。
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub struct LocalFs {
     root: PathBuf,
+}
+
+/// walker が返すファイル（シンボリックリンクの先がファイルのものも）の、root からの相対パス。
+fn walked_file(root: &Path, entry: &ignore::DirEntry) -> Option<RelPath> {
+    if !entry.file_type().is_some_and(|t| t.is_file() || (t.is_symlink() && entry.path().is_file())) {
+        return None;
+    }
+    let rel = entry.path().strip_prefix(root).ok()?;
+    RelPath::new(&rel.to_string_lossy()).ok()
+}
+
+/// walk_files の中身。外していないものを WALK_MAX 件まで歩き、そのあと外したものだけを ignored_max 件まで
+/// 集める（2 回歩くことで、外したものの山で外していないものが打ち切られないようにする）。
+pub(crate) fn walk_with_cap(root: &Path, ignored_max: usize) -> io::Result<WalkedFiles> {
+    if !fs::metadata(root)?.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::NotADirectory, "ルートがフォルダではない"));
+    }
+    let in_repo = ignored::in_git_repo(root);
+    // git のリポジトリでなければ、隠す名前のフォルダは名前だけで外す。
+    let tracked_walker = WalkBuilder::new(root)
+        .hidden(false)
+        .parents(true)
+        .filter_entry(move |e| {
+            e.file_name() != ".git"
+                && !(e.file_type().is_some_and(|t| t.is_dir()) && ignored::hides_dir(&e.file_name().to_string_lossy(), false, in_repo))
+        })
+        .build();
+    let mut tracked = Vec::new();
+    for entry in tracked_walker.flatten() {
+        if let Some(rel) = walked_file(root, &entry) {
+            tracked.push(rel);
+            if tracked.len() >= WALK_MAX {
+                break;
+            }
+        }
+    }
+    let known: HashSet<&str> = tracked.iter().map(RelPath::as_str).collect();
+    // 規則を効かせずに歩き、外していないものに無いファイルを集める。隠す名前のフォルダには入らない
+    // （外していない同じ名前のフォルダの中身は、上で集めてある）。
+    let all_walker = WalkBuilder::new(root)
+        .standard_filters(false)
+        .hidden(false)
+        .filter_entry(|e| e.file_name() != ".git" && !(e.file_type().is_some_and(|t| t.is_dir()) && ignored::is_hidden_dir(&e.file_name().to_string_lossy())))
+        .build();
+    let mut ignored_files = Vec::new();
+    for entry in all_walker.flatten() {
+        let Some(rel) = walked_file(root, &entry) else { continue };
+        if known.contains(rel.as_str()) {
+            continue;
+        }
+        if ignored_files.len() >= ignored_max {
+            eprintln!("外したファイルが {ignored_max} 件に達したので、残りは一覧に入れない");
+            break;
+        }
+        ignored_files.push(rel);
+    }
+    drop(known);
+    tracked.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    ignored_files.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    Ok(WalkedFiles { tracked, ignored: ignored_files })
 }
 
 impl LocalFs {
@@ -101,26 +162,8 @@ impl ProjectFs for LocalFs {
         Ok(read_branch(&self.root))
     }
 
-    fn walk_files(&self) -> io::Result<Vec<RelPath>> {
-        if !fs::metadata(&self.root)?.is_dir() {
-            return Err(io::Error::new(io::ErrorKind::NotADirectory, "ルートがフォルダではない"));
-        }
-        let walker = WalkBuilder::new(&self.root).hidden(false).parents(true).filter_entry(|e| e.file_name() != ".git").build();
-        let mut files = Vec::new();
-        for entry in walker {
-            let Ok(entry) = entry else { continue };
-            if !entry.file_type().is_some_and(|t| t.is_file() || (t.is_symlink() && entry.path().is_file())) {
-                continue;
-            }
-            let Ok(rel) = entry.path().strip_prefix(&self.root) else { continue };
-            let Ok(rel) = RelPath::new(&rel.to_string_lossy()) else { continue };
-            files.push(rel);
-            if files.len() >= WALK_MAX {
-                break;
-            }
-        }
-        files.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        Ok(files)
+    fn walk_files(&self) -> io::Result<WalkedFiles> {
+        walk_with_cap(&self.root, IGNORED_FILES_MAX)
     }
 
     fn create_file(&self, rel: &RelPath) -> io::Result<()> {
@@ -401,8 +444,48 @@ mod tests {
         fs::write(root.join("src").join("main.rs"), "").unwrap();
         fs::write(root.join(".env"), "").unwrap();
         let files = LocalFs::new(root.to_path_buf()).walk_files().unwrap();
-        let names: Vec<&str> = files.iter().map(|f| f.as_str()).collect();
+        let names: Vec<&str> = files.tracked.iter().map(|f| f.as_str()).collect();
         assert_eq!(names, vec![".env", ".gitignore", "src/main.rs", "src/ui/b.rs"]);
+        // target は隠す名前なので、外したものの一覧にも入らない。
+        assert!(files.ignored.is_empty());
+    }
+
+    fn strs(files: &[RelPath]) -> Vec<&str> {
+        files.iter().map(|f| f.as_str()).collect()
+    }
+
+    #[test]
+    fn walk_files_splits_tracked_and_ignored() {
+        let dir = repo(true, &[(".gitignore", "docs/\n"), ("docs/plan.md", ""), ("src/a.rs", ""), ("README.md", "")]);
+        let files = LocalFs::new(dir.path().to_path_buf()).walk_files().unwrap();
+        assert_eq!(strs(&files.tracked), vec![".gitignore", "README.md", "src/a.rs"]);
+        assert_eq!(strs(&files.ignored), vec!["docs/plan.md"]);
+    }
+
+    #[test]
+    fn walk_files_skips_hidden_dirs() {
+        let dir = repo(true, &[(".gitignore", "node_modules/\n"), ("node_modules/x.js", ""), ("a.rs", "")]);
+        let files = LocalFs::new(dir.path().to_path_buf()).walk_files().unwrap();
+        assert_eq!(strs(&files.tracked), vec![".gitignore", "a.rs"]);
+        assert!(files.ignored.is_empty());
+    }
+
+    #[test]
+    fn walk_files_without_git_skips_hidden_by_name() {
+        let dir = repo(false, &[("node_modules/x.js", ""), ("a.rs", "")]);
+        let files = LocalFs::new(dir.path().to_path_buf()).walk_files().unwrap();
+        assert_eq!(strs(&files.tracked), vec!["a.rs"]);
+    }
+
+    #[test]
+    fn ignored_cap_keeps_tracked() {
+        let mut spec = vec![(".gitignore", "logs/\n"), ("a.rs", ""), ("b.rs", "")];
+        let logs = ["logs/1", "logs/2", "logs/3", "logs/4", "logs/5"];
+        spec.extend(logs.iter().map(|p| (*p, "")));
+        let dir = repo(true, &spec);
+        let files = walk_with_cap(dir.path(), 2).unwrap();
+        assert_eq!(strs(&files.tracked), vec![".gitignore", "a.rs", "b.rs"]);
+        assert_eq!(files.ignored.len(), 2);
     }
 
     #[test]
