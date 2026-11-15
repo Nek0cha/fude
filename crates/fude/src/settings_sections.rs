@@ -131,7 +131,7 @@ pub(crate) fn row(label: &'static str, content: impl IntoElement, theme: &Theme)
         .child(div().flex_1().min_w_0().child(content))
 }
 
-/// 外観の欄。Full はテーマ、不透明度、ぼかし、アクセント。FirstRun はテーマと不透明度。
+/// 外観の欄。Full はテーマ、不透明度、ぼかし、アクセント。FirstRun はテーマ、不透明度、アクセント。
 pub(crate) struct AppearanceSection {
     mode: SectionMode,
     opacity: Entity<SliderState>,
@@ -256,10 +256,10 @@ impl Render for AppearanceSection {
                     d.on_click(cx.listener(move |_, _, _, cx| apply_edit(cx, PanelEdit::Blur(!on))))
                 }))
                 .when(!BLUR_SUPPORTED, |d| d.child(div().text_color(theme.fg_dim).child("この OS ではぼかしを使えません")));
-            let accent = self.render_accent(&s, &theme, cx);
-            el = el.child(row("ぼかし", blur, &theme)).child(row("アクセント色", accent, &theme));
+            el = el.child(row("ぼかし", blur, &theme));
         }
-        el
+        let accent = self.render_accent(&s, &theme, cx);
+        el.child(row("アクセント色", accent, &theme))
     }
 }
 
