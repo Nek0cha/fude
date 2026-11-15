@@ -36,6 +36,7 @@ mod term_search;
 mod terminal_paint;
 mod terminal_view;
 mod theme;
+mod themes;
 mod title_row;
 mod tree_menu;
 mod tree_model;
@@ -59,7 +60,6 @@ use gpui_kit::*;
 use crate::assets::AppAssets;
 use crate::cli::{Launch, parse_launch};
 use crate::instance::{HandOff, hand_off, report_error};
-use crate::theme::Theme;
 use crate::workspace_view::{InitialOpen, Startup, WorkspaceView, bind_keys};
 
 const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Regular.ttf");
@@ -138,7 +138,7 @@ fn main() {
         cx.text_system()
             .add_fonts(vec![Cow::Borrowed(MONO_REGULAR), Cow::Borrowed(MONO_BOLD)])
             .expect("同梱の等幅フォントを読み込めない");
-        cx.set_global(Theme::dark());
+        cx.set_global(themes::build_theme(&fude_core::settings::Settings::default()));
         theme::apply_component_theme(cx);
         let _ = bind_keys(cx, &fude_core::settings::Settings::default());
         file_view::bind_file_view_keys(cx);

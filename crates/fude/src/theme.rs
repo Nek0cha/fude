@@ -2,7 +2,7 @@
 //! 描画コードには色や寸法の値を直接書かず、ここを通す。
 
 use fude_term::Palette;
-use gpui_kit::{BoxShadow, Font, FontFallbacks, Global, Rgba, font, hsla, point, px, rgb, rgba};
+use gpui_kit::{BoxShadow, Font, FontFallbacks, Global, Rgba, font, hsla, point, px};
 
 pub const MONO_FAMILY: &str = "HackGen Console NF";
 
@@ -32,45 +32,8 @@ pub struct Theme {
     /// ターミナル内の検索の一致（warn の 30%）と、選んだ一致（warn の 70%）。
     pub search_match: Rgba,
     pub search_current: Rgba,
-}
-
-impl Theme {
-    pub fn dark() -> Self {
-        Self {
-            bg_window: rgba(0x0e0e149e),
-            bg_panel: rgba(0x1e1e2aeb),
-            bg_hover: rgba(0xffffff12),
-            border_subtle: rgba(0xffffff1f),
-            fg_default: rgb(0xd8d8e2),
-            fg_dim: rgb(0x7b7d90),
-            accent: rgb(0xb9a8ff),
-            warn: rgb(0xffd28a),
-            danger: rgb(0xff8a8a),
-            window_close_hover: rgba(0xff8a8a38),
-            project_colors: [
-                rgba(0x8fa7ff47),
-                rgba(0x7fd1c747),
-                rgba(0xe6b07a47),
-                rgba(0xd99ad647),
-                rgba(0x9fd38a47),
-                rgba(0xe59a9a47),
-            ],
-            term_palette: Palette {
-                ansi: [
-                    0x1e1e2a, 0xff8a8a, 0x5fe0b0, 0xffd28a, 0x8fa7ff, 0xd99ad6, 0x7fd1c7, 0xd8d8e2, //
-                    0x7b7d90, 0xffa3a3, 0x84ecc4, 0xffe0a8, 0xaabcff, 0xe8b4e6, 0x9fe3da, 0xf2f2f7,
-                ],
-                foreground: 0xd8d8e2,
-                background: 0x0e0e14,
-                cursor: 0xb9a8ff,
-            },
-            selection: rgba(0xb9a8ff4d),
-            diff_add: rgb(0x5fe0b0),
-            diff_del: rgb(0xff8a8a),
-            search_match: rgba(0xffd28a4d),
-            search_current: rgba(0xffd28ab3),
-        }
-    }
+    /// 構文ハイライトの色。None なら GPUI Kit の既定のまま。
+    pub syntax: Option<crate::themes::SyntaxPalette>,
 }
 
 impl Global for Theme {}
