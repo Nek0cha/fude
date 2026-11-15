@@ -1,6 +1,12 @@
 //! 画像と SVG のプレビュー（9d の設計書）。形式の判定、幅と高さ、下に添える文、本文の要素。
 
-use gpui_kit::ImageFormat;
+use std::sync::Arc;
+
+use fude_core::text::OpenError;
+use gpui_kit::*;
+
+use crate::file_view::open_error_text;
+use crate::theme::{Theme, ui_font};
 
 /// エディタ列で開く画像の種類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +36,14 @@ pub(crate) fn raster_size(bytes: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
 }
 
+/// 開くラスター画像の大きさの上限。
+pub(crate) const MAX_RASTER_BYTES: usize = 50 * 1024 * 1024;
+
+/// len バイトのラスター画像を開けないときの文。開けるなら None。
+pub(crate) fn raster_error(len: usize) -> Option<String> {
+    (len > MAX_RASTER_BYTES).then(|| open_error_text(OpenError::TooLarge(len as u64)))
+}
+
 /// 画像の下に添える文。size は幅と高さ（SVG や読めないときは None）、len はバイト数。
 pub(crate) fn image_caption(size: Option<(u32, u32)>, len: usize) -> String {
     let bytes = match len {
@@ -43,9 +57,32 @@ pub(crate) fn image_caption(size: Option<(u32, u32)>, len: usize) -> String {
     }
 }
 
+/// 本文の要素。画像を真ん中に、エディタ列に収まるよう縮めて出し（大きくはしない）、下に caption を添える。
+pub(crate) fn image_body(image: Arc<Image>, caption: String, theme: &Theme) -> Div {
+    let dim = theme.fg_dim;
+    div()
+        .size_full()
+        .p(px(16.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .font(ui_font())
+        .child(
+            div().flex_1().min_h_0().w_full().child(
+                img(image)
+                    .size_full()
+                    .object_fit(ObjectFit::ScaleDown)
+                    .with_fallback(move || {
+                        div().size_full().flex().items_center().justify_center().text_color(dim).child("表示できない画像").into_any_element()
+                    }),
+            ),
+        )
+        .child(div().flex_shrink_0().w_full().flex().justify_center().text_size(px(12.)).text_color(dim).child(caption))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ImageKind, image_caption, image_kind, raster_size};
+    use super::{ImageKind, MAX_RASTER_BYTES, image_caption, image_kind, raster_error, raster_size};
     use gpui_kit::ImageFormat;
 
     /// 3 × 2 の PNG。
@@ -79,5 +116,11 @@ mod tests {
         assert_eq!(image_caption(Some((1920, 1080)), 250_880), "1920 × 1080 · 245 KB");
         assert_eq!(image_caption(None, 512), "512 B");
         assert_eq!(image_caption(Some((3, 2)), 3 * 1024 * 1024 / 2), "3 × 2 · 1.5 MB");
+    }
+
+    #[test]
+    fn raster_limit() {
+        assert_eq!(raster_error(MAX_RASTER_BYTES), None);
+        assert_eq!(raster_error(60 * 1024 * 1024).as_deref(), Some("大きすぎるため開けない（60.0 MB）"));
     }
 }

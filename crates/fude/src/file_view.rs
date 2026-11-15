@@ -21,6 +21,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::dialog::error_text;
+use crate::image_preview::{ImageKind, image_body, image_caption, image_kind, raster_error, raster_size};
 use crate::language::language_for;
 use crate::md_preview::MdPreview;
 use crate::theme::{Theme, mono_font, popup_shadow, size, ui_font};
@@ -47,6 +48,21 @@ pub(crate) fn initial_mode(mark: Option<GitMark>) -> FileMode {
 /// 差分／全体の切り替えを出すか（Git で変更があるファイルだけ）。
 pub(crate) fn has_diff(mark: Option<GitMark>) -> bool {
     matches!(mark, Some(GitMark::Modified | GitMark::Added | GitMark::Deleted))
+}
+
+/// 表示／ソースの切り替えを持つか（Markdown と SVG）。
+pub(crate) fn has_view_toggle(rel: &str) -> bool {
+    is_markdown(rel) || image_kind(rel) == Some(ImageKind::Svg)
+}
+
+/// 差分の切り替えを出すか。ラスター画像は差分を出さない。
+pub(crate) fn diff_available(rel: &str, mark: Option<GitMark>) -> bool {
+    has_diff(mark) && !matches!(image_kind(rel), Some(ImageKind::Raster(_)))
+}
+
+/// SVG を画像として出すか。showing_diff は差分を出しているか。
+pub(crate) fn svg_as_image(showing_diff: bool, md: MdMode) -> bool {
+    !showing_diff && md == MdMode::Preview
 }
 
 /// 保存が終わった時点のエディタの中身 current が、保存した中身 saved と違えば未保存のまま。
@@ -215,6 +231,8 @@ enum Body {
     Loading,
     Error(String),
     Text { doc: TextDoc, editor: Entity<EditorState>, gutter: GutterDecorationCollection },
+    /// ラスター画像（編集しない）。caption は下に添える文。
+    Image { image: Arc<Image>, caption: String },
 }
 
 pub struct FileView {
@@ -242,6 +260,8 @@ pub struct FileView {
     pub(crate) md_mode: MdMode,
     /// Markdown のプレビュー。Markdown を読み込んだら作る。
     preview: Option<MdPreview>,
+    /// SVG の「表示」に出す画像と、下に添える文。エディタの中身が変わるたびに作り直す。
+    svg_image: Option<(Arc<Image>, String)>,
     /// エディタ列の幅（論理ピクセル）。表示モードで並べるかを決める。
     column_w: f32,
     /// ピン列に留めているか。描くたびに持ち主が渡す。
@@ -278,6 +298,7 @@ impl FileView {
             auto_mode: false,
             md_mode: MdMode::Preview,
             preview: None,
+            svg_image: None,
             column_w: 1000.0,
             pinned: false,
             blocks: None,
@@ -366,6 +387,15 @@ impl FileView {
         is_markdown(&self.rel)
     }
 
+    fn is_svg(&self) -> bool {
+        image_kind(&self.rel) == Some(ImageKind::Svg)
+    }
+
+    /// SVG を画像として出しているか。
+    fn svg_shown(&self) -> bool {
+        self.is_svg() && svg_as_image(self.showing_diff(), self.md_mode)
+    }
+
     /// 差分を出しているか（差分の表示中で、差分がある）。
     fn showing_diff(&self) -> bool {
         self.mode == FileMode::Diff && self.diff.is_some()
@@ -382,7 +412,7 @@ impl FileView {
 
     /// ⌘E / Ctrl+E。差分の表示中は全体の表示にするだけ（今のモードのまま）。Markdown でなければ何もしない。
     pub(crate) fn toggle_md_mode(&mut self, cx: &mut Context<Self>) {
-        if !self.is_md() {
+        if !has_view_toggle(&self.rel) {
             return;
         }
         if self.showing_diff() {
@@ -402,6 +432,12 @@ impl FileView {
     /// Markdown のテキストを読み込んだら、プレビューを作るか中身を替える。
     fn sync_preview(&mut self, cx: &mut Context<Self>) {
         let Body::Text { editor, .. } = &self.body else { return };
+        if self.is_svg() {
+            let text = editor.read(cx).value().to_string();
+            let caption = image_caption(None, text.len());
+            self.svg_image = Some((Arc::new(Image::from_bytes(ImageFormat::Svg, text.into_bytes())), caption));
+            return;
+        }
         if !self.is_md() {
             return;
         }
@@ -579,7 +615,7 @@ impl FileView {
     }
 
     fn load_diff(&mut self, cx: &mut Context<Self>) {
-        if !has_diff(self.mark) {
+        if !diff_available(&self.rel, self.mark) {
             self.diff = None;
             self.update_gutter(&[], cx);
             return;
@@ -664,6 +700,18 @@ impl FileView {
                 return;
             }
         };
+        if let Some(ImageKind::Raster(format)) = image_kind(&self.rel) {
+            self.body = match raster_error(bytes.len()) {
+                Some(msg) => Body::Error(msg),
+                None => {
+                    let caption = image_caption(raster_size(&bytes), bytes.len());
+                    Body::Image { image: Arc::new(Image::from_bytes(format, bytes.clone())), caption }
+                }
+            };
+            self.disk = Some(bytes);
+            cx.notify();
+            return;
+        }
         let doc = match decode_text(&bytes) {
             Ok(doc) => doc,
             Err(e) => {
@@ -762,7 +810,7 @@ impl FileView {
     /// 全体の表示で選んでいる行（1 始まり）。差分の表示や、選んでいないときは None。
     fn selected_lines(&self, cx: &App) -> Option<(u32, u32)> {
         let Body::Text { editor, .. } = &self.body else { return None };
-        if self.mode == FileMode::Diff && self.diff.is_some() {
+        if self.svg_shown() || (self.mode == FileMode::Diff && self.diff.is_some()) {
             return None;
         }
         let e = editor.read(cx);
@@ -778,7 +826,7 @@ impl FileView {
     /// 選択の右上に重ねる小さなボタン。選択が空か、見えていないときは出さない。
     fn render_selection_button(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let Body::Text { editor, .. } = &self.body else { return None };
-        if matches!(self.layout(), MdBody::Diff | MdBody::PreviewOnly) {
+        if self.svg_shown() || matches!(self.layout(), MdBody::Diff | MdBody::PreviewOnly) {
             return None;
         }
         let e = editor.read(cx);
@@ -912,7 +960,7 @@ impl FileView {
         let segments = |a: Stateful<Div>, b: Stateful<Div>| {
             div().flex().flex_row().p(px(2.)).rounded(size::RADIUS_SM).border_1().border_color(theme.border_subtle).child(a).child(b)
         };
-        if has_diff(self.mark) {
+        if diff_available(&self.rel, self.mark) {
             let diff_on = self.mode == FileMode::Diff;
             row = row.child(segments(
                 seg("fv-diff", "差分", diff_on).on_click(cx.listener(|this, _, _, cx| this.set_mode(FileMode::Diff, cx))),
@@ -943,6 +991,8 @@ impl FileView {
                     .child(icon(IconName::Pin, color))
                     .on_click(cx.listener(|this, _, _, cx| cx.emit(FileViewEvent::TogglePin(this.rel.clone())))),
             );
+        }
+        if has_view_toggle(&self.rel) {
             // 差分の表示中は、どちらも選んでいない見た目にする。
             let shown = !self.showing_diff();
             let preview_on = shown && self.md_mode == MdMode::Preview;
@@ -1028,8 +1078,13 @@ impl Render for FileView {
         if layout == MdBody::Split {
             self.sync_scroll(window, cx);
         }
-        let body: AnyElement = match (layout, &self.diff, &self.body) {
+        let svg = self.svg_image.clone().filter(|_| self.svg_shown());
+        let body: AnyElement = if let Some((image, caption)) = svg {
+            image_body(image, caption, &theme).into_any_element()
+        } else {
+            match (layout, &self.diff, &self.body) {
             (MdBody::Diff, Some(state), _) => Diff::new(state).into_any_element(),
+            (_, _, Body::Image { image, caption }) => image_body(image.clone(), caption.clone(), &theme).into_any_element(),
             (_, _, Body::Text { editor, .. }) => {
                 let source = || Editor::new(editor).bordered(false).appearance(false).h_full();
                 let preview = self.render_preview(cx);
@@ -1074,6 +1129,7 @@ impl Render for FileView {
                 .child(msg.clone())
                 .into_any_element(),
             (_, _, Body::Loading) => div().size_full().into_any_element(),
+            }
         };
         div()
             .id("file-view")
@@ -1119,7 +1175,10 @@ impl Render for FileView {
 
 #[cfg(test)]
 mod tests {
-    use super::{MdBody, MdMode, dirty_after_save, has_diff, initial_mode, md_body, open_error_text};
+    use super::{
+        MdBody, MdMode, diff_available, dirty_after_save, has_diff, has_view_toggle, initial_mode, md_body, open_error_text,
+        svg_as_image,
+    };
     use fude_core::panel::FileMode;
     use fude_core::text::OpenError;
     use fude_fs::git::GitMark;
@@ -1162,5 +1221,28 @@ mod tests {
         assert_eq!(md_body(true, FileMode::Full, MdMode::Source, 800.0), MdBody::Editor);
         assert_eq!(md_body(true, FileMode::Diff, MdMode::Preview, 800.0), MdBody::Diff);
         assert_eq!(md_body(false, FileMode::Diff, MdMode::Preview, 800.0), MdBody::Diff);
+    }
+
+    #[test]
+    fn view_toggle_for_markdown_and_svg() {
+        assert!(has_view_toggle("docs/a.md"));
+        assert!(has_view_toggle("icons/a.SVG"));
+        assert!(!has_view_toggle("a.png"));
+        assert!(!has_view_toggle("src/main.rs"));
+    }
+
+    #[test]
+    fn raster_images_have_no_diff() {
+        assert!(!diff_available("a.png", Some(GitMark::Modified)));
+        assert!(diff_available("a.svg", Some(GitMark::Modified)));
+        assert!(diff_available("a.rs", Some(GitMark::Added)));
+        assert!(!diff_available("a.svg", None));
+    }
+
+    #[test]
+    fn svg_shows_image_in_preview_outside_diff() {
+        assert!(svg_as_image(false, MdMode::Preview));
+        assert!(!svg_as_image(false, MdMode::Source));
+        assert!(!svg_as_image(true, MdMode::Preview));
     }
 }
