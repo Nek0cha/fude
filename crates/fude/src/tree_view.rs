@@ -46,6 +46,20 @@ gpui_kit::actions!(
 /// 絞り込み欄の中の文脈。
 const TREE_FILTER_INPUT: &str = "TreeFilter > Input";
 
+/// ツリーを閉じたときのフォーカスの行き先。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseFocus {
+    /// 選んでいるエディタのタブへ。
+    Editor,
+    /// 開く前の場所へ（restore_focus）。
+    Restore,
+}
+
+/// ツリーからファイルを開いていて、エディタのタブがあれば、閉じたらエディタへ移る。
+fn focus_after_close(opened_file: bool, has_editor: bool) -> CloseFocus {
+    if opened_file && has_editor { CloseFocus::Editor } else { CloseFocus::Restore }
+}
+
 
 /// ツリーの取り消しとやり直しが効く文脈。入力欄と絞り込み欄の中では、入力欄の取り消しを優先する。
 const TREE_NOT_INPUT: &str = "Tree && !Input";
@@ -109,6 +123,8 @@ pub(crate) struct TreeState {
     pub menu: Option<crate::tree_menu::TreeMenuState>,
     /// 新規や名前の変更で、名前を入れている途中。
     pub edit: Option<crate::tree_menu::TreeEdit>,
+    /// ツリーを開いてからファイルを開いたか。閉じたときにエディタへ移るかを決める。
+    pub opened_file: bool,
     /// プロジェクトごとの取り消しとやり直しの履歴（メモリだけ）。
     pub history: HashMap<ProjectId, fude_core::tree_history::TreeHistory<fude_fs::TrashTicket>>,
     _filter_sub: Option<Subscription>,
@@ -130,6 +146,7 @@ impl TreeState {
             menu: None,
             edit: None,
             history: HashMap::new(),
+            opened_file: false,
             _filter_sub: None,
         }
     }
@@ -143,6 +160,7 @@ impl WorkspaceView {
         }
         let Some(project) = self.workspace.active_project().map(|p| p.id) else { return };
         self.tree.open = true;
+        self.tree.opened_file = false;
         if self.tree.filter.is_none() {
             let state = cx.new(|cx| InputState::new(window, cx));
             let sub = cx.subscribe_in(&state, window, |this, state, ev: &InputEvent, window, cx| match ev {
@@ -200,13 +218,17 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// ファイルを開き、ツリーを閉じてエディタにフォーカスを移す（計画8c の案 A）。close_tree はフォーカスを
-    /// ターミナルへ戻すので使わない。
+    /// ファイルをエディタで開く。ツリーは開いたまま、フォーカスもツリーに残す（続けて探せるように）。
+    /// エディタへはツリーを閉じると移る（focus_after_close）。
     pub(crate) fn open_tree_file(&mut self, project: ProjectId, rel: RelPath, window: &mut Window, cx: &mut Context<Self>) {
-        self.tree.open = false;
-        // ビューを作り終えるまでの間（その間にタブを替えるとエディタへ移らない）も、キーが届くところに置く。
-        window.focus(&self.focus, cx);
+        self.select_tree_row(Some(rel.clone()), cx);
         self.open_in_editor(project, rel.as_str().to_string(), None, None, window, cx);
+        // 新しく作るビューは、作り終えたときにフォーカスを取る。その頼みを取り消し、ツリーに戻す。
+        if let Some(slot) = self.editors.get_mut(&project) {
+            slot.take_focus_request(rel.as_str());
+        }
+        self.tree.opened_file = true;
+        window.focus(&self.tree.focus, cx);
         cx.notify();
     }
 
@@ -281,7 +303,11 @@ impl WorkspaceView {
             return;
         }
         self.tree.open = false;
-        self.restore_focus(window, cx);
+        let editor = self.active_editor_focus(cx);
+        match (focus_after_close(std::mem::take(&mut self.tree.opened_file), editor.is_some()), editor) {
+            (CloseFocus::Editor, Some(focus)) => self.focus_editor(&focus, window, cx),
+            _ => self.restore_focus(window, cx),
+        }
         cx.notify();
     }
 
@@ -376,7 +402,7 @@ impl WorkspaceView {
             }
             cx.notify();
         } else {
-            self.open_in_editor(project, row.rel.as_str().to_string(), None, None, window, cx);
+            self.open_tree_file(project, row.rel, window, cx);
         }
     }
 
@@ -640,5 +666,19 @@ impl WorkspaceView {
                         .child(list),
                 ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CloseFocus, focus_after_close};
+
+    #[test]
+    fn closing_goes_to_editor_after_opening_from_tree() {
+        // ツリーからファイルを開いていて、エディタがあれば、閉じたらエディタへ。
+        assert_eq!(focus_after_close(true, true), CloseFocus::Editor);
+        // それ以外は今までどおり（開く前の場所へ戻す）。
+        assert_eq!(focus_after_close(true, false), CloseFocus::Restore);
+        assert_eq!(focus_after_close(false, true), CloseFocus::Restore);
     }
 }
