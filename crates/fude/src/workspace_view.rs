@@ -833,7 +833,7 @@ impl WorkspaceView {
         true
     }
 
-    /// 「はじめる」か「飛ばす」。印を付け、設定ファイルが無ければ作り、フェードして元の画面に戻る（§5.5）。
+    /// 「はじめる」か「スキップ」。印を付け、設定ファイルが無ければ作り、フェードして元の画面に戻る（§5.5）。
     fn finish_tutorial(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let env = |k: &str| std::env::var(k).ok();
         if let Some(path) = fude_core::tutorial::tutorial_path(Platform::current(), &env)

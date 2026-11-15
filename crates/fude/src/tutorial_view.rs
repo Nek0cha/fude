@@ -113,7 +113,7 @@ pub(crate) fn tree_text(h: &KeyHints) -> String {
 
 /// チュートリアルが WorkspaceView に頼むこと。
 pub(crate) enum TutorialEvent {
-    /// 「はじめる」か「飛ばす」。印と設定ファイルは受け取った側が書く。
+    /// 「はじめる」か「スキップ」。印と設定ファイルは受け取った側が書く。
     Finished,
 }
 
@@ -332,7 +332,7 @@ impl Render for TutorialView {
             Page::Claude => self.render_claude(&hints, &theme, cx),
             Page::Ready => self.render_ready(&theme),
         };
-        let skip = small_button("tutorial-skip", "飛ばす", &theme)
+        let skip = small_button("tutorial-skip", "スキップ", &theme)
             .on_click(cx.listener(|_, _, _, cx| cx.emit(TutorialEvent::Finished)));
         let dots = div().flex().flex_row().gap(px(6.)).children(PAGES.iter().map(|p| {
             div().size(px(7.)).rounded(px(3.5)).bg(if *p == self.page { theme.accent } else { theme.border_subtle })

@@ -11,14 +11,21 @@ use crate::theme::motion::ease_out;
 /// 1 周の長さ。
 pub(crate) const DEMO_PERIOD: Duration = Duration::from_millis(3000);
 /// カーソルの休む位置と、ピルの中央（模型の左上を (0,0)、右下を (1,1) とする）。
-pub(crate) const REST: (f32, f32) = (0.8, 0.85);
-pub(crate) const PILL: (f32, f32) = (0.42, 0.07);
+/// ピルは実際の画面と同じく、上の列の右端（Windows では窓の操作ボタンの左）に置く。
+pub(crate) const REST: (f32, f32) = (0.45, 0.8);
+pub(crate) const PILL: (f32, f32) = ((DEMO_W - TITLE_TAIL_W - 4.0 - PILL_W / 2.0) / DEMO_W, TITLE_H / 2.0 / DEMO_H);
 
 /// 模型の大きさ（動く絵）と、静止画の 1 枚の大きさ。
 const DEMO_W: f32 = 280.0;
 const DEMO_H: f32 = 150.0;
 const STILL_W: f32 = 190.0;
 const STILL_H: f32 = 102.0;
+/// 模型の上の列の高さと、ピルの幅（動く絵の大きさでの値）。
+const TITLE_H: f32 = 20.0;
+const PILL_W: f32 = 68.0;
+/// 上の列の右端で、ピルより右に取る幅（Windows は窓の操作ボタン 3 つ、ほかは余白だけ）。
+const CAPTION_W: f32 = 12.0;
+const TITLE_TAIL_W: f32 = if cfg!(windows) { CAPTION_W * 3.0 + 6.0 } else { 8.0 };
 
 /// ある時刻の模型の形。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,20 +57,31 @@ pub(crate) fn demo_frame(t: Duration) -> DemoFrame {
     }
 }
 
-/// 模型 1 枚。w と h は外枠の大きさ。
+/// 模型 1 枚。w と h は外枠の大きさ。並びは実際の画面と同じく、左からレール、ターミナル、ツリー（右端から出る）。
 fn mock(frame: DemoFrame, w: f32, h: f32, theme: &Theme) -> Div {
     let k = w / DEMO_W;
-    let title_h = 20.0 * k;
+    let title_h = TITLE_H * k;
     let rail_w = 14.0 * k;
-    let tree_w = 70.0 * k * frame.tree_open;
-    let editor_w = 84.0 * k;
+    let tree_w = 80.0 * k * frame.tree_open;
     let text = px((8.0 * k).max(6.0));
     let line = |width: f32| div().h(px(3.0 * k)).w(px(width * k)).rounded(px(1.5 * k)).bg(theme.border_subtle);
+    // Windows の窓の操作ボタン（最小化、最大化、閉じる）の印。
+    let captions = div()
+        .absolute()
+        .top(px(0.))
+        .right(px(3.0 * k))
+        .h(px(title_h))
+        .flex()
+        .flex_row()
+        .items_center()
+        .children((0..3).map(|_| {
+            div().w(px(CAPTION_W * k)).flex().justify_center().child(div().w(px(5.0 * k)).h(px(1.0 * k).max(px(1.))).bg(theme.fg_dim))
+        }));
     let pill = div()
         .absolute()
-        .left(px(PILL.0 * w - 34.0 * k))
+        .left(px(PILL.0 * w - PILL_W / 2.0 * k))
         .top(px(PILL.1 * h - 6.0 * k))
-        .w(px(68.0 * k))
+        .w(px(PILL_W * k))
         .h(px(12.0 * k))
         .rounded(px(6.0 * k))
         .border_1()
@@ -99,7 +117,6 @@ fn mock(frame: DemoFrame, w: f32, h: f32, theme: &Theme) -> Div {
         .text_size(text)
         .text_color(theme.fg_dim)
         .children(["src/", "  main.rs", "  lib.rs", "Cargo.toml"].map(|n| div().whitespace_nowrap().child(n)));
-    let editor = div().w(px(editor_w)).h_full().flex_shrink_0().border_l_1().border_color(theme.border_subtle);
     let cursor = div()
         .absolute()
         .left(px(frame.cursor.0 * w - 5.0 * k))
@@ -130,9 +147,9 @@ fn mock(frame: DemoFrame, w: f32, h: f32, theme: &Theme) -> Div {
                 .flex_row()
                 .child(div().w(px(rail_w)).h_full().flex_shrink_0().border_r_1().border_color(theme.border_subtle))
                 .child(terminal)
-                .child(tree)
-                .child(editor),
+                .child(tree),
         )
+        .when(cfg!(windows), |d| d.child(captions))
         .child(pill)
         .child(cursor)
 }
@@ -162,7 +179,7 @@ pub(crate) fn tree_demo(frame: Option<DemoFrame>, keys: &str, theme: &Theme) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{DEMO_PERIOD, PILL, REST, demo_frame};
+    use super::{DEMO_H, DEMO_PERIOD, DEMO_W, PILL, PILL_W, REST, TITLE_H, TITLE_TAIL_W, demo_frame};
     use std::time::Duration;
 
     fn ms(n: u64) -> Duration {
@@ -188,6 +205,17 @@ mod tests {
     fn demo_tree_open_while_holding() {
         assert_eq!(demo_frame(ms(1800)).tree_open, 1.0);
         assert!(!demo_frame(ms(1800)).pressed);
+    }
+
+    #[test]
+    fn pill_sits_at_right_of_title_row() {
+        // 実際の画面と同じく、ピルは上の列の右端（Windows では窓の操作ボタンの左）にある。
+        let (x, y) = PILL;
+        let half_w = PILL_W / 2.0 / DEMO_W;
+        let right = 1.0 - (TITLE_TAIL_W + 4.0) / DEMO_W;
+        assert!(x > 0.6, "右に寄せる: {x}");
+        assert!(x + half_w <= right + 0.001, "窓の操作ボタンに重ねない: {x}");
+        assert!(y < TITLE_H / DEMO_H, "上の列の中: {y}");
     }
 
     #[test]
