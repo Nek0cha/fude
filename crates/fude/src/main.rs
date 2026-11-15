@@ -32,6 +32,7 @@ mod project_menu;
 mod rail;
 mod route_map;
 mod search_view;
+mod settings_sections;
 mod settings_view;
 mod reduced_motion;
 mod shell_menu;
@@ -46,6 +47,8 @@ mod tree_model;
 mod tree_nav;
 mod tree_undo;
 mod tree_view;
+mod tutorial_demo;
+mod tutorial_view;
 mod vertical_tabs;
 mod workspace_view;
 mod wsl_host;
@@ -127,12 +130,19 @@ fn main() {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|text| RecentList::parse(&text))
         .unwrap_or_default();
+    // 初回のチュートリアルを出すか（9c §5.1）。出すときは、設定ファイルを閉じるまで作らない。
+    let tutorial_path = fude_core::tutorial::tutorial_path(Platform::current(), &env);
+    let tutorial = tutorial_view::decide_startup(
+        matches!(launch, Launch::Activate),
+        tutorial_path.as_deref(),
+        recent.top(1).is_empty(),
+    ) == fude_core::tutorial::StartupTutorial::Show;
     let open = match launch {
         Launch::Open { root, shell } => InitialOpen::Project { root, shell },
         Launch::OpenFile { file, root_hint } => InitialOpen::File { file, root_hint },
         Launch::Activate => InitialOpen::Nothing,
     };
-    let startup = Startup { session_path, last_session: saved.filter(|d| d.has_projects()), recent_path, recent, open };
+    let startup = Startup { session_path, last_session: saved.filter(|d| d.has_projects()), recent_path, recent, open, tutorial };
 
     application().with_assets(AppAssets).run(move |cx: &mut App| {
         init(cx);
@@ -140,7 +150,7 @@ fn main() {
             .add_fonts(vec![Cow::Borrowed(MONO_REGULAR), Cow::Borrowed(MONO_BOLD)])
             .expect("同梱の等幅フォントを読み込めない");
         // 設定ファイル（無ければ作る）。テーマ、フォント、キーはここで反映する（計画9a）。
-        let mut config = config_runtime::load_or_create(config_path.as_deref());
+        let mut config = config_runtime::load_or_create(config_path.as_deref(), !tutorial);
         let key_issues = config_runtime::apply_global(cx, None, &config.settings);
         config.issues.extend(key_issues);
         let window_background = config_runtime::background_appearance(&config.settings.window);

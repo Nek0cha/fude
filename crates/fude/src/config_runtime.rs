@@ -152,11 +152,36 @@ fn write_now(cx: &mut App, edits: &[FileEdit]) {
     }
 }
 
+/// 設定ファイルが無ければ既定の文面で作る（チュートリアルを閉じたとき。9c §5.5）。失敗は write_error に出す。
+pub fn ensure_config_file(cx: &mut App) {
+    let state = cx.global::<ConfigState>().clone();
+    let Some(path) = state.path.clone() else { return };
+    match create_default_config(&path) {
+        Ok(false) => {}
+        Ok(true) => cx.default_global::<PendingWrites>().wrote(DEFAULT_CONFIG.to_string()),
+        Err(e) => {
+            cx.set_global(ConfigState { write_error: Some(format!("設定ファイルを作れませんでした: {e}")), ..state });
+            cx.refresh_windows();
+        }
+    }
+}
+
+/// path に設定ファイルが無ければ、フォルダごと既定の文面で作って true。あれば何もせず false。
+pub fn create_default_config(path: &Path) -> std::io::Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    path.parent().map_or(Ok(()), std::fs::create_dir_all)?;
+    std::fs::write(path, DEFAULT_CONFIG)?;
+    Ok(true)
+}
+
 /// 保存の出来事をまとめる時間。
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(150);
 
-/// 設定ファイルを読む。無ければ既定の文面で作る。読めなければ既定値で動かし、ファイルは書き換えない。
-pub fn load_or_create(path: Option<&Path>) -> ConfigState {
+/// 設定ファイルを読む。無ければ、create のときだけ既定の文面で作る（チュートリアルを出す起動では作らない。9c §5.5）。
+/// 読めなければ既定値で動かし、ファイルは書き換えない。
+pub fn load_or_create(path: Option<&Path>, create: bool) -> ConfigState {
     let Some(path) = path else {
         return ConfigState { settings: Settings::default(), issues: Vec::new(), path: None, write_error: None };
     };
@@ -166,6 +191,11 @@ pub fn load_or_create(path: Option<&Path>) -> ConfigState {
             Ok(ParseOutcome::Ok { settings, issues }) => state(settings, issues),
             Ok(ParseOutcome::Unreadable(issue)) | Err(issue) => state(Settings::default(), vec![issue]),
         },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !create => {
+            // 見張りはフォルダを見るので、フォルダだけは作っておく（無いと見張れない）。
+            path.parent().map(std::fs::create_dir_all);
+            state(Settings::default(), Vec::new())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, DEFAULT_CONFIG));
             let issues = match written {
@@ -295,13 +325,34 @@ mod tests {
     use fude_core::settings::{DEFAULT_CONFIG, Settings, ThemeId, WindowSettings};
 
     #[test]
+    fn create_default_config_only_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fude").join("config.toml");
+        assert!(create_default_config(&path).unwrap(), "無ければ作る");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_CONFIG);
+        std::fs::write(&path, "[window]\nopacity = 0.5\n").unwrap();
+        assert!(!create_default_config(&path).unwrap(), "あれば作らない");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[window]\nopacity = 0.5\n");
+    }
+
+    #[test]
     fn missing_file_is_created_with_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fude").join("config.toml");
-        let state = load_or_create(Some(&path));
+        let state = load_or_create(Some(&path), true);
         assert_eq!(state.settings, Settings::default());
         assert!(state.issues.is_empty());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_CONFIG);
+    }
+
+    #[test]
+    fn missing_file_is_not_created_when_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fude").join("config.toml");
+        let state = load_or_create(Some(&path), false);
+        assert_eq!(state.settings, Settings::default());
+        assert!(state.issues.is_empty());
+        assert!(!path.exists());
     }
 
     #[test]
@@ -309,7 +360,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "theme = \"oled\"\n").unwrap();
-        let state = load_or_create(Some(&path));
+        let state = load_or_create(Some(&path), true);
         assert_eq!(state.settings.theme, ThemeId::Oled);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theme = \"oled\"\n");
     }
@@ -319,7 +370,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "theme = ").unwrap();
-        let state = load_or_create(Some(&path));
+        let state = load_or_create(Some(&path), true);
         assert_eq!(state.settings, Settings::default());
         assert_eq!(state.issues.len(), 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theme = ");
@@ -362,14 +413,14 @@ mod tests {
         // ファイルの下にフォルダは作れない。
         let blocker = dir.path().join("file");
         std::fs::write(&blocker, "").unwrap();
-        let state = load_or_create(Some(&blocker.join("fude").join("config.toml")));
+        let state = load_or_create(Some(&blocker.join("fude").join("config.toml")), true);
         assert_eq!(state.settings, Settings::default());
         assert_eq!(state.issues.len(), 1);
     }
 
     #[test]
     fn no_path_means_defaults_silently() {
-        let state = load_or_create(None);
+        let state = load_or_create(None, true);
         assert_eq!(state.settings, Settings::default());
         assert!(state.issues.is_empty());
     }

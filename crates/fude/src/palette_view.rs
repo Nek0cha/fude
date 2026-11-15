@@ -365,6 +365,15 @@ impl WorkspaceView {
         self.refresh_palette(cx);
     }
 
+    /// 開く前のフォーカスが focus（もう描かないビュー。閉じたチュートリアルなど）なら忘れ、閉じるときは選択中のペインへ戻す。
+    pub(crate) fn forget_palette_return(&mut self, focus: &FocusHandle) {
+        if let Some(p) = self.palette.as_mut()
+            && p.return_focus.as_ref() == Some(focus)
+        {
+            p.return_focus = None;
+        }
+    }
+
     /// 消える動きを始め、開く前のフォーカスへ戻す。
     pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let reduced = self.reduced_motion;
@@ -511,6 +520,10 @@ impl WorkspaceView {
     /// コマンドを実行する。キーと同じアクションを、戻したフォーカスの位置へ送る。
     fn run_palette_command(&mut self, command: PaletteCommand, window: &mut Window, cx: &mut Context<Self>) {
         use crate::workspace_view::{CloseItem, FindInTerminal, NewTab, NextTab, PrevTab, SplitTab};
+        // チュートリアルを出していれば、先に閉じてから実行する（9c §5.6）。
+        if crate::tutorial_view::closes_tutorial(command) {
+            self.leave_tutorial(window, cx);
+        }
         let action: Box<dyn Action> = match command {
             PaletteCommand::NewTerminal => Box::new(NewTab),
             PaletteCommand::SplitTerminal => Box::new(SplitTab),
@@ -548,6 +561,7 @@ impl WorkspaceView {
             PaletteCommand::ToggleVerticalTabs => return self.toggle_vertical_tabs(cx),
             PaletteCommand::UndoTreeOp => return self.undo_tree_op(window, cx),
             PaletteCommand::RedoTreeOp => return self.redo_tree_op(window, cx),
+            PaletteCommand::ShowTutorial => return self.show_tutorial(window, cx),
         };
         window.dispatch_action(action, cx);
     }

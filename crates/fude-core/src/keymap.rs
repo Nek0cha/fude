@@ -76,30 +76,32 @@ impl Command {
         fixed.to_string()
     }
 
+    /// 番号を持たない命令の一覧（ActivateProject を除く全部）。
+    pub const FIXED: [Command; 17] = [
+        Command::NewTab,
+        Command::SplitTab,
+        Command::NextTab,
+        Command::PrevTab,
+        Command::Copy,
+        Command::Paste,
+        Command::Close,
+        Command::ToggleTree,
+        Command::Save,
+        Command::OpenPalette,
+        Command::GoToFile,
+        Command::FindInFiles,
+        Command::FindInTerminal,
+        Command::ToggleRouteMap,
+        Command::SendToClaude,
+        Command::ToggleMarkdownMode,
+        Command::OpenSettings,
+    ];
+
     pub fn from_name(name: &str) -> Option<Command> {
         if let Some(n) = name.strip_prefix("activate_project_") {
             return n.parse::<u8>().ok().filter(|n| (1..=9).contains(n) && name.len() == "activate_project_".len() + 1).map(Command::ActivateProject);
         }
-        const FIXED: [Command; 17] = [
-            Command::NewTab,
-            Command::SplitTab,
-            Command::NextTab,
-            Command::PrevTab,
-            Command::Copy,
-            Command::Paste,
-            Command::Close,
-            Command::ToggleTree,
-            Command::Save,
-            Command::OpenPalette,
-            Command::GoToFile,
-            Command::FindInFiles,
-            Command::FindInTerminal,
-            Command::ToggleRouteMap,
-            Command::SendToClaude,
-            Command::ToggleMarkdownMode,
-            Command::OpenSettings,
-        ];
-        FIXED.into_iter().find(|c| c.name() == name)
+        Command::FIXED.into_iter().find(|c| c.name() == name)
     }
 }
 
@@ -242,6 +244,26 @@ pub fn bindings(platform: Platform, overrides: &KeybindingOverrides) -> (Vec<Bin
         list.extend(keys.iter().map(|k| Binding { key: k.clone(), command, context: context_for(k) }));
     }
     (list, issues)
+}
+
+/// 命令のキーの表示（チュートリアルの説明に使う。9c の設計書 §5.2）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyHints {
+    /// どこでも効くキー（文脈の無い行）。
+    pub anywhere: Option<String>,
+    /// ターミナルの外でだけ効くキー（NOT_TERMINAL の行）。
+    pub outside_terminal: Option<String>,
+}
+
+/// 今の割り当て（bindings の結果）から、command のキーの表示を作る。それぞれ最初の行を使う。
+pub fn key_hints(bindings: &[Binding], command: Command, platform: Platform) -> KeyHints {
+    let first = |context: Option<&str>| {
+        bindings
+            .iter()
+            .find(|b| b.command == command && b.context == context)
+            .map(|b| crate::palette::key_label(&b.key, platform))
+    };
+    KeyHints { anywhere: first(None), outside_terminal: first(Some(NOT_TERMINAL)) }
 }
 
 #[cfg(test)]
@@ -408,6 +430,30 @@ mod tests {
 
     fn rows_of(list: &[Binding], command: Command) -> Vec<(String, Option<&'static str>)> {
         list.iter().filter(|b| b.command == command).map(|b| (b.key.clone(), b.context)).collect()
+    }
+
+    #[test]
+    fn key_hints_default_windows() {
+        let (list, _) = bindings(Platform::Windows, &KeybindingOverrides::default());
+        let h = key_hints(&list, Command::ToggleTree, Platform::Windows);
+        assert_eq!(h.anywhere.as_deref(), Some("Ctrl+Shift+B"));
+        assert_eq!(h.outside_terminal.as_deref(), Some("Ctrl+B"));
+        let (list, _) = bindings(Platform::MacOs, &KeybindingOverrides::default());
+        assert_eq!(key_hints(&list, Command::ToggleTree, Platform::MacOs).anywhere.as_deref(), Some("⌘B"));
+    }
+
+    #[test]
+    fn key_hints_follow_overrides() {
+        let (list, _) = bindings(Platform::Windows, &overrides(&[("toggle_tree", &["ctrl-alt-t"])], &[]));
+        let h = key_hints(&list, Command::ToggleTree, Platform::Windows);
+        assert_eq!(h.anywhere.as_deref(), Some("Ctrl+Alt+T"));
+        assert_eq!(h.outside_terminal, None);
+    }
+
+    #[test]
+    fn key_hints_skip_removed() {
+        let (list, _) = bindings(Platform::Windows, &overrides(&[("toggle_tree", &[])], &[]));
+        assert_eq!(key_hints(&list, Command::ToggleTree, Platform::Windows), KeyHints::default());
     }
 
     #[test]

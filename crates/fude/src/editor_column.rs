@@ -185,17 +185,26 @@ impl WorkspaceView {
     /// 設定パネルを開く。選んでいるプロジェクトのエディタ列に設定のタブを開き（ほかのプロジェクトのものは閉じる）、
     /// プロジェクトが無ければホーム画面の代わりに出す。
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // チュートリアルの上の Ctrl+, は何もしない（9c §5.7）。
+        if self.tutorial.is_some() {
+            return;
+        }
         let view = match &self.settings_view {
             Some(v) => {
                 v.update(cx, |v, cx| v.reopened(cx));
                 v.clone()
             }
             None => {
-                let v = cx.new(|cx| crate::settings_view::SettingsView::new(window, cx));
+                let board = self.hook_board(cx);
+                let v = cx.new(|cx| crate::settings_view::SettingsView::new(board, window, cx));
                 // 設定ファイルはどのプロジェクトの中にも無いので、エディタ列には開けない（open_file は設定のフォルダを
-                // プロジェクトとして開いてしまう）。OS の既定のアプリで開く。
+                // プロジェクトとして開いてしまう）。OS の既定のアプリで開く。チュートリアルを途中で抜けた回はまだ
+                // ファイルが無いので、先に既定の文面で作る（9c §5.5）。
                 cx.subscribe_in(&v, window, |_, _, ev: &crate::settings_view::SettingsViewEvent, _, cx| match ev {
-                    crate::settings_view::SettingsViewEvent::OpenConfig(path) => cx.open_with_system(path),
+                    crate::settings_view::SettingsViewEvent::OpenConfig(path) => {
+                        crate::config_runtime::ensure_config_file(cx);
+                        cx.open_with_system(path);
+                    }
                 })
                 .detach();
                 self.settings_view = Some(v.clone());

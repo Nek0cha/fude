@@ -54,10 +54,11 @@ pub enum PaletteCommand {
     UndoTreeOp,
     RedoTreeOp,
     OpenSettings,
+    ShowTutorial,
 }
 
 impl PaletteCommand {
-    pub const ALL: [PaletteCommand; 20] = [
+    pub const ALL: [PaletteCommand; 21] = [
         PaletteCommand::NewTerminal,
         PaletteCommand::SplitTerminal,
         PaletteCommand::ToggleTree,
@@ -78,6 +79,7 @@ impl PaletteCommand {
         PaletteCommand::UndoTreeOp,
         PaletteCommand::RedoTreeOp,
         PaletteCommand::OpenSettings,
+        PaletteCommand::ShowTutorial,
     ];
 
     /// 表示名。
@@ -103,6 +105,7 @@ impl PaletteCommand {
             PaletteCommand::UndoTreeOp => "ツリーの操作を取り消す",
             PaletteCommand::RedoTreeOp => "ツリーの操作をやり直す",
             PaletteCommand::OpenSettings => "設定を開く",
+            PaletteCommand::ShowTutorial => "チュートリアルをもう一度",
         }
     }
 
@@ -129,12 +132,13 @@ impl PaletteCommand {
             PaletteCommand::UndoTreeOp => "undo file operation",
             PaletteCommand::RedoTreeOp => "redo file operation",
             PaletteCommand::OpenSettings => "open settings preferences theme font",
+            PaletteCommand::ShowTutorial => "tutorial onboarding welcome help",
         }
     }
 
     /// プロジェクトを開いていないと使えないか。
     pub fn needs_project(self) -> bool {
-        !matches!(self, PaletteCommand::OpenFolder | PaletteCommand::ToggleVerticalTabs)
+        !matches!(self, PaletteCommand::OpenFolder | PaletteCommand::ToggleVerticalTabs | PaletteCommand::ShowTutorial)
     }
 
     /// 割り当てたキー（keymap の Command）。無ければ None。
@@ -159,7 +163,8 @@ impl PaletteCommand {
             | PaletteCommand::TogglePin
             | PaletteCommand::ToggleVerticalTabs
             | PaletteCommand::UndoTreeOp
-            | PaletteCommand::RedoTreeOp => None,
+            | PaletteCommand::RedoTreeOp
+            | PaletteCommand::ShowTutorial => None,
         }
     }
 }
@@ -270,9 +275,17 @@ mod tests {
         assert_eq!(PaletteCommand::CopyHookConfig.label(), "Claude Code の hook の設定をコピー");
         assert_eq!(PaletteCommand::OpenSettings.label(), "設定を開く");
         assert_eq!(PaletteCommand::OpenSettings.keymap_command(), Some(Command::OpenSettings));
-        assert_eq!(PaletteCommand::ALL.len(), 20);
+        assert_eq!(PaletteCommand::ALL.len(), 21);
         assert_eq!(PaletteCommand::LaunchClaude.keymap_command(), None);
         assert_eq!(PaletteCommand::CopyHookConfig.keymap_command(), None);
+    }
+
+    #[test]
+    fn show_tutorial_palette_entry() {
+        assert_eq!(PaletteCommand::ShowTutorial.label(), "チュートリアルをもう一度");
+        assert_eq!(PaletteCommand::ShowTutorial.keymap_command(), None);
+        assert!(!PaletteCommand::ShowTutorial.needs_project());
+        assert!(PaletteCommand::ALL.contains(&PaletteCommand::ShowTutorial));
     }
 
     #[test]
