@@ -122,7 +122,11 @@ if ($LASTEXITCODE -ne 0) { throw "signtool が失敗した（$LASTEXITCODE）" }
 
 # 登録し直す。
 Remove-Registration
-Invoke-WinPS "Add-AppxPackage -Path $(Quote $msix) -ExternalLocation $(Quote $menuDir)"
+try {
+    Invoke-WinPS "Add-AppxPackage -Path $(Quote $msix) -ExternalLocation $(Quote $menuDir)"
+} catch {
+    throw "登録に失敗した。前の登録は外れたままなので、原因を直してもう一度実行する: $_"
+}
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 Remove-OldFolders $menuDir
 Write-Host "右クリックメニューを登録した（fude.exe: $FudeExe、置き場所: $menuDir）"
