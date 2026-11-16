@@ -56,10 +56,6 @@ jobs:
             Write-Output "::error::タグの版（$tag）と crates/fude/Cargo.toml の版（$version）が違う"
             exit 1
           }
-      - uses: actions/download-artifact@v8
-        with:
-          name: fude-linux
-          path: target/linux
       - name: Inno Setup を用意する
         run: |
           $found = (Get-Command ISCC.exe -ErrorAction SilentlyContinue) -or (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")
@@ -81,6 +77,11 @@ jobs:
             Write-Output 'FUDE_SIGN_PFX_BASE64 が無いので署名しない'
           }
       - uses: Swatinem/rust-cache@v2
+      # rust-cache は target を戻すときに中身を入れ替えるので、fude-linux はその後で受け取る。
+      - uses: actions/download-artifact@v8
+        with:
+          name: fude-linux
+          path: target/linux
       - name: インストーラーを作る
         env:
           FUDE_SIGN_PFX_PASSWORD: ${{ secrets.FUDE_SIGN_PFX_PASSWORD }}
