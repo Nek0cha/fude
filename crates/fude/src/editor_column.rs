@@ -231,6 +231,17 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// 設定パネルを開き、ライセンスのページを出す（10a）。チュートリアルの上では何もしない（open_settings と同じ）。
+    pub(crate) fn open_licenses(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tutorial.is_some() {
+            return;
+        }
+        self.open_settings(window, cx);
+        if let Some(v) = &self.settings_view {
+            v.update(cx, |v, cx| v.show_licenses(cx));
+        }
+    }
+
     /// 描画のたびに呼ぶ。エディタ列の出入りと、ターミナルの有無によるエディタの移動の動きを始める。
     pub(crate) fn observe_editor_column(&mut self, now: std::time::Instant) {
         use crate::theme::motion::{EDITOR_MOVE, PANEL_IN, PANEL_OUT, ease_out_quint};

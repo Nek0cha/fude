@@ -2,6 +2,9 @@
 name = "fude"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 gpui-kit = { version = "0.9.1", features = ["tree-sitter", "tree-sitter-rust", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-javascript", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-markdown", "tree-sitter-markdown-inline", "tree-sitter-python", "tree-sitter-go", "tree-sitter-bash", "tree-sitter-css", "tree-sitter-html", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-sql", "tree-sitter-lua", "tree-sitter-make", "tree-sitter-java", "tree-sitter-kotlin", "tree-sitter-ruby", "tree-sitter-php"] }

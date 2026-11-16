@@ -1,0 +1,33 @@
+fude
+Copyright 2026 Nek0cha
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+This product bundles the following third-party materials. Their license
+texts are in the licenses/ directory and can be read in the app from the
+command palette ("ライセンス").
+
+- HackGen Console NF (fonts, embedded unmodified)
+  SIL Open Font License 1.1 - licenses/HackGen-OFL.txt
+- Material Icon Theme (file icons)
+  MIT License - licenses/material-icon-theme-LICENSE
+- Lucide (UI icons, via gpui-kit-assets)
+  ISC License - licenses/lucide-ISC.txt
+- musl libc (statically linked into fude-linux, which is embedded in
+  fude.exe and installed into WSL)
+  MIT License - licenses/musl-COPYRIGHT.txt
+- Theme colors derived from Catppuccin, Dracula, GitHub VS Code Theme,
+  One Dark Pro and Tokyo Night
+  MIT License - licenses/catppuccin-MIT.txt, licenses/dracula-MIT.txt,
+  licenses/github-vscode-theme-MIT.txt, licenses/one-dark-pro-MIT.txt,
+  licenses/tokyo-night-MIT.txt
+
+Licenses of the Rust crates fude depends on are listed in
+licenses/THIRD-PARTY.md. Three of them, dwrote, nucleo-matcher and
+option-ext, are licensed under the Mozilla Public License 2.0. They are
+used unmodified, and their source code is available from crates.io
+(https://crates.io/crates/<name>).
+
+Claude and Claude Code are trademarks of Anthropic, PBC. fude is an
+independent project and is not affiliated with, endorsed by, or sponsored
+by Anthropic.
