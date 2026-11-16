@@ -25,6 +25,11 @@ fn sh(n: usize) -> CommandBuilder {
     cmd
 }
 
+/// od の出力は OS で桁の空け方が違う（macOS は広い）ので、空白を 1 つに詰めて比べる。
+fn squeeze(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn shift_enter_bytes() -> Vec<u8> {
     let key = KeyInput { code: KeyCode::Enter, mods: Modifiers { shift: true, ..Modifiers::default() } };
     encode_key(&key, TermModes::default(), &KeyOverrides::defaults()).unwrap()
@@ -50,12 +55,12 @@ fn cjk_reaches_wsl_unchanged() {
 #[test]
 fn shift_enter_reaches_shell_unchanged() {
     let out = roundtrip(sh(2), &shift_enter_bytes(), Duration::from_secs(10)).unwrap();
-    assert!(out.contains("1b 0d"), "{out:?}");
+    assert!(squeeze(&out).contains("1b 0d"), "{out:?}");
 }
 
 #[cfg(unix)]
 #[test]
 fn cjk_reaches_shell_unchanged() {
     let out = roundtrip(sh(3), "あ".as_bytes(), Duration::from_secs(10)).unwrap();
-    assert!(out.contains("e3 81 82"), "{out:?}");
+    assert!(squeeze(&out).contains("e3 81 82"), "{out:?}");
 }
