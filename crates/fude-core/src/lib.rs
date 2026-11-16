@@ -7,6 +7,7 @@ pub mod fuzzy;
 pub mod git_head;
 pub mod keymap;
 pub mod keys;
+pub mod licenses;
 pub mod location;
 pub mod markdown;
 pub mod motion;
