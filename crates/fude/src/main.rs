@@ -37,6 +37,7 @@ mod search_view;
 mod settings_sections;
 mod settings_view;
 mod reduced_motion;
+mod shell_command;
 mod shell_menu;
 mod term_search;
 mod terminal_paint;
