@@ -25,6 +25,7 @@ mod layout_anim;
 mod main_area;
 mod md_preview;
 mod open_file;
+mod os_notify;
 mod palette_view;
 mod pin_view;
 mod popup;
