@@ -87,13 +87,8 @@ impl WorkspaceView {
                 .gap(px(8.))
                 .rounded(size::RADIUS_SM)
                 .bg(bg)
-                .child(
-                    svg()
-                        .path(crate::assets::CLAUDE_LOGO)
-                        .size(crate::title_row::ICON)
-                        .flex_shrink_0()
-                        .text_color(rgb(crate::assets::CLAUDE_COLOR)),
-                )
+                // Claude のロゴは Anthropic の書面の許可が要るので使わず、汎用のアイコンにする（10a）。
+                .child(icon(IconName::Sparkles, theme.accent))
                 .child("Claude Code")
                 .on_click(cx.listener(|this, _, _, cx| {
                     if this.shell_menu.as_ref().is_some_and(|m| m.closing()) {
