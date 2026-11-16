@@ -62,6 +62,8 @@ fude.exe は、WSL に置く Linux 用の fude（`fude-linux`）を中に埋め�
 | `FUDE_SIGN_TIMESTAMP_URL` | `pfx` のときの時刻の印のサーバー（既定は `http://timestamp.digicert.com`） |
 | `FUDE_SIGN_COMMAND` | `command` のときに実行するコマンド。`{file}` が署名するファイルのパスに置き換わります。署名し終わるまで待つコマンドにします |
 
+配布物（Releases に置くインストーラー）は GitHub Actions が作ります。手順は [docs/releasing.md](docs/releasing.md) にあります。
+
 アプリのアイコン（`assets/icon/fude.ico`）は、`assets/icon/*.svg` を変えたときに `sh scripts/gen-icon.sh` で作り直します（ImageMagick 7 が要ります）。
 
 ### macOS
