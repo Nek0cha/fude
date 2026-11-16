@@ -1,11 +1,13 @@
 //! Windows では、WSL の中でビルドした Linux 用の fude（target/linux/fude-linux）と版の印を埋め込む。
 //! `$OUT_DIR/linux_bin.rs` に `LINUX_BIN: Option<(&[u8], &str)>` を書く。無ければ None にして警告を出す。
+//! Windows では exe にアプリのアイコン（リソースの番号 1。GPUI が窓のアイコンに使う）と版の情報も埋め込む。
 //! また、`assets/file-icons` の SVG を `$OUT_DIR/file_icons.rs` の `FILE_ICONS: &[(&str, &[u8])]` に埋め込む。
 
 use std::path::PathBuf;
 
 fn main() {
     embed_file_icons();
+    embed_windows_resource();
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("linux_bin.rs");
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let linux = manifest.join("..").join("..").join("target").join("linux");
@@ -80,4 +82,21 @@ fn embed_file_icons() {
 ");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("file_icons.rs");
     std::fs::write(out, code).unwrap();
+}
+
+/// Windows のターゲットのとき、assets/icon/fude.ico と版の情報を exe のリソースに埋め込む（10b の設計書 §5.2）。
+fn embed_windows_resource() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let icon = manifest.join("..").join("..").join("assets").join("icon").join("fude.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
+    let mut res = winresource::WindowsResource::new();
+    // GPUI は窓のアイコンを番号 1 から読む（gpui-pre-windows の platform.rs の load_icon）。
+    res.set_icon_with_id(icon.to_str().unwrap(), "1");
+    res.set("ProductName", "fude");
+    res.set("FileDescription", "fude");
+    res.set("LegalCopyright", "Copyright 2026 Nek0cha");
+    res.compile().expect("exe のリソースを埋め込めない");
 }

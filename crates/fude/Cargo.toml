@@ -30,3 +30,7 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "N
 
 [dev-dependencies]
 tempfile = "3"
+
+[build-dependencies]
+# Windows の exe にアイコンと版の情報を埋め込む（build.rs。Windows のターゲットのときだけ使う）。
+winresource = "0.1.34"

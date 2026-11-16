@@ -6,3 +6,11 @@ members = ["crates/*", "spikes/*"]
 license = "Apache-2.0"
 repository = "https://github.com/Nek0cha/fude"
 publish = false
+
+# exe を小さくする（10b の設計書 §5.8。測った結果は 102.1MB → 97.9MB、起動は遅くならない）。
+# panic = "abort" は、裏のスレッドの panic でアプリごと落ちるようになるので使わない。
+# opt-level = "s" は、ターミナルの描画などの速さを測っていないので使わない。
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

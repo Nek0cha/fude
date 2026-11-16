@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- fude のアイコンの小さい用（16〜32 px）。fude.svg と同じ形で、余白を減らし、線を太くしている。 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#23233a"/>
+      <stop offset="1" stop-color="#0e0e14"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e2dbff"/>
+      <stop offset="1" stop-color="#a796ff"/>
+    </linearGradient>
+  </defs>
+  <g transform="scale(2.56)">
+    <rect x="1" y="1" width="98" height="98" rx="20" fill="url(#bg)"/>
+    <polyline points="22,30 44,50 22,70" fill="none" stroke="#e4e4ec" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M49 61 C 49 56, 53 55.5, 57 56 C 65 57, 74 59, 83 62 C 87 63.3, 87 66.7, 83 68 C 74 71, 64 72.5, 56 73 C 51 73.3, 49 70, 49 61 Z" fill="url(#ink)"/>
+  </g>
+</svg>

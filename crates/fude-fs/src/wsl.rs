@@ -177,6 +177,22 @@ pub fn deploy(distro: &str, bin: &str, bytes: &[u8], host_exe: &Path) -> io::Res
     Ok(())
 }
 
+/// remove_deployed のシェル。$1 は bin、$2 は host-exe のファイル。
+pub fn remove_script() -> String {
+    format!(r#"{RESOLVE}rm -f "$(r "$1")" "$(r "$2")""#)
+}
+
+/// deploy で置いた fude と host-exe のファイルを消す（アンインストールの片付け。10b §5.4）。
+pub fn remove_deployed(distro: &str, bin: &str, timeout: Duration) -> io::Result<()> {
+    ensure_distro(distro)?;
+    let out = output_with_timeout(wsl_command(distro, &remove_script(), &[bin, &host_exe_file(bin)]), &[], timeout)?;
+    if !out.status.success() {
+        let detail = decode_wsl_output(&out.stderr);
+        return Err(io::Error::other(format!("WSL の fude を消せない（{}）: {}", out.status, detail.trim())));
+    }
+    Ok(())
+}
+
 /// `wsl.exe -d <distro> -e sh -c '… exec "$b" serve' sh <bin>` を起動する Connector。
 pub struct WslConnector {
     pub distro: String,
@@ -341,6 +357,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn remove_script_removes_bin_and_host_exe() {
+        let s = remove_script();
+        assert!(s.contains("rm -f"));
+        assert!(s.contains(r#"r "$1""#) && s.contains(r#"r "$2""#), "bin と host-exe を引数で受け、~ を解く: {s}");
+    }
+
+    #[test]
+    #[ignore = "WSL の Ubuntu が必要"]
+    fn remove_deployed_removes_files() {
+        let dir = format!("/tmp/fude-rm-test-{}", std::process::id());
+        let bin = format!("{dir}/fude");
+        deploy("Ubuntu", &bin, b"#!/bin/sh\necho x\n", Path::new(r"C:\fude\fude.exe")).unwrap();
+        remove_deployed("Ubuntu", &bin, Duration::from_secs(30)).unwrap();
+        let check = format!(r#"[ -e "$1/fude" ] || [ -e "$1/host-exe" ] && echo left; rmdir "$1""#);
+        let out = wsl_command("Ubuntu", &check, &[&dir]).output().unwrap();
+        assert_eq!(decode_wsl_output(&out.stdout).trim(), "");
+    }
 
     #[test]
     fn hung_child_is_killed_after_timeout() {
