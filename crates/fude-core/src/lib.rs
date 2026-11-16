@@ -24,3 +24,4 @@ pub mod text;
 pub mod tutorial;
 pub mod tree_history;
 pub mod workspace;
+pub mod wsl_record;
