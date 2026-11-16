@@ -117,7 +117,7 @@ impl SettingsView {
             .items_center()
             .gap(px(10.))
             .child(toggle("update-check", on, true, theme).on_click(cx.listener(move |_, _, _, cx| apply_edit(cx, PanelEdit::UpdateCheck(!on)))))
-            .child(div().text_color(theme.fg_dim).child("1 日に 1 回、GitHub に問い合わせます"));
+            .child(div().text_color(theme.fg_dim).child("毎日 GitHub の Release をチェックします。"));
         div().child(heading("新しい版", theme)).child(row("新しい版を確かめる", check, theme))
     }
 }
