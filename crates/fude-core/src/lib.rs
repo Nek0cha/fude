@@ -22,6 +22,7 @@ pub mod settings_edit;
 pub mod settings_panel;
 pub mod text;
 pub mod tutorial;
+pub mod update_check;
 pub mod tree_history;
 pub mod workspace;
 pub mod wsl_record;
