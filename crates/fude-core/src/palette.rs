@@ -55,10 +55,11 @@ pub enum PaletteCommand {
     RedoTreeOp,
     OpenSettings,
     ShowTutorial,
+    OpenLicenses,
 }
 
 impl PaletteCommand {
-    pub const ALL: [PaletteCommand; 21] = [
+    pub const ALL: [PaletteCommand; 22] = [
         PaletteCommand::NewTerminal,
         PaletteCommand::SplitTerminal,
         PaletteCommand::ToggleTree,
@@ -80,6 +81,7 @@ impl PaletteCommand {
         PaletteCommand::RedoTreeOp,
         PaletteCommand::OpenSettings,
         PaletteCommand::ShowTutorial,
+        PaletteCommand::OpenLicenses,
     ];
 
     /// 表示名。
@@ -106,6 +108,7 @@ impl PaletteCommand {
             PaletteCommand::RedoTreeOp => "ツリーの操作をやり直す",
             PaletteCommand::OpenSettings => "設定を開く",
             PaletteCommand::ShowTutorial => "チュートリアルをもう一度",
+            PaletteCommand::OpenLicenses => "ライセンス",
         }
     }
 
@@ -133,6 +136,7 @@ impl PaletteCommand {
             PaletteCommand::RedoTreeOp => "redo file operation",
             PaletteCommand::OpenSettings => "open settings preferences theme font",
             PaletteCommand::ShowTutorial => "tutorial onboarding welcome help",
+            PaletteCommand::OpenLicenses => "license licenses credits notice third party oss",
         }
     }
 
@@ -164,7 +168,8 @@ impl PaletteCommand {
             | PaletteCommand::ToggleVerticalTabs
             | PaletteCommand::UndoTreeOp
             | PaletteCommand::RedoTreeOp
-            | PaletteCommand::ShowTutorial => None,
+            | PaletteCommand::ShowTutorial
+            | PaletteCommand::OpenLicenses => None,
         }
     }
 }
@@ -237,6 +242,15 @@ mod tests {
     use crate::keymap::{Command, Platform};
 
     #[test]
+    fn open_licenses_command() {
+        assert!(PaletteCommand::ALL.contains(&PaletteCommand::OpenLicenses));
+        assert_eq!(PaletteCommand::OpenLicenses.label(), "ライセンス");
+        assert!(PaletteCommand::OpenLicenses.keywords().contains("license"));
+        assert!(PaletteCommand::OpenLicenses.keymap_command().is_none());
+        assert_eq!(PaletteCommand::OpenLicenses.needs_project(), PaletteCommand::OpenSettings.needs_project());
+    }
+
+    #[test]
     fn prefixes_pick_scope() {
         assert_eq!(parse_input(">split", Scope::All), (Scope::Commands, "split"));
         // 全体検索は # の直後の空白 1 つだけを除き、前後の空白を残す（"  return" を探せる）。
@@ -275,7 +289,7 @@ mod tests {
         assert_eq!(PaletteCommand::CopyHookConfig.label(), "Claude Code の hook の設定をコピー");
         assert_eq!(PaletteCommand::OpenSettings.label(), "設定を開く");
         assert_eq!(PaletteCommand::OpenSettings.keymap_command(), Some(Command::OpenSettings));
-        assert_eq!(PaletteCommand::ALL.len(), 21);
+        assert_eq!(PaletteCommand::ALL.len(), 22);
         assert_eq!(PaletteCommand::LaunchClaude.keymap_command(), None);
         assert_eq!(PaletteCommand::CopyHookConfig.keymap_command(), None);
     }

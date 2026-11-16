@@ -426,6 +426,11 @@ mod tests {
     }
 
     #[test]
+    fn licenses_closes_tutorial() {
+        assert!(closes_tutorial(PaletteCommand::OpenLicenses));
+    }
+
+    #[test]
     fn leave_tutorial_on_key() {
         assert!(!key_command_closes(Command::OpenPalette, true), "パレットを開くだけでは閉じない");
         assert!(!key_command_closes(Command::OpenSettings, true), "チュートリアルの上の Ctrl+, は何もしない");
