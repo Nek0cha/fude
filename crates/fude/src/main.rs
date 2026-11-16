@@ -110,6 +110,30 @@ fn set_app_user_model_id() {
     }
 }
 
+/// macOS で、fude.app の fude を端末から打ったとき、自分を端末から切り離して起動し直し、このプロセスは終わる
+/// （ターミナルをすぐ戻し、閉じても fude が残るようにする）。切り離せたら true。
+/// 子は標準入出力を捨て、新しいプロセスグループで動くので、端末は子に触れない。子は端末につながっていないため、
+/// もう一度切り離すことはない。起動に失敗したら、この場で動き続ける。
+#[cfg(target_os = "macos")]
+fn detach_from_terminal(args: &[std::ffi::OsString]) -> bool {
+    use std::io::IsTerminal;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let on_terminal = std::io::stdin().is_terminal() || std::io::stdout().is_terminal() || std::io::stderr().is_terminal();
+    let Ok(exe) = std::env::current_exe() else { return false };
+    if !shell_command::should_detach(&exe, on_terminal) {
+        return false;
+    }
+    match Command::new(&exe).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn() {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("fude: 端末から切り離せない（このまま動く）: {e}");
+            false
+        }
+    }
+}
+
 fn main() {
     let args = open_urls::strip_psn(std::env::args_os().skip(1).collect());
     // `fude hook` は待ち受けも GUI も始めず、信号を送って終わる（`hook` というフォルダは `fude ./hook` で開く）。
@@ -129,6 +153,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    #[cfg(target_os = "macos")]
+    if detach_from_terminal(&args) {
+        return;
+    }
     let name = fude_ipc::endpoint_name(&|k| std::env::var(k).ok());
     let server = match hand_off(&name, &launch) {
         Ok(HandOff::Delivered) => return,

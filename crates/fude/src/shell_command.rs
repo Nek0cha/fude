@@ -15,6 +15,13 @@ pub(crate) fn bundle_executable(exe: &Path) -> Option<PathBuf> {
     (macos.file_name()? == "MacOS" && contents.file_name()? == "Contents" && is_app).then(|| exe.to_path_buf())
 }
 
+/// `fude <パス>` を端末から打ったとき、自分を端末から切り離して起動し直すか。
+/// fude.app の中の実行ファイルで、標準入出力のどれかが端末につながっているときだけ true にする。
+/// 開発用（`cargo run`）は前面のまま動かし、Finder や `open` からの起動（端末なし）は切り離しが要らない。
+pub(crate) fn should_detach(exe: &Path, on_terminal: bool) -> bool {
+    on_terminal && bundle_executable(exe).is_some()
+}
+
 /// リンクの場所にあるもの。
 #[derive(Debug, PartialEq)]
 pub(crate) enum LinkState {
@@ -104,6 +111,16 @@ mod tests {
         assert_eq!(bundle_executable(exe), Some(exe.to_path_buf()));
         assert_eq!(bundle_executable(Path::new("/Users/a/fude/target-dev/debug/fude")), None);
         assert_eq!(bundle_executable(Path::new("/x/Contents/MacOS/fude")), None);
+    }
+
+    #[test]
+    fn detach_only_from_bundle_on_terminal() {
+        let app = Path::new("/Applications/fude.app/Contents/MacOS/fude");
+        let dev = Path::new("/Users/a/fude/target-dev/debug/fude");
+        assert!(should_detach(app, true));
+        assert!(!should_detach(app, false));
+        assert!(!should_detach(dev, true));
+        assert!(!should_detach(dev, false));
     }
 
     #[test]
