@@ -121,7 +121,8 @@ fn detach_from_terminal(args: &[std::ffi::OsString]) -> bool {
     use std::process::{Command, Stdio};
 
     let on_terminal = std::io::stdin().is_terminal() || std::io::stdout().is_terminal() || std::io::stderr().is_terminal();
-    let Ok(exe) = std::env::current_exe() else { return false };
+    // シンボリックリンク（/usr/local/bin/fude）から起動すると current_exe() はリンクのパスを返すので、実体をたどってから判定する。
+    let Ok(exe) = std::env::current_exe().and_then(|p| p.canonicalize()) else { return false };
     if !shell_command::should_detach(&exe, on_terminal) {
         return false;
     }

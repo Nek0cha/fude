@@ -123,6 +123,21 @@ mod tests {
         assert!(!should_detach(dev, false));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn detach_follows_symlink_only_after_canonicalize() {
+        // /usr/local/bin/fude のようなリンクから起動すると current_exe() はリンクのパスを返す。実体をたどったときだけ判定が通る。
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("fude.app/Contents/MacOS/fude");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "x").unwrap();
+        let link = dir.path().join("fude");
+        std::os::unix::fs::symlink(&exe, &link).unwrap();
+        assert!(!should_detach(&link, true), "リンクのパスでは切り離さない（バグの再現）");
+        let real = link.canonicalize().unwrap();
+        assert!(should_detach(&real, true), "実体のパスでは切り離す");
+    }
+
     #[test]
     fn install_script_quotes() {
         let s = install_script(Path::new("/Applications/My Apps/it's \"x\"/fude.app/Contents/MacOS/fude"));
