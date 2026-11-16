@@ -16,7 +16,7 @@ pub enum HandOff {
     Serve(Server),
 }
 
-fn message_of(launch: &Launch) -> Message {
+pub(crate) fn message_of(launch: &Launch) -> Message {
     match launch {
         Launch::Activate => Message::Activate,
         Launch::Open { root, shell } => Message::Open { root: root.clone(), shell: shell.clone() },
