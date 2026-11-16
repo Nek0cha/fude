@@ -92,6 +92,20 @@ fn initial_bounds(saved: Option<WindowGeom>, cx: &App) -> WindowBounds {
     }
 }
 
+/// スタートメニューのショートカットと同じ AppUserModelID（10b の設計書 §5.3）。タスクバーでピン留めと窓をまとめ、
+/// 10e のトーストもこれを使う。
+pub(crate) const APP_USER_MODEL_ID: &str = "Nek0cha.fude";
+
+/// 窓を作る前に、このプロセスの AppUserModelID を名乗る（Windows だけ。失敗しても続ける）。
+fn set_app_user_model_id() {
+    #[cfg(windows)]
+    {
+        let id = windows::core::HSTRING::from(APP_USER_MODEL_ID);
+        // SAFETY: 引数は有効な文字列。失敗は無視する（タスクバーのまとまりが崩れるだけ）。
+        let _ = unsafe { windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(&id) };
+    }
+}
+
 fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     // `fude hook` は待ち受けも GUI も始めず、信号を送って終わる（`hook` というフォルダは `fude ./hook` で開く）。
@@ -102,6 +116,7 @@ fn main() {
     if args.first().is_some_and(|a| a == "uninstall-cleanup") {
         std::process::exit(uninstall_cli::uninstall_main());
     }
+    set_app_user_model_id();
     let cwd = std::env::current_dir().expect("現在のディレクトリを取得できない");
     let launch = match parse_launch(&args, &cwd) {
         Ok(launch) => launch,

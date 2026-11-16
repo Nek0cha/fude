@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- fude のアイコン。左は > のプロンプト、右下は _ のカーソルの代わりの筆の線（10b の設計書 §5.1）。 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#23233a"/>
+      <stop offset="1" stop-color="#0e0e14"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d9d0ff"/>
+      <stop offset="1" stop-color="#9a86ff"/>
+    </linearGradient>
+  </defs>
+  <g transform="scale(2.56)">
+    <rect x="4" y="4" width="92" height="92" rx="22" fill="url(#bg)"/>
+    <rect x="4.5" y="4.5" width="91" height="91" rx="21.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+    <polyline points="25,33 44,50 25,67" fill="none" stroke="#d8d8e2" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M50 61 C 51 58.5, 54 58, 57 58.5 C 64 59.5, 72 61, 80 63.5 C 82 64.2, 82 66, 80 66.4 C 72 67.8, 63 69, 56 69.5 C 52 69.8, 49.5 67, 50 61 Z" fill="url(#ink)"/>
+  </g>
+</svg>
