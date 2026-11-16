@@ -50,6 +50,7 @@ mod tree_undo;
 mod tree_view;
 mod tutorial_demo;
 mod tutorial_view;
+mod uninstall_cli;
 mod vertical_tabs;
 mod workspace_view;
 mod wsl_host;
@@ -96,6 +97,10 @@ fn main() {
     // `fude hook` は待ち受けも GUI も始めず、信号を送って終わる（`hook` というフォルダは `fude ./hook` で開く）。
     if args.first().is_some_and(|a| a == "hook") {
         std::process::exit(hook_cli::hook_main(&args[1..]));
+    }
+    // インストーラーのアンインストールが呼ぶ（10b §5.4）。使い方の案内には出さない。
+    if args.first().is_some_and(|a| a == "uninstall-cleanup") {
+        std::process::exit(uninstall_cli::uninstall_main());
     }
     let cwd = std::env::current_dir().expect("現在のディレクトリを取得できない");
     let launch = match parse_launch(&args, &cwd) {

@@ -75,16 +75,27 @@ pub fn own_exe_for_hook() -> Option<String> {
     Some(fude_core::paths::simplify_verbatim(exe).to_string_lossy().replace('\\', "/"))
 }
 
-/// settings.json への登録・解除・状態を実行し、そのあとの状態を 1 行の JSON で書く。
-fn run_admin(admin: &HookAdmin) {
+/// settings.json への登録・解除・状態を実行し、そのあとの状態を返す。
+fn admin_status(admin: &HookAdmin) -> fude_core::claude_settings::HookStatus {
     use fude_core::claude_settings::{home_from_env, settings_path};
     let env = |k: &str| std::env::var(k).ok();
     let path = settings_path(&env, home_from_env(&env));
     let own = own_exe_for_hook().unwrap_or_default();
     let make = |c: Option<String>| HookCommand::Exec(c.unwrap_or_else(|| own.clone()));
-    let status = fude_core::claude_settings::run_admin(admin, path.as_deref(), &make);
+    fude_core::claude_settings::run_admin(admin, path.as_deref(), &make)
+}
+
+/// settings.json への登録・解除・状態を実行し、そのあとの状態を 1 行の JSON で書く。
+fn run_admin(admin: &HookAdmin) {
+    let status = admin_status(admin);
     crate::instance::attach_parent_console();
     println!("{}", serde_json::to_string(&status).unwrap_or_default());
+}
+
+/// この PC の Claude Code の hook を外し、結果をログの 1 行にする（uninstall-cleanup が使う）。
+pub(crate) fn uninstall_this_pc() -> String {
+    let status = admin_status(&HookAdmin::Uninstall);
+    format!("この PC の hook: {}", serde_json::to_string(&status).unwrap_or_default())
 }
 
 /// この exe の hook の設定例。
