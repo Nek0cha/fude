@@ -33,8 +33,12 @@ pub fn add(list: &mut Vec<Deployed>, distro: &str, bin: &str) -> bool {
     true
 }
 
-/// 記録に足す。足したときだけ書く。
+/// 記録に足す。足したときだけ書く。別のディストロの接続と hook の確かめが同時に呼ぶので、プロセスの中では 1 つずつ
+/// 読んで書く（同時に書くと、後の書き込みが先の組を消したり、一時ファイルの rename が失敗したりする）。
+/// 別のインスタンスは別のファイルを使うので、プロセスをまたぐロックは要らない。
 pub fn remember(path: &Path, distro: &str, bin: &str) -> io::Result<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load(path);
     if !add(&mut list, distro, bin) {
         return Ok(());
@@ -74,6 +78,23 @@ mod tests {
         remember(&path, "Ubuntu", "~/.local/bin/fude").unwrap();
         remember(&path, "Ubuntu", "~/.local/bin/fude").unwrap();
         assert_eq!(load(&path), vec![Deployed { distro: "Ubuntu".into(), bin: "~/.local/bin/fude".into() }]);
+    }
+
+    #[test]
+    fn remember_from_many_threads_keeps_all() {
+        // 別のディストロの接続と hook の確かめが同時に記録しても、どれも消えない。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wsl-deployed.json");
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || remember(&path, &format!("D{i}"), "~/.local/bin/fude"))
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap().unwrap();
+        }
+        assert_eq!(load(&path).len(), 16);
     }
 
     #[test]

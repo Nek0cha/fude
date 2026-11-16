@@ -48,11 +48,27 @@ pub(crate) fn clean_all(
     log
 }
 
-/// 1 つの組を片付ける：そのディストロで hook を外し、fude と host-exe を消す。
+/// WSL の `fude hook --uninstall` の結果から、hook が外れたか（または fude が無いか）を見る。
+/// 外れていないのに fude を消すと、存在しないコマンドを呼ぶ hook が残るので、そのときは Err にして fude を残す。
+#[cfg(windows)]
+fn wsl_hook_removed(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<(), String> {
+    use fude_core::claude_settings::HookStatus;
+    if code == Some(fude_fs::wsl::RUN_NOT_INSTALLED) {
+        return Ok(());
+    }
+    match crate::hook_targets::parse_status_output(stdout, stderr) {
+        HookStatus::NotRegistered => Ok(()),
+        HookStatus::Unreadable(reason) => Err(format!("hook を外せない（{reason}）。fude は残した")),
+        other => Err(format!("hook を外せない（{other:?}）。fude は残した")),
+    }
+}
+
+/// 1 つの組を片付ける：そのディストロで hook を外し、外れたら fude と host-exe を消す。
 #[cfg(windows)]
 fn clean_one(record: &Deployed) -> Result<(), String> {
     use fude_fs::wsl::{remove_deployed, run_fude};
-    run_fude(&record.distro, &record.bin, &["hook", "--uninstall"], PAIR_TIMEOUT).map_err(|e| format!("hook: {e}"))?;
+    let out = run_fude(&record.distro, &record.bin, &["hook", "--uninstall"], PAIR_TIMEOUT).map_err(|e| format!("hook: {e}"))?;
+    wsl_hook_removed(out.status.code(), &out.stdout, &out.stderr)?;
     remove_deployed(&record.distro, &record.bin, PAIR_TIMEOUT).map_err(|e| format!("fude: {e}"))
 }
 
@@ -128,6 +144,17 @@ mod tests {
             Duration::from_secs(5),
         );
         assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn wsl_hook_must_be_removed_before_deleting_fude() {
+        // 外せた（登録なし）、fude が無い（終了コード 3）なら消してよい。それ以外は fude を残す。
+        assert!(wsl_hook_removed(Some(0), br#"{"status":"not_registered"}"#, b"").is_ok());
+        assert!(wsl_hook_removed(Some(3), b"", b"").is_ok());
+        assert!(wsl_hook_removed(Some(0), br#"{"status":"unreadable","reason":"x"}"#, b"").is_err());
+        assert!(wsl_hook_removed(Some(1), b"", b"wsl: error").is_err());
+        assert!(wsl_hook_removed(Some(0), br#"{"status":"registered"}"#, b"").is_err());
     }
 
     #[test]
