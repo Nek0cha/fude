@@ -25,7 +25,7 @@ pub(crate) fn needs_deploy(installed: Option<&str>, bundled: &str) -> bool {
     installed != Some(bundled)
 }
 
-/// WSL に fude を置けたことを記録する（アンインストールで片付けるため。10b §5.4）。書けなくても置いた処理は失敗にしない。
+/// WSL の fude を置いた・使ったことを記録する（アンインストールで片付けるため。10b §5.4）。書けなくても元の処理は失敗にしない。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn remember_deploy(distro: &str, bin: &str) {
     let env = |k: &str| std::env::var(k).ok();
@@ -89,8 +89,9 @@ mod imp {
             let installed = installed_version(distro, &self.bin)?;
             if needs_deploy(installed.as_deref(), bundled) {
                 deploy(distro, &self.bin, bytes, &std::env::current_exe()?)?;
-                remember_deploy(distro, &self.bin);
             }
+            // 置き直さなくても（同じ版が置いてあっても）記録する。アンインストールで片付けるのは、ここで使った fude。
+            remember_deploy(distro, &self.bin);
             let connector = WslConnector { distro: distro.to_string(), bin: self.bin.clone() };
             let client = Arc::new(RemoteClient::new(Box::new(connector), TIMEOUT).with_first_timeout(FIRST_TIMEOUT));
             *slot = Some(client.clone());

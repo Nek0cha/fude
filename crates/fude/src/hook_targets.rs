@@ -89,8 +89,9 @@ fn run_wsl(distro: &str, bin: &str, op: HookOp) -> TargetState {
         if let Err(e) = deploy(distro, bin, bytes, &host_exe) {
             return state_from_io(e);
         }
-        crate::wsl_host::remember_deploy(distro, bin);
     }
+    // ここまで来れば、そのディストロに fude がある（置き直さなかったときも記録する）。
+    crate::wsl_host::remember_deploy(distro, bin);
     let args: &[&str] = match op {
         HookOp::Check => &["hook", "--status", "--command", bin],
         HookOp::Install => &["hook", "--install", "--command", bin],
