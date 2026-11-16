@@ -91,3 +91,13 @@ jobs:
           name: installer
           path: dist/fude-*-setup.exe
           if-no-files-found: error
+
+  macos:
+    # mac でビルドが通るかだけを確かめる（.app と .dmg は 10d で足す）。失敗しても Windows のリリースは止めない。
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: fude をビルドする
+        run: cargo build --release -p fude --locked
