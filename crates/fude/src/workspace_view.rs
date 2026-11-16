@@ -365,6 +365,8 @@ pub struct WorkspaceView {
     tutorial_cache: Option<Entity<crate::tutorial_view::TutorialView>>,
     /// プロジェクトが無いとき、ホーム画面の代わりに設定パネルを出している。
     pub(crate) settings_on_home: bool,
+    /// 新しい版の知らせ（10g）。
+    pub(crate) update: crate::update_notice::UpdateNotice,
     /// コマンドパレット。
     pub(crate) palette: Option<crate::palette_view::PaletteState>,
     /// ホーム画面の「最近」の右クリックメニュー。
@@ -467,6 +469,7 @@ impl WorkspaceView {
             tutorial: None,
             tutorial_cache: None,
             settings_on_home: false,
+            update: Default::default(),
             dialog: None,
             allow_close: false,
             reduced_motion: crate::reduced_motion::reduced_motion(),
@@ -505,6 +508,7 @@ impl WorkspaceView {
         this.refresh_active_branch(cx);
         this.load_distros(cx);
         this.start_plan_poll(cx);
+        this.start_update_check(cx);
         this
     }
 
@@ -678,6 +682,9 @@ impl WorkspaceView {
         self.workspace.set_local_shell(&new.terminal);
         for (view, _) in self.terminals.values() {
             view.update(cx, |v, cx| v.apply_settings(&new, window, cx));
+        }
+        if old.updates != new.updates {
+            self.on_update_setting_changed(cx);
         }
         if old.tree != new.tree {
             // 隠すフォルダが変わったら、ファイルへのアクセスと監視を作り直し、ツリーを読み直す。

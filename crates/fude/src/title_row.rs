@@ -120,7 +120,9 @@ impl WorkspaceView {
             })
             .child(self.drag_area("title-gap", cx).flex_1().h_full().min_w(px(24.)))
             .when(!covered, |row| {
-                row.children(self.render_changes_button(cx, now)).child(div().w(px(6.)).flex_shrink_0()).child(self.render_pill(cx))
+                // 新しい版の印（10g）。ホーム画面でも出す。
+                row.when_some(self.render_update_badge(cx), |row, b| row.child(b).child(div().w(px(6.)).flex_shrink_0()))
+                    .children(self.render_changes_button(cx, now)).child(div().w(px(6.)).flex_shrink_0()).child(self.render_pill(cx))
             })
             .child(div().w(px(8.)).h_full().flex_shrink_0())
             .when(cfg!(windows), |row| row.child(self.render_caption_buttons(window, cx, now)))
