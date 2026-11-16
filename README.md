@@ -13,7 +13,7 @@ fude（筆）は、Claude Code と一緒に使うことを前提にした、タ�
 
 ## 入れ方
 
-GitHub Releases に配布物（Windows のインストーラー、macOS の `.dmg`）を置く予定です（準備中）。
+[GitHub Releases](https://github.com/Nek0cha/fude/releases) に配布物（Windows のインストーラー、macOS の `.dmg`）を置きます。
 
 ### Windows のインストーラー
 
@@ -29,12 +29,18 @@ GitHub Releases に配布物（Windows のインストーラー、macOS の `.dm
 - 残るもの：設定（`%APPDATA%\fude\config.toml`）、セッション、最近開いたフォルダの一覧。入れ直すと元に戻ります。
 - 入れ直したあとは、Claude Code の hook を設定パネル（Ctrl+,）から登録し直してください。
 
+### macOS の .dmg
+
+Apple Silicon の mac 用です。`fude-<版>-macos-arm64.dmg` を開き、fude を「アプリケーション」に入れます。
+
+- アンインストールは、「アプリケーション」の fude をゴミ箱に入れます。設定（`~/.config/fude`）は残ります。
+
 ### 最初に開くときの警告
 
 配布物には、まだコード署名をしていません（署名の証明書を持っていないため）。そのため、最初に開くときに OS が警告を出します。
 
 - **Windows**：SmartScreen の「Windows によって PC が保護されました」が出たら、「詳細情報」を押してから「実行」を押します。
-- **macOS**：「開発元を確認できないため開けません」が出たら、システム設定の「プライバシーとセキュリティ」を開き、下のほうにある fude の「このまま開く」を押します。
+- **macOS**：「開けません」と出たら「完了」で閉じ、システム設定の「プライバシーとセキュリティ」を開き、下のほうにある fude の「このまま開く」を押してから、もう一度開きます。
 
 ## ビルドの仕方
 
@@ -69,6 +75,8 @@ fude.exe は、WSL に置く Linux 用の fude（`fude-linux`）を中に埋め�
 ### macOS
 
 `cargo build --release -p fude` を実行します。
+
+`.app` と `.dmg` を作るときは、`rustup target add aarch64-apple-darwin` を一度だけ行ってから、`bash scripts/build-macos.sh` を実行します。`dist/fude-<版>-macos-arm64.dmg` ができます。
 
 ### 依存を変えたとき
 

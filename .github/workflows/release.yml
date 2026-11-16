@@ -1,4 +1,4 @@
-# 配布物を作る（10c）。v* のタグを push すると、Windows のインストーラーを作って Releases の下書きに上げる。
+# 配布物を作る（10c、10d）。v* のタグを push すると、Windows のインストーラーと mac の .dmg を作って Releases の下書きに上げる。
 # 手で動かした（workflow_dispatch）ときは、Releases には上げず、成果物を Actions に置くだけにする。
 # 手順と secrets は docs/releasing.md を参照。
 name: release
@@ -94,7 +94,7 @@ jobs:
   release:
     # タグのときだけ、インストーラーを Releases の下書きに上げる。
     # gh release create --draft は同じタグの下書きがあっても新しい下書きを作るので、先に確かめて失敗させる。
-    needs: windows
+    needs: [windows, macos]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
@@ -104,6 +104,10 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: installer
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: dmg
           path: dist
       - name: 同じタグのリリース（下書きを含む）が無いことを確かめる
         env:
@@ -120,14 +124,33 @@ jobs:
         run: |
           notes="$RUNNER_TEMP/release-notes.md"
           sed "s/<版>/${GITHUB_REF_NAME#v}/g; s/<version>/${GITHUB_REF_NAME#v}/g" .github/release-notes.md > "$notes"
-          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "fude $GITHUB_REF_NAME" --notes-file "$notes" dist/fude-*-setup.exe
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "fude $GITHUB_REF_NAME" --notes-file "$notes" dist/fude-*-setup.exe dist/fude-*-macos-arm64.dmg
 
   macos:
-    # mac でビルドが通るかだけを確かめる（.app と .dmg は 10d で足す）。失敗しても Windows のリリースは止めない。
+    # mac の .app を組んで署名し、.dmg にする（scripts/build-macos.sh）。署名と公証の secrets が無ければ ad-hoc 署名で公証しない。
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
+      - name: タグの版と Cargo.toml の版を照らし合わせる
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/fude/Cargo.toml | head -n 1)
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::タグの版（${GITHUB_REF_NAME#v}）と crates/fude/Cargo.toml の版（$version）が違う"
+            exit 1
+          fi
+      - run: rustup target add aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - name: fude をビルドする
-        run: cargo build --release -p fude --locked
+      - name: .dmg を作る
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: bash scripts/build-macos.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dmg
+          path: dist/fude-*-macos-arm64.dmg
+          if-no-files-found: error
