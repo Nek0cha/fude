@@ -56,10 +56,12 @@ pub enum PaletteCommand {
     OpenSettings,
     ShowTutorial,
     OpenLicenses,
+    InstallShellCommand,
+    RemoveShellCommand,
 }
 
 impl PaletteCommand {
-    pub const ALL: [PaletteCommand; 22] = [
+    pub const ALL: [PaletteCommand; 24] = [
         PaletteCommand::NewTerminal,
         PaletteCommand::SplitTerminal,
         PaletteCommand::ToggleTree,
@@ -82,6 +84,8 @@ impl PaletteCommand {
         PaletteCommand::OpenSettings,
         PaletteCommand::ShowTutorial,
         PaletteCommand::OpenLicenses,
+        PaletteCommand::InstallShellCommand,
+        PaletteCommand::RemoveShellCommand,
     ];
 
     /// 表示名。
@@ -109,6 +113,8 @@ impl PaletteCommand {
             PaletteCommand::OpenSettings => "設定を開く",
             PaletteCommand::ShowTutorial => "チュートリアルをもう一度",
             PaletteCommand::OpenLicenses => "ライセンス",
+            PaletteCommand::InstallShellCommand => "シェルコマンドをインストール",
+            PaletteCommand::RemoveShellCommand => "シェルコマンドを削除",
         }
     }
 
@@ -137,12 +143,29 @@ impl PaletteCommand {
             PaletteCommand::OpenSettings => "open settings preferences theme font",
             PaletteCommand::ShowTutorial => "tutorial onboarding welcome help",
             PaletteCommand::OpenLicenses => "license licenses credits notice third party oss",
+            PaletteCommand::InstallShellCommand => "shell command install cli path terminal",
+            PaletteCommand::RemoveShellCommand => "shell command remove uninstall cli path",
         }
     }
 
     /// プロジェクトを開いていないと使えないか。
     pub fn needs_project(self) -> bool {
-        !matches!(self, PaletteCommand::OpenFolder | PaletteCommand::ToggleVerticalTabs | PaletteCommand::ShowTutorial)
+        !matches!(
+            self,
+            PaletteCommand::OpenFolder
+                | PaletteCommand::ToggleVerticalTabs
+                | PaletteCommand::ShowTutorial
+                | PaletteCommand::InstallShellCommand
+                | PaletteCommand::RemoveShellCommand
+        )
+    }
+
+    /// その OS のパレットに出すか。シェルコマンドは macOS だけ（10d §5）。
+    pub fn available_on(self, platform: Platform) -> bool {
+        match self {
+            PaletteCommand::InstallShellCommand | PaletteCommand::RemoveShellCommand => platform == Platform::MacOs,
+            _ => true,
+        }
     }
 
     /// 割り当てたキー（keymap の Command）。無ければ None。
@@ -169,7 +192,9 @@ impl PaletteCommand {
             | PaletteCommand::UndoTreeOp
             | PaletteCommand::RedoTreeOp
             | PaletteCommand::ShowTutorial
-            | PaletteCommand::OpenLicenses => None,
+            | PaletteCommand::OpenLicenses
+            | PaletteCommand::InstallShellCommand
+            | PaletteCommand::RemoveShellCommand => None,
         }
     }
 }
@@ -242,6 +267,22 @@ mod tests {
     use crate::keymap::{Command, Platform};
 
     #[test]
+    fn shell_commands_are_mac_only() {
+        assert!(PaletteCommand::ALL.contains(&PaletteCommand::InstallShellCommand));
+        assert!(PaletteCommand::ALL.contains(&PaletteCommand::RemoveShellCommand));
+        assert_eq!(PaletteCommand::InstallShellCommand.label(), "シェルコマンドをインストール");
+        assert_eq!(PaletteCommand::RemoveShellCommand.label(), "シェルコマンドを削除");
+        assert!(PaletteCommand::InstallShellCommand.available_on(Platform::MacOs));
+        assert!(PaletteCommand::RemoveShellCommand.available_on(Platform::MacOs));
+        assert!(!PaletteCommand::InstallShellCommand.available_on(Platform::Windows));
+        assert!(!PaletteCommand::RemoveShellCommand.available_on(Platform::Windows));
+        assert!(PaletteCommand::NewTerminal.available_on(Platform::Windows));
+        assert!(!PaletteCommand::InstallShellCommand.needs_project());
+        assert!(!PaletteCommand::RemoveShellCommand.needs_project());
+        assert!(PaletteCommand::InstallShellCommand.keymap_command().is_none());
+    }
+
+    #[test]
     fn open_licenses_command() {
         assert!(PaletteCommand::ALL.contains(&PaletteCommand::OpenLicenses));
         assert_eq!(PaletteCommand::OpenLicenses.label(), "ライセンス");
@@ -289,7 +330,7 @@ mod tests {
         assert_eq!(PaletteCommand::CopyHookConfig.label(), "Claude Code の hook の設定をコピー");
         assert_eq!(PaletteCommand::OpenSettings.label(), "設定を開く");
         assert_eq!(PaletteCommand::OpenSettings.keymap_command(), Some(Command::OpenSettings));
-        assert_eq!(PaletteCommand::ALL.len(), 22);
+        assert_eq!(PaletteCommand::ALL.len(), 24);
         assert_eq!(PaletteCommand::LaunchClaude.keymap_command(), None);
         assert_eq!(PaletteCommand::CopyHookConfig.keymap_command(), None);
     }

@@ -109,7 +109,10 @@ pub(crate) struct PaletteSources {
 
 fn command_items(query: &str, sources: &PaletteSources, platform: Platform) -> Vec<PaletteItem> {
     let commands: Vec<PaletteCommand> =
-        PaletteCommand::ALL.into_iter().filter(|c| sources.has_project || !c.needs_project()).collect();
+        PaletteCommand::ALL
+            .into_iter()
+            .filter(|c| c.available_on(platform) && (sources.has_project || !c.needs_project()))
+            .collect();
     // 表示名と英字の別名を並べた文字列で探し、一致の印は表示名の中の分だけを残す。
     let texts: Vec<String> = commands.iter().map(|c| format!("{} {}", c.label(), c.keywords())).collect();
     let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
@@ -563,6 +566,8 @@ impl WorkspaceView {
             PaletteCommand::UndoTreeOp => return self.undo_tree_op(window, cx),
             PaletteCommand::RedoTreeOp => return self.redo_tree_op(window, cx),
             PaletteCommand::ShowTutorial => return self.show_tutorial(window, cx),
+            PaletteCommand::InstallShellCommand => return self.install_shell_command(window, cx),
+            PaletteCommand::RemoveShellCommand => return self.remove_shell_command(window, cx),
         };
         window.dispatch_action(action, cx);
     }
@@ -785,6 +790,20 @@ mod tests {
         let cmds: Vec<PaletteTarget> = items.into_iter().map(|i| i.target).collect();
         assert!(cmds.contains(&PaletteTarget::Command(PaletteCommand::OpenFolder)));
         assert!(!cmds.contains(&PaletteTarget::Command(PaletteCommand::NewTerminal)));
+    }
+
+    #[test]
+    fn shell_commands_only_on_mac() {
+        let home = PaletteSources { has_project: false, ..Default::default() };
+        let shell = [
+            PaletteTarget::Command(PaletteCommand::InstallShellCommand),
+            PaletteTarget::Command(PaletteCommand::RemoveShellCommand),
+        ];
+        let mac: Vec<PaletteTarget> = build_items(Scope::Commands, "", &home, Platform::MacOs).into_iter().map(|i| i.target).collect();
+        assert!(shell.iter().all(|t| mac.contains(t)));
+        let win: Vec<PaletteTarget> =
+            build_items(Scope::Commands, "", &sources_with_one_project(), Platform::Windows).into_iter().map(|i| i.target).collect();
+        assert!(shell.iter().all(|t| !win.contains(t)));
     }
 
     #[test]

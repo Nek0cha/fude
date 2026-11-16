@@ -777,6 +777,53 @@ impl WorkspaceView {
         self.show_error(message, window, cx);
     }
 
+    /// macOS のシェルコマンド（/usr/local/bin/fude のリンク）を作る。管理者のパスワードは OS のダイアログで聞く。
+    pub(crate) fn install_shell_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::shell_command::{LINK_PATH, LinkState, bundle_executable, install_message, install_script, link_state};
+        let exe = std::env::current_exe().ok().and_then(|exe| bundle_executable(&exe));
+        let Some(exe) = exe else {
+            self.show_error("シェルコマンドは fude.app から起動したときだけインストールできます。".into(), window, cx);
+            return;
+        };
+        if link_state(std::path::Path::new(LINK_PATH)) == LinkState::Other {
+            self.show_error(format!("{LINK_PATH} に fude のものではないファイルがあるため、インストールしません。"), window, cx);
+            return;
+        }
+        self.run_admin_script(install_script(&exe), install_message, window, cx);
+    }
+
+    /// macOS のシェルコマンドを消す。fude が作ったリンク（シンボリックリンク）のときだけ消す。
+    pub(crate) fn remove_shell_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::shell_command::{LINK_PATH, LinkState, link_state, remove_message, remove_script};
+        match link_state(std::path::Path::new(LINK_PATH)) {
+            LinkState::Missing => self.show_error("シェルコマンドはインストールされていません。".into(), window, cx),
+            LinkState::Other => {
+                self.show_error(format!("{LINK_PATH} は fude が作ったリンクではないため、削除しません。"), window, cx)
+            }
+            LinkState::Symlink(_) => self.run_admin_script(remove_script(), remove_message, window, cx),
+        }
+    }
+
+    /// osascript を裏で実行し（パスワードのダイアログの間も画面を止めない）、結果を message で知らせる。
+    fn run_admin_script(
+        &mut self,
+        script: String,
+        message: fn(&crate::shell_command::Outcome) -> String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::shell_command::{Outcome, classify};
+        let task = cx.background_spawn(async move { std::process::Command::new("osascript").arg("-e").arg(script).output() });
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = match task.await {
+                Ok(out) => classify(out.status.success(), &String::from_utf8_lossy(&out.stderr)),
+                Err(e) => Outcome::Failed(e.to_string()),
+            };
+            this.update_in(cx, |this, window, cx| this.show_error(message(&outcome), window, cx)).ok();
+        })
+        .detach();
+    }
+
     /// 選択中のペインのターミナルに検索の欄を出す。
     fn find_in_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.workspace.active_project().and_then(|p| p.active_tab()).map(|t| t.panes[t.focused].id) else { return };
