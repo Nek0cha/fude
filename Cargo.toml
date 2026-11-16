@@ -1,3 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "spikes/*"]
+
+[workspace.package]
+license = "Apache-2.0"
+repository = "https://github.com/Nek0cha/fude"

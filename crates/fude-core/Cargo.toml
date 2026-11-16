@@ -2,6 +2,8 @@
 name = "fude-core"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 markdown = "1.0.0"
