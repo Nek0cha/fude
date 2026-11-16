@@ -475,7 +475,7 @@ impl Render for HookSection {
                     .items_center()
                     .gap(px(10.))
                     .child(toggle)
-                    .child(div().text_color(theme.fg_dim).child("返事待ちになったら知らせます（fude が前面のときは出しません）"));
+                    .child(div().text_color(theme.fg_dim).child("Claude Code が返事待ちになると通知します。"));
                 d.child(div().pt(px(6.)).child(row("OS の通知", content, &theme)))
             })
             .when(cfg!(windows), |d| {
