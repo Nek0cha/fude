@@ -48,6 +48,7 @@ gpui_kit::actions!(
         FindInTerminal,
         ToggleRouteMap,
         OpenSettings,
+        QuitApp,
     ]
 );
 
@@ -140,6 +141,9 @@ fn register_fixed_keys(cx: &mut App) {
     crate::palette_view::bind_palette_keys(cx);
     crate::term_search::bind_term_search_keys(cx);
     crate::search_view::bind_search_view_keys(cx);
+    // macOS の ⌘Q。メニューバーが無いので、アプリの終了はここで割り当てる（窓の × と同じ確認を通る）。
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("cmd-q", QuitApp, None)]);
 }
 
 /// 割り当てを全部入れ直す: GPUI Kit の割り当て、設定の上書きを当てた fude の割り当て、画面ごとの固定のキーの順。
@@ -1282,6 +1286,7 @@ impl Render for WorkspaceView {
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &crate::tree_view::ToggleTree, window, cx| this.toggle_tree(window, cx)))
             .on_action(cx.listener(|this, _: &CloseItem, window, cx| this.close_key(window, cx)))
+            .on_action(cx.listener(|this, _: &QuitApp, window, cx| this.request_quit(window, cx)))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.open_palette(fude_core::palette::Scope::All, "", window, cx)
             }))
