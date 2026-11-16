@@ -25,6 +25,16 @@ pub(crate) fn needs_deploy(installed: Option<&str>, bundled: &str) -> bool {
     installed != Some(bundled)
 }
 
+/// WSL に fude を置けたことを記録する（アンインストールで片付けるため。10b §5.4）。書けなくても置いた処理は失敗にしない。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn remember_deploy(distro: &str, bin: &str) {
+    let env = |k: &str| std::env::var(k).ok();
+    let Some(path) = fude_core::wsl_record::record_path(fude_core::keymap::Platform::current(), &env) else { return };
+    if let Err(e) = fude_core::wsl_record::remember(&path, distro, bin) {
+        eprintln!("WSL に置いた fude を記録できない（{}）: {e}", path.display());
+    }
+}
+
 /// 1 つのディストリビューションの RemoteClient の枠（確かめ終えるまで None）。
 #[cfg(windows)]
 type ClientSlot = Arc<std::sync::Mutex<Option<Arc<fude_fs::RemoteClient>>>>;
@@ -79,6 +89,7 @@ mod imp {
             let installed = installed_version(distro, &self.bin)?;
             if needs_deploy(installed.as_deref(), bundled) {
                 deploy(distro, &self.bin, bytes, &std::env::current_exe()?)?;
+                remember_deploy(distro, &self.bin);
             }
             let connector = WslConnector { distro: distro.to_string(), bin: self.bin.clone() };
             let client = Arc::new(RemoteClient::new(Box::new(connector), TIMEOUT).with_first_timeout(FIRST_TIMEOUT));
