@@ -756,6 +756,7 @@ mod tests {
         assert_eq!(ws.projects()[0].pin.as_deref(), Some("notes/b.md"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn local_project_uses_wsl_when_configured() {
         use crate::settings::{NativeShell, Settings};
@@ -774,6 +775,20 @@ mod tests {
         assert_eq!(ws.new_terminal_shell(p), ShellKind::Wsl { distro: "Debian".into() });
         // 既定に戻すと Native。
         ws.set_local_shell(&Settings::default().terminal);
+        let p = ws.projects().iter().find(|p| p.id == id).unwrap();
+        assert_eq!(ws.new_terminal_shell(p), ShellKind::Native);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn local_project_ignores_wsl_setting_outside_windows() {
+        use crate::settings::NativeShell;
+        let mut terminal = crate::settings::Settings::default().terminal;
+        terminal.shell = NativeShell::Wsl;
+        terminal.wsl_distro = Some("Ubuntu".into());
+        let mut ws = Workspace::default();
+        ws.set_local_shell(&terminal);
+        let id = ws.open_project(ProjectRoot::Local("/w/a".into()));
         let p = ws.projects().iter().find(|p| p.id == id).unwrap();
         assert_eq!(ws.new_terminal_shell(p), ShellKind::Native);
     }

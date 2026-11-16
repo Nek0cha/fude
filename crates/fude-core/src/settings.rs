@@ -309,7 +309,7 @@ pub fn parse(text: &str) -> ParseOutcome {
 
     let theme = r
         .string(root, None, "theme")
-        .and_then(|(name, line)| r.check(ThemeId::from_name(&name), line, "theme", "知らないテーマの名前です"))
+        .and_then(|(name, line)| r.check(ThemeId::from_name(&name), line, "theme", "テーマが見つかりません"))
         .unwrap_or(d.theme);
     let accent = r
         .string(root, None, "accent")
