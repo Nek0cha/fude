@@ -10,3 +10,6 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# インストーラーの出力
+/dist/
