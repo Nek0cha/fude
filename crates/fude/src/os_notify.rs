@@ -1,7 +1,10 @@
 //! 返事待ちを OS の通知（Windows のトースト、macOS の通知センター）で知らせる（10e の設計書）。
 //! 判断はこのファイルの純粋な関数に置き、OS の呼び出しは OS ごとの mod に置く。
 
+use std::collections::HashSet;
+
 use fude_core::claude::parse_terminal_id;
+use fude_core::workspace::{PaneId, ProjectId, TabId, Workspace, display_title};
 
 /// 新しく返事待ちになり、ウィンドウが前面でなく、設定で切っていないときだけ出す。
 pub(crate) fn should_notify(became_waiting: bool, window_active: bool, enabled: bool) -> bool {
@@ -27,6 +30,28 @@ pub(crate) fn toast_for(project: &str, tab: &str, pane_raw: u64) -> Toast {
 /// tag からペインの番号に戻す。
 pub(crate) fn pane_of_tag(tag: &str) -> Option<u64> {
     parse_terminal_id(tag)
+}
+
+/// ペインの通知の中身。プロジェクト名と、ペインの名前（端末の題名、無ければシェルの種類）を使う。
+pub(crate) fn toast_for_pane(ws: &Workspace, pane_raw: u64) -> Option<Toast> {
+    let (project_id, pane_id) = ws.pane_by_raw(pane_raw)?;
+    let project = ws.projects().iter().find(|p| p.id == project_id)?;
+    let pane = project.tabs.iter().flat_map(|t| &t.panes).find(|p| p.id == pane_id)?;
+    let name = pane.title.as_deref().and_then(display_title).unwrap_or_else(|| pane.kind.label());
+    Some(toast_for(&project.name, &name, pane_raw))
+}
+
+/// クリックされたペインの行き先。ペインが既に閉じていれば None（前に出すだけ）。
+pub(crate) fn click_target(ws: &Workspace, pane_raw: u64) -> Option<(ProjectId, TabId, PaneId)> {
+    let (project_id, pane_id) = ws.pane_by_raw(pane_raw)?;
+    let project = ws.projects().iter().find(|p| p.id == project_id)?;
+    let tab = project.tabs.iter().find(|t| t.panes.iter().any(|p| p.id == pane_id))?;
+    Some((project_id, tab.id, pane_id))
+}
+
+/// 通知を出したペインのうち、もう返事待ちでないもの（通知を消すもの）。
+pub(crate) fn cleared(notified: &HashSet<u64>, waiting: impl Fn(u64) -> bool) -> Vec<u64> {
+    notified.iter().copied().filter(|&p| !waiting(p)).collect()
 }
 
 /// 通知のクリックを main のスレッドへ送る口。送るのはペインの番号。
@@ -140,6 +165,7 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fude_core::workspace::ProjectRoot;
 
     #[test]
     fn should_notify_cases() {
@@ -167,6 +193,37 @@ mod tests {
             toast_xml(&t),
             "<toast launch=\"p42\"><visual><binding template=\"ToastGeneric\"><text>fude — a&amp;b</text><text>&lt;x&gt; &quot;y&quot; &apos;z&apos;</text></binding></visual></toast>"
         );
+    }
+
+    fn one_project() -> (Workspace, u64) {
+        let mut ws = Workspace::default();
+        ws.open_project(ProjectRoot::Local(std::path::PathBuf::from("/x/my-app")));
+        let pane = ws.active_project().unwrap().active_tab().unwrap().panes[0].id;
+        (ws, pane.raw())
+    }
+
+    #[test]
+    fn click_target_missing_pane() {
+        let (ws, raw) = one_project();
+        assert!(click_target(&ws, raw).is_some());
+        assert_eq!(click_target(&ws, raw + 100), None);
+    }
+
+    #[test]
+    fn toast_for_pane_uses_names() {
+        let (ws, raw) = one_project();
+        let t = toast_for_pane(&ws, raw).unwrap();
+        assert_eq!(t.title, "fude — my-app");
+        assert_eq!(t.tag, format!("p{raw}"));
+        assert!(toast_for_pane(&ws, raw + 100).is_none());
+    }
+
+    #[test]
+    fn cleared_panes() {
+        let notified: HashSet<u64> = [1, 2, 3].into_iter().collect();
+        let mut got = cleared(&notified, |p| p == 2);
+        got.sort();
+        assert_eq!(got, vec![1, 3]);
     }
 
     #[test]

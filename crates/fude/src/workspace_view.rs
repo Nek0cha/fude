@@ -265,6 +265,10 @@ pub struct WorkspaceView {
     pub(crate) wait_frame: Fade,
     /// 最後に OS に出したバッジの数。
     last_badge: usize,
+    /// OS の通知を出したペイン（返事待ちが解けたら通知を取り除く）。
+    notified: HashSet<u64>,
+    /// OS の通知のクリックを受ける口。
+    notify_clicks: crate::os_notify::ClickSender,
     /// プロジェクトごとのプランの読み取り（路線図）。
     pub(crate) plans: HashMap<ProjectId, crate::route_map::PlanCache>,
     /// プランを確かめている最中のプロジェクト。
@@ -426,11 +430,23 @@ impl WorkspaceView {
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        // OS の通知のクリックは OS のスレッドで届くので、channel でこのビューに送る。
+        let (notify_clicks, mut clicks) = futures::channel::mpsc::unbounded::<u64>();
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(pane) = futures::StreamExt::next(&mut clicks).await {
+                if this.update_in(cx, |view, window, cx| view.on_notification_click(pane, window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let mut this = Self {
             workspace,
             agents: Agents::default(),
             wait_frame: Fade::settled(0.0),
             last_badge: 0,
+            notified: HashSet::new(),
+            notify_clicks,
             plans: HashMap::new(),
             plan_checking: HashSet::new(),
             route_collapsed: false,
@@ -603,13 +619,46 @@ impl WorkspaceView {
         if crate::attention::should_request_attention(became, window.is_window_active()) {
             crate::attention::request_attention(window);
         }
+        if crate::os_notify::should_notify(became, window.is_window_active(), self.settings.notifications.enabled)
+            && let Some(toast) = crate::os_notify::toast_for_pane(&self.workspace, pane.raw())
+        {
+            crate::os_notify::show(&toast, &self.notify_clicks);
+            self.notified.insert(pane.raw());
+        }
         became
+    }
+
+    /// OS の通知がクリックされた。fude を前に出し、そのペインを選ぶ。ペインが閉じていれば前に出すだけ。
+    fn on_notification_click(&mut self, pane_raw: u64, window: &mut Window, cx: &mut Context<Self>) {
+        cx.activate(true);
+        window.activate_window();
+        if let Some((project, tab, pane)) = crate::os_notify::click_target(&self.workspace, pane_raw) {
+            self.leave_tutorial(window, cx);
+            self.workspace.activate_project(project);
+            self.workspace.activate_tab(tab);
+            self.workspace.focus_pane(pane);
+            self.refresh_active_branch(cx);
+            self.refocus_pane();
+        }
+        cx.notify();
+    }
+
+    /// 返事待ちが解けたペインの OS の通知を、通知センターから取り除く。
+    fn clear_notifications(&mut self) {
+        let agents = &self.agents;
+        for raw in crate::os_notify::cleared(&self.notified, |p| agents.state(p) == AgentState::Waiting) {
+            crate::os_notify::remove(&format!("p{raw}"));
+            self.notified.remove(&raw);
+        }
     }
 
     /// 返事待ちの枠を動かし、タスクバー／Dock のバッジを数に合わせる。
     fn observe_waiting(&mut self, window: &mut Window, now: Instant) {
         use crate::theme::motion::{REDUCED, WAIT_IN, WAIT_OUT, ease_in_out};
         let count = self.agents.waiting_count();
+        if !self.notified.is_empty() {
+            self.clear_notifications();
+        }
         let (target, duration) = if count > 0 { (1.0, WAIT_IN) } else { (0.0, WAIT_OUT) };
         let duration = if self.reduced_motion { REDUCED } else { duration };
         self.wait_frame.animate_to(target, duration, ease_in_out, now);
