@@ -46,10 +46,10 @@ fn admin_script(shell: &str) -> String {
     format!(r#"do shell script "{escaped}" with administrator privileges"#)
 }
 
-/// `osascript -e` に渡す、リンクを作る文。
+/// `osascript -e` に渡す、リンクを作る文。`-h` は、行き先がフォルダへのリンクでもたどらずに置き換えるため（BSD の ln）。
 pub(crate) fn install_script(target: &Path) -> String {
     admin_script(&format!(
-        "mkdir -p /usr/local/bin && ln -sf {} {LINK_PATH}",
+        "mkdir -p /usr/local/bin && ln -sfh {} {LINK_PATH}",
         shell_quote(&target.to_string_lossy())
     ))
 }
@@ -111,7 +111,7 @@ mod tests {
         let s = install_script(Path::new("/Applications/My Apps/it's \"x\"/fude.app/Contents/MacOS/fude"));
         assert_eq!(
             s,
-            r#"do shell script "mkdir -p /usr/local/bin && ln -sf '/Applications/My Apps/it'\\''s \"x\"/fude.app/Contents/MacOS/fude' /usr/local/bin/fude" with administrator privileges"#
+            r#"do shell script "mkdir -p /usr/local/bin && ln -sfh '/Applications/My Apps/it'\\''s \"x\"/fude.app/Contents/MacOS/fude' /usr/local/bin/fude" with administrator privileges"#
         );
     }
 
