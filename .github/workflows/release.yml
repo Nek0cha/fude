@@ -92,7 +92,8 @@ jobs:
           if-no-files-found: error
 
   release:
-    # タグのときだけ、インストーラーを Releases の下書きに上げる。同じタグの下書きが既にあれば失敗する（上書きしない）。
+    # タグのときだけ、インストーラーを Releases の下書きに上げる。
+    # gh release create --draft は同じタグの下書きがあっても新しい下書きを作るので、先に確かめて失敗させる。
     needs: windows
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
@@ -104,10 +105,22 @@ jobs:
         with:
           name: installer
           path: dist
+      - name: 同じタグのリリース（下書きを含む）が無いことを確かめる
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tags=$(gh release list --limit 1000 --json tagName --jq '.[].tagName')
+          if printf '%s\n' "$tags" | grep -Fxq "$GITHUB_REF_NAME"; then
+            echo "::error::$GITHUB_REF_NAME のリリースか下書きが既にある。消してから作り直す（docs/releasing.md）"
+            exit 1
+          fi
       - name: Releases の下書きを作る
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "fude $GITHUB_REF_NAME" --notes-file .github/release-notes.md dist/fude-*-setup.exe
+        run: |
+          notes="$RUNNER_TEMP/release-notes.md"
+          sed "s/<版>/${GITHUB_REF_NAME#v}/g; s/<version>/${GITHUB_REF_NAME#v}/g" .github/release-notes.md > "$notes"
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "fude $GITHUB_REF_NAME" --notes-file "$notes" dist/fude-*-setup.exe
 
   macos:
     # mac でビルドが通るかだけを確かめる（.app と .dmg は 10d で足す）。失敗しても Windows のリリースは止めない。
