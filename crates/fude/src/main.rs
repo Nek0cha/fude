@@ -52,6 +52,7 @@ mod tree_view;
 mod tutorial_demo;
 mod tutorial_view;
 mod uninstall_cli;
+mod update_notice;
 mod vertical_tabs;
 mod workspace_view;
 mod wsl_host;
