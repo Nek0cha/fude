@@ -1,6 +1,6 @@
 //! 設定パネル（9b の設計書 `2026-11-15-settings-panel-hook-design.md` §5.1〜§5.3）。
 //! アプリに 1 つだけ作り、エディタ列の設定のタブか、ホーム画面の代わりに出す。
-//! 外観、文字、hook の欄はチュートリアルと共有する（settings_sections。9c §5.4）。カーソルの欄はここにだけある。
+//! 外観、文字、hook の欄はチュートリアルと共有する（settings_sections。9c §5.4）。カーソルと新しい版の欄はここにだけある。
 //! ライセンスのページ（10a）も、設定のページと切り替えてここに出す。
 
 use std::path::PathBuf;
@@ -107,6 +107,19 @@ impl SettingsView {
             .on_click(cx.listener(move |_, _, _, cx| apply_edit(cx, PanelEdit::CursorBlink(!blink_on))));
         div().child(heading("カーソル", theme)).child(row("形", shape, theme)).child(row("点滅", blink, theme))
     }
+
+    /// 新しい版の欄（10g）。設定パネルにだけある。
+    fn render_updates(&self, s: &Settings, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let on = s.updates.check;
+        let check = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.))
+            .child(toggle("update-check", on, true, theme).on_click(cx.listener(move |_, _, _, cx| apply_edit(cx, PanelEdit::UpdateCheck(!on)))))
+            .child(div().text_color(theme.fg_dim).child("毎日 GitHub の Release をチェックします。"));
+        div().child(heading("新しい版", theme)).child(row("新しい版を確かめる", check, theme))
+    }
 }
 
 impl Render for SettingsView {
@@ -129,6 +142,7 @@ impl Render for SettingsView {
         }
         let state = cx.global::<ConfigState>().clone();
         let cursor = self.render_cursor(&state.settings, &theme, cx);
+        let updates = self.render_updates(&state.settings, &theme, cx);
         let licenses = div().child(heading("ライセンス", &theme)).child(row(
             "fude と同梱物",
             small_button("open-licenses", "ライセンスを表示", &theme).on_click(cx.listener(|this, _, _, cx| this.show_licenses(cx))),
@@ -156,6 +170,7 @@ impl Render for SettingsView {
             .child(self.text.clone())
             .child(cursor)
             .child(self.hooks.clone())
+            .child(updates)
             .child(licenses)
             .children(open_config)
     }

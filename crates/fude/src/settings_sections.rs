@@ -414,13 +414,13 @@ impl Render for TextSection {
 pub(crate) struct HookSection {
     mode: SectionMode,
     board: Entity<HookBoard>,
-    _sub: Subscription,
+    _subs: Vec<Subscription>,
 }
 
 impl HookSection {
     pub fn new(board: Entity<HookBoard>, mode: SectionMode, cx: &mut Context<Self>) -> Self {
-        let sub = cx.observe(&board, |_, _, cx| cx.notify());
-        HookSection { mode, board, _sub: sub }
+        let subs = vec![cx.observe(&board, |_, _, cx| cx.notify()), cx.observe_global::<ConfigState>(|_, cx| cx.notify())];
+        HookSection { mode, board, _subs: subs }
     }
 }
 
@@ -465,6 +465,19 @@ impl Render for HookSection {
             })
             .children(dev_note)
             .children(rows)
+            .when(full, |d| {
+                let on = cx.global::<ConfigState>().settings.notifications.enabled;
+                let toggle = toggle("notifications", on, true, &theme)
+                    .on_click(cx.listener(move |_, _, _, cx| apply_edit(cx, PanelEdit::Notifications(!on))));
+                let content = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(toggle)
+                    .child(div().text_color(theme.fg_dim).child("Claude Code が返事待ちになると通知します。"));
+                d.child(div().pt(px(6.)).child(row("OS の通知", content, &theme)))
+            })
             .when(cfg!(windows), |d| {
                 d.child(
                     div().pt(px(6.)).flex().child(

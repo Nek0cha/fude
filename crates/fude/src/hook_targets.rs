@@ -121,7 +121,7 @@ pub(crate) fn run(target: &HookTarget, op: HookOp, wsl_bin: &str) -> TargetState
 /// 登録先の状態の文と、押せるボタン（何をするか、文言）。
 pub(crate) fn target_row(state: &TargetState) -> (String, Vec<(HookOp, &'static str)>) {
     match state {
-        TargetState::Unchecked => ("まだ調べていません".into(), vec![(HookOp::Check, "調べる")]),
+        TargetState::Unchecked => ("未チェック".into(), vec![(HookOp::Check, "調べる")]),
         TargetState::Checking => ("調べています…".into(), vec![]),
         TargetState::Known(HookStatus::Registered) => {
             ("登録済み".into(), vec![(HookOp::Install, "登録し直す"), (HookOp::Uninstall, "外す")])
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn row_texts_for_each_state() {
         let ops = |st: &TargetState| target_row(st).1.into_iter().map(|(op, label)| (op, label)).collect::<Vec<_>>();
-        assert_eq!(target_row(&TargetState::Unchecked).0, "まだ調べていません");
+        assert_eq!(target_row(&TargetState::Unchecked).0, "未チェック");
         assert_eq!(ops(&TargetState::Unchecked), [(HookOp::Check, "調べる")]);
         assert_eq!(target_row(&TargetState::Checking).0, "調べています…");
         assert!(ops(&TargetState::Checking).is_empty());

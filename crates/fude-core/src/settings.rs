@@ -158,6 +158,19 @@ pub struct TreeSettings {
     pub heavy_dirs: Option<Vec<String>>,
 }
 
+/// OS の通知（10e）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct NotificationSettings {
+    /// 返事待ちになり、前面でないときに OS の通知を出す。
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpdateSettings {
+    /// 1 日に 1 回、GitHub で新しい版を確かめるか。
+    pub check: bool,
+}
+
 /// キー割り当ての上書き。Command の名前と、キーの一覧（書いた順）。中身の検査は keymap::bindings が行う。
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KeybindingOverrides {
@@ -178,6 +191,8 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     pub close: CloseSettings,
     pub tree: TreeSettings,
+    pub notifications: NotificationSettings,
+    pub updates: UpdateSettings,
     pub keybindings: KeybindingOverrides,
 }
 
@@ -196,6 +211,8 @@ impl Default for Settings {
             terminal: TerminalSettings { shell: NativeShell::Auto, wsl_distro: None, shift_enter: b"\x1b\r".to_vec() },
             close: CloseSettings { confirm_running: true, on_last_project: LastProjectClosed::Home },
             tree: TreeSettings { show_heavy_dirs: false, heavy_dirs: None },
+            notifications: NotificationSettings { enabled: true },
+            updates: UpdateSettings { check: true },
             keybindings: KeybindingOverrides::default(),
         }
     }
@@ -261,6 +278,12 @@ on_last_project = "home"      # "home" / "quit"
 show_heavy_dirs = false       # 隠すフォルダ（node_modules など）をツリーに薄く出す
 # heavy_dirs = ["node_modules", "target"]   # 書くと既定の一覧を置き換える
 
+[notifications]
+enabled = true                # Claude Code が返事待ちになったら OS の通知を出す（前面のときは出さない）
+
+[updates]
+check = true                  # 1 日に 1 回、GitHub で新しい版を確かめる（送るのは問い合わせだけ）
+
 [keybindings.windows]
 # open_palette = ["ctrl-alt-p"]   # 書いた Command は既定のキーを置き換える。[] で外す
 
@@ -305,6 +328,8 @@ pub fn parse(text: &str) -> ParseOutcome {
     let terminal = section(&table, "terminal");
     let close = section(&table, "close");
     let tree = section(&table, "tree");
+    let notifications = section(&table, "notifications");
+    let updates = section(&table, "updates");
     let keys = section(&table, "keybindings");
 
     let theme = r
@@ -376,6 +401,9 @@ pub fn parse(text: &str) -> ParseOutcome {
 
     let show_heavy_dirs = r.bool(tree, Some("tree"), "show_heavy_dirs").unwrap_or(d.tree.show_heavy_dirs);
     let heavy_dirs = r.string_list(tree, Some("tree"), "heavy_dirs");
+    let enabled = r.bool(notifications, Some("notifications"), "enabled").unwrap_or(d.notifications.enabled);
+
+    let check = r.bool(updates, Some("updates"), "check").unwrap_or(d.updates.check);
 
     let mut keybindings = KeybindingOverrides {
         windows: r.key_table(keys, "keybindings.windows", "windows"),
@@ -389,7 +417,7 @@ pub fn parse(text: &str) -> ParseOutcome {
             }
         }
     }
-    for name in ["window", "font", "cursor", "terminal", "close", "tree", "keybindings"] {
+    for name in ["window", "font", "cursor", "terminal", "close", "tree", "notifications", "updates", "keybindings"] {
         if table.get(name).is_some_and(|v| !v.is_table()) {
             let line = line_of(text, None, name);
             r.issue(line, name, &format!("表（[{name}]）で書いてください"));
@@ -405,6 +433,8 @@ pub fn parse(text: &str) -> ParseOutcome {
         terminal: TerminalSettings { shell, wsl_distro, shift_enter },
         close: CloseSettings { confirm_running, on_last_project },
         tree: TreeSettings { show_heavy_dirs, heavy_dirs },
+        notifications: NotificationSettings { enabled },
+        updates: UpdateSettings { check },
         keybindings,
     };
     ParseOutcome::Ok { settings, issues: r.issues }
@@ -561,6 +591,19 @@ mod tests {
     }
 
     #[test]
+    fn notifications_enabled() {
+        assert!(Settings::default().notifications.enabled);
+        let (s, issues) = ok("[notifications]\nenabled = false\n");
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(!s.notifications.enabled);
+        let (s, issues) = ok("[notifications]\nenabled = \"x\"\n");
+        assert_eq!(issues.len(), 1);
+        assert!(s.notifications.enabled);
+        let (_, issues) = ok("notifications = 1\n");
+        assert_eq!(issues.len(), 1);
+    }
+
+    #[test]
     fn partial_file_keeps_other_defaults() {
         let (settings, issues) = ok("theme = \"dracula\"\n");
         assert!(issues.is_empty());
@@ -682,6 +725,25 @@ mod tests {
         assert_eq!(s.tree.heavy_dirs, Some(vec!["target-dev".to_string()]));
         assert_eq!(s.keybindings.windows, vec![("close".to_string(), vec!["ctrl-q".to_string()]), ("toggle_tree".to_string(), vec![])]);
         assert_eq!(s.keybindings.macos, vec![("close".to_string(), vec!["cmd-q".to_string()])]);
+    }
+
+    #[test]
+    fn updates_check() {
+        let (s, issues) = ok("[updates]
+check = false
+");
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(!s.updates.check);
+        assert!(ok("theme = \"fude\"
+").0.updates.check);
+        let (s, issues) = ok("[updates]
+check = 1
+");
+        assert!(s.updates.check);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        let (_, issues) = ok("updates = 3
+");
+        assert_eq!(issues.len(), 1, "{issues:?}");
     }
 
     #[test]

@@ -29,6 +29,10 @@ pub enum PanelEdit {
     LineHeight(Option<f32>),
     CursorShape(CursorShape),
     CursorBlink(bool),
+    /// 返事待ちを OS の通知で知らせる（10e）。
+    Notifications(bool),
+    /// 新しい版を確かめるか。
+    UpdateCheck(bool),
 }
 
 /// 設定ファイルへの書き込み 1 つ。
@@ -79,6 +83,8 @@ impl PanelEdit {
             }
             PanelEdit::CursorShape(shape) => s.cursor.shape = *shape,
             PanelEdit::CursorBlink(b) => s.cursor.blink = *b,
+            PanelEdit::Notifications(b) => s.notifications.enabled = *b,
+            PanelEdit::UpdateCheck(b) => s.updates.check = *b,
         }
     }
 
@@ -107,6 +113,8 @@ impl PanelEdit {
             PanelEdit::LineHeight(None) => vec![FileEdit::Remove(&["font", "line_height"])],
             PanelEdit::CursorShape(shape) => vec![FileEdit::Set(&["cursor", "shape"], EditValue::Str(shape_name(*shape).to_string()))],
             PanelEdit::CursorBlink(b) => vec![FileEdit::Set(&["cursor", "blink"], EditValue::Bool(*b))],
+            PanelEdit::Notifications(b) => vec![FileEdit::Set(&["notifications", "enabled"], EditValue::Bool(*b))],
+            PanelEdit::UpdateCheck(b) => vec![FileEdit::Set(&["updates", "check"], EditValue::Bool(*b))],
         }
     }
 
@@ -153,6 +161,13 @@ mod tests {
             PanelEdit::CursorShape(CursorShape::Bar).file_edits(&Settings::default()),
             vec![FileEdit::Set(&["cursor", "shape"], EditValue::Str("bar".into()))]
         );
+    }
+
+    #[test]
+    fn update_check_maps_to_file() {
+        let s = applied(&PanelEdit::UpdateCheck(false));
+        assert!(!s.updates.check);
+        assert_eq!(PanelEdit::UpdateCheck(false).file_edits(&s), vec![FileEdit::Set(&["updates", "check"], EditValue::Bool(false))]);
     }
 
     #[test]
@@ -206,6 +221,8 @@ mod tests {
             PanelEdit::LineHeight(None),
             PanelEdit::CursorShape(CursorShape::Underline),
             PanelEdit::CursorBlink(true),
+            PanelEdit::Notifications(false),
+            PanelEdit::UpdateCheck(false),
         ];
         let mut text = DEFAULT_CONFIG.to_string();
         let mut want = Settings::default();

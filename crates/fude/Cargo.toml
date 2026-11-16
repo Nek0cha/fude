@@ -15,18 +15,22 @@ notify = "8"
 fude-ipc = { path = "../fude-ipc" }
 fude-fs = { path = "../fude-fs" }
 serde_json = "1"
+# 新しい版の問い合わせ（10g）。TLS は OS のもの（Windows は SChannel、mac は Security.framework）と OS の証明書を使い、rustls と同梱の証明書は入れない。
+ureq = { version = "3", default-features = false, features = ["native-tls-no-default"] }
 raw-window-handle = "0.6"
 # 画像の頭だけ読んで幅と高さを求める（GPUI が既に使っている版。形式の機能は GPUI 側で有効になる）。
 image = { version = "0.25", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Foundation", "Data_Xml_Dom", "UI_Notifications"] }
 windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSBundle", "NSError"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger"] }
+block2 = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
