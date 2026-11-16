@@ -167,6 +167,23 @@ impl LocalWatcher {
     }
 }
 
+/// macOS の FSEvents は、シンボリックリンクをたどった実パス（/var → /private/var など）で通知する。
+/// root が別の綴りなら、その実パスを返す。ほかの OS では常に None（Windows の canonicalize は \\?\ を付けるため使わない）。
+fn canonical_root_if_differs(root: &Path) -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    root.canonicalize().ok().filter(|c| c != root)
+}
+
+/// 通知のパスが実パスで来たら、root の綴りに付け替える。
+fn rebase_to_root(root: &Path, canonical: Option<&Path>, path: PathBuf) -> PathBuf {
+    match canonical.and_then(|c| path.strip_prefix(c).ok()) {
+        Some(rel) => root.join(rel),
+        None => path,
+    }
+}
+
 /// start の下の、外していないディレクトリ（start 自身を含む）。.git は含めない。git のリポジトリでなければ、
 /// 隠す名前のフォルダは名前だけで除く。
 fn walk_dirs(start: &Path, in_repo: bool, heavy: &HeavyDirs) -> HashSet<PathBuf> {
@@ -214,6 +231,7 @@ fn worker(
     on_batch: OnBatch,
 ) {
     let mut set = set;
+    let canonical_root = canonical_root_if_differs(&root);
     let in_repo = crate::ignored::in_git_repo(&root);
     let mut changed: BTreeSet<String> = BTreeSet::new();
     let mut git = false;
@@ -232,6 +250,7 @@ fn worker(
         }
         for ev in events.into_iter().filter_map(Result::ok).filter(changes_content) {
             for path in ev.paths {
+                let path = rebase_to_root(&root, canonical_root.as_deref(), path);
                 let Ok(rel) = path.strip_prefix(&root) else { continue };
                 if rel.starts_with(".git") {
                     if is_rules_file(rel) {
