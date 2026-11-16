@@ -77,6 +77,52 @@ fn clean_one(_record: &Deployed) -> Result<(), String> {
     Ok(())
 }
 
+/// 右クリックメニューのパッケージ（10f、`scripts/install-context-menu.ps1` が登録する）の名前。
+#[cfg(windows)]
+const CONTEXT_MENU_PACKAGE: &str = "Nek0cha.fude.ContextMenu";
+
+/// 登録を外す PowerShell の結果（標準出力は `removed` か `none`）をログの 1 行にする。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn context_menu_log(code: Option<i32>, stdout: &str, stderr: &str) -> String {
+    match (code, stdout.trim()) {
+        (Some(0), "removed") => "右クリックメニュー: 外した".to_string(),
+        (Some(0), "none") => "右クリックメニュー: 登録なし".to_string(),
+        _ => {
+            let why = stderr.trim();
+            let why = if why.is_empty() { format!("終了コード {code:?}") } else { why.to_string() };
+            format!("右クリックメニュー: 失敗: {why}")
+        }
+    }
+}
+
+/// 右クリックメニューの登録を外し、置き場所（%LOCALAPPDATA%\fude\context-menu）を消せるだけ消す。
+/// 登録していない PC では「登録なし」になるだけ。
+#[cfg(windows)]
+fn remove_context_menu() -> String {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = format!(
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ErrorActionPreference = 'Stop'; \
+         $p = Get-AppxPackage {CONTEXT_MENU_PACKAGE}; if ($p) {{ $p | Remove-AppxPackage; 'removed' }} else {{ 'none' }}"
+    );
+    let line = match std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(out) => context_menu_log(
+            out.status.code(),
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+        ),
+        Err(e) => format!("右クリックメニュー: 失敗: powershell.exe を起動できない: {e}"),
+    };
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&local).join(r"fude\context-menu"));
+    }
+    line
+}
+
 /// 終了コードは常に 0（アンインストールを止めない）。何をしたかを %TEMP%\fude-uninstall.log に書く。
 pub(crate) fn uninstall_main() -> i32 {
     use fude_core::wsl_record::{load, record_path};
@@ -85,6 +131,8 @@ pub(crate) fn uninstall_main() -> i32 {
     let path = record_path(fude_core::keymap::Platform::current(), &env);
     let records = path.as_deref().map(load).unwrap_or_default();
     let mut log = clean_all(&records, crate::hook_cli::uninstall_this_pc, clean_one, PAIR_TIMEOUT);
+    #[cfg(windows)]
+    log.push(remove_context_menu());
     if let Some(path) = &path {
         match std::fs::remove_file(path) {
             Ok(()) => log.push(format!("記録を消した: {}", path.display())),
@@ -155,6 +203,14 @@ mod tests {
         assert!(wsl_hook_removed(Some(0), br#"{"status":"unreadable","reason":"x"}"#, b"").is_err());
         assert!(wsl_hook_removed(Some(1), b"", b"wsl: error").is_err());
         assert!(wsl_hook_removed(Some(0), br#"{"status":"registered"}"#, b"").is_err());
+    }
+
+    #[test]
+    fn context_menu_log_reads_powershell_result() {
+        assert_eq!(context_menu_log(Some(0), "removed\r\n", ""), "右クリックメニュー: 外した");
+        assert_eq!(context_menu_log(Some(0), "none\r\n", ""), "右クリックメニュー: 登録なし");
+        assert!(context_menu_log(Some(1), "", "アクセスが拒否").contains("失敗: アクセスが拒否"));
+        assert!(context_menu_log(None, "", "").contains("失敗"));
     }
 
     #[test]
