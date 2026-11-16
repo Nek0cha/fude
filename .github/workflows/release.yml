@@ -6,7 +6,6 @@ name: release
 on:
   push:
     tags: ['v*']
-    branches: [feat/ci-release]
   workflow_dispatch:
 
 permissions:
