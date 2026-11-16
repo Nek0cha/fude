@@ -1,0 +1,133 @@
+# 配布物を作る（10c）。v* のタグを push すると、Windows のインストーラーを作って Releases の下書きに上げる。
+# 手で動かした（workflow_dispatch）ときは、Releases には上げず、成果物を Actions に置くだけにする。
+# 手順と secrets は docs/releasing.md を参照。
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    # WSL に置く Linux 用の fude（fude-linux）を作る。Windows の fude.exe がビルド時に埋め込む。
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v7
+      - name: musl の道具を入れる
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: fude-linux を作る
+        run: sh scripts/build-linux.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fude-linux
+          path: |
+            target/linux/fude-linux
+            target/linux/fude-linux.id
+          if-no-files-found: error
+
+  windows:
+    needs: linux
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - name: タグの版と Cargo.toml の版を照らし合わせる
+        if: github.ref_type == 'tag'
+        run: |
+          $tag = $env:GITHUB_REF_NAME -replace '^v', ''
+          $version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'fude').version
+          if ($tag -ne $version) {
+            Write-Output "::error::タグの版（$tag）と crates/fude/Cargo.toml の版（$version）が違う"
+            exit 1
+          }
+      - uses: actions/download-artifact@v8
+        with:
+          name: fude-linux
+          path: target/linux
+      - name: Inno Setup を用意する
+        run: |
+          $found = (Get-Command ISCC.exe -ErrorAction SilentlyContinue) -or (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")
+          if (-not $found) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+      - name: 署名を用意する（secrets が無ければ署名しない）
+        env:
+          PFX_BASE64: ${{ secrets.FUDE_SIGN_PFX_BASE64 }}
+        run: |
+          if ($env:PFX_BASE64) {
+            $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_BASE64))
+            "FUDE_SIGN_MODE=pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "FUDE_SIGN_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Output '署名する'
+          } else {
+            Write-Output 'FUDE_SIGN_PFX_BASE64 が無いので署名しない'
+          }
+      - uses: Swatinem/rust-cache@v2
+      - name: インストーラーを作る
+        env:
+          FUDE_SIGN_PFX_PASSWORD: ${{ secrets.FUDE_SIGN_PFX_PASSWORD }}
+        run: pwsh -NoProfile -File scripts/build-installer.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer
+          path: dist/fude-*-setup.exe
+          if-no-files-found: error
+
+  release:
+    # タグのときだけ、インストーラーを Releases の下書きに上げる。
+    # gh release create --draft は同じタグの下書きがあっても新しい下書きを作るので、先に確かめて失敗させる。
+    needs: windows
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer
+          path: dist
+      - name: 同じタグのリリース（下書きを含む）が無いことを確かめる
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tags=$(gh release list --limit 1000 --json tagName --jq '.[].tagName')
+          if printf '%s\n' "$tags" | grep -Fxq "$GITHUB_REF_NAME"; then
+            echo "::error::$GITHUB_REF_NAME のリリースか下書きが既にある。消してから作り直す（docs/releasing.md）"
+            exit 1
+          fi
+      - name: Releases の下書きを作る
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$RUNNER_TEMP/release-notes.md"
+          sed "s/<版>/${GITHUB_REF_NAME#v}/g; s/<version>/${GITHUB_REF_NAME#v}/g" .github/release-notes.md > "$notes"
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "fude $GITHUB_REF_NAME" --notes-file "$notes" dist/fude-*-setup.exe
+
+  macos:
+    # mac でビルドが通るかだけを確かめる（.app と .dmg は 10d で足す）。失敗しても Windows のリリースは止めない。
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: fude をビルドする
+        run: cargo build --release -p fude --locked
