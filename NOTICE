@@ -13,6 +13,9 @@ command palette ("ライセンス").
   MIT License - licenses/material-icon-theme-LICENSE
 - Lucide (UI icons, via gpui-kit-assets)
   ISC License - licenses/lucide-ISC.txt
+- musl libc (statically linked into fude-linux, which is embedded in
+  fude.exe and installed into WSL)
+  MIT License - licenses/musl-COPYRIGHT.txt
 - Theme colors derived from Catppuccin, Dracula, GitHub VS Code Theme,
   One Dark Pro and Tokyo Night
   MIT License - licenses/catppuccin-MIT.txt, licenses/dracula-MIT.txt,
@@ -20,9 +23,10 @@ command palette ("ライセンス").
   licenses/tokyo-night-MIT.txt
 
 Licenses of the Rust crates fude depends on are listed in
-licenses/THIRD-PARTY.md. Two of them, nucleo-matcher and option-ext, are
-licensed under the Mozilla Public License 2.0. They are used unmodified,
-and their source code is available from crates.io.
+licenses/THIRD-PARTY.md. Three of them, dwrote, nucleo-matcher and
+option-ext, are licensed under the Mozilla Public License 2.0. They are
+used unmodified, and their source code is available from crates.io
+(https://crates.io/crates/<name>).
 
 Claude and Claude Code are trademarks of Anthropic, PBC. fude is an
 independent project and is not affiliated with, endorsed by, or sponsored

@@ -28,6 +28,7 @@ pub const BUNDLED: &[Bundled] = &[
     bundled!("HackGen Console NF", "ターミナルとエディタの書体（改変せずに埋め込み）", "SIL Open Font License 1.1", "HackGen-OFL.txt"),
     bundled!("Material Icon Theme", "ファイルツリーのアイコン", "MIT License", "material-icon-theme-LICENSE"),
     bundled!("Lucide", "画面のアイコン（gpui-kit-assets 経由）", "ISC License", "lucide-ISC.txt"),
+    bundled!("musl libc", "WSL に置く fude-linux に静的にリンク（fude.exe に埋め込み）", "MIT License", "musl-COPYRIGHT.txt"),
     bundled!("Catppuccin", "テーマ catppuccin-mocha・macchiato・frappe の色", "MIT License", "catppuccin-MIT.txt"),
     bundled!("Dracula", "テーマ dracula の色", "MIT License", "dracula-MIT.txt"),
     bundled!("GitHub VS Code Theme", "テーマ github-dark・github-dark-dimmed の色", "MIT License", "github-vscode-theme-MIT.txt"),
@@ -89,6 +90,30 @@ mod tests {
         for b in BUNDLED {
             assert!(doc.contains(b.name), "{}", b.name);
             assert!(doc.contains(b.text.replace("\r\n", "\n").trim()), "{} の本文", b.name);
+        }
+    }
+
+    #[test]
+    fn notice_names_every_mpl_crate() {
+        // MPL-2.0 はソースの入手先を知らせる必要があるので、一覧の MPL の節のクレートは全部 NOTICE に書く。
+        // 本文が少しずつ違うと、MPL の節は 1 つにまとまらず、いくつかに分かれる。
+        let names: Vec<&str> = THIRD_PARTY
+            .split("\n## ")
+            .filter(|s| s.starts_with("Mozilla Public License 2.0"))
+            .flat_map(|s| s.lines().filter_map(|l| l.strip_prefix("- ")).filter_map(|l| l.split(' ').next()))
+            .collect();
+        assert!(!names.is_empty());
+        for name in names {
+            assert!(NOTICE.contains(name), "{name} が NOTICE に無い");
+        }
+    }
+
+    #[test]
+    fn musl_is_bundled_and_noticed() {
+        // fude-linux は musl を静的にリンクして fude.exe に埋め込むので、musl の著作権表示も配る。
+        assert!(BUNDLED.iter().any(|b| b.file == "musl-COPYRIGHT.txt"));
+        for b in BUNDLED {
+            assert!(NOTICE.contains(b.file), "{} が NOTICE に無い", b.file);
         }
     }
 
