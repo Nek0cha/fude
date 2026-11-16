@@ -69,8 +69,10 @@ pub(crate) fn render_main_area(
         Some(Place::Overlay) => editor.as_ref().map_or(px(0.), |e| e.w),
         _ => pin_span,
     };
+    // 重ねた列は、マウスを下のターミナルへ通さない（通すと、列の中のクリックでターミナルがフォーカスを取り返す）。
     let overlay = |c: ColumnEl, right: Pixels| {
         div()
+            .occlude()
             .absolute()
             .top(px(0.))
             .bottom(px(0.))
