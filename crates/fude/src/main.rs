@@ -25,6 +25,7 @@ mod layout_anim;
 mod main_area;
 mod md_preview;
 mod open_file;
+mod open_urls;
 mod os_notify;
 mod palette_view;
 mod pin_view;
@@ -37,6 +38,7 @@ mod search_view;
 mod settings_sections;
 mod settings_view;
 mod reduced_motion;
+mod shell_command;
 mod shell_menu;
 mod term_search;
 mod terminal_paint;
@@ -69,7 +71,7 @@ use gpui_kit::*;
 
 use crate::assets::AppAssets;
 use crate::cli::{Launch, parse_launch};
-use crate::instance::{HandOff, hand_off, report_error};
+use crate::instance::{HandOff, hand_off, message_of, report_error};
 use crate::workspace_view::{InitialOpen, Startup, WorkspaceView};
 
 const MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/HackGenConsoleNF-Regular.ttf");
@@ -109,7 +111,7 @@ fn set_app_user_model_id() {
 }
 
 fn main() {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let args = open_urls::strip_psn(std::env::args_os().skip(1).collect());
     // `fude hook` は待ち受けも GUI も始めず、信号を送って終わる（`hook` というフォルダは `fude ./hook` で開く）。
     if args.first().is_some_and(|a| a == "hook") {
         std::process::exit(hook_cli::hook_main(&args[1..]));
@@ -137,6 +139,7 @@ fn main() {
         }
     };
     let (tx, mut rx) = futures::channel::mpsc::unbounded::<Message>();
+    let url_tx = tx.clone();
     server.serve(move |m| {
         tx.unbounded_send(m).ok();
     });
@@ -167,7 +170,25 @@ fn main() {
     };
     let startup = Startup { session_path, last_session: saved.filter(|d| d.has_projects()), recent_path, recent, open, tutorial };
 
-    application().with_assets(AppAssets).run(move |cx: &mut App| {
+    let app = application().with_assets(AppAssets);
+    // macOS の Finder の「このアプリケーションで開く」。`fude <パス>` と同じ要求にして、2 つ目の起動からの要求と
+    // 同じ受け口へ送る。ウィンドウより先に届いた分は、受け口が動き出してから処理される。
+    let url_cwd = cwd.clone();
+    app.on_open_urls(move |urls| {
+        for url in urls {
+            let Some(path) = open_urls::path_from_url(&url) else {
+                eprintln!("fude: 開けない URL を無視する: {url}");
+                continue;
+            };
+            match parse_launch(&[path.into_os_string()], &url_cwd) {
+                Ok(launch) => {
+                    url_tx.unbounded_send(message_of(&launch)).ok();
+                }
+                Err(e) => eprintln!("fude: {url} を開けない: {e}"),
+            }
+        }
+    });
+    app.run(move |cx: &mut App| {
         init(cx);
         cx.text_system()
             .add_fonts(vec![Cow::Borrowed(MONO_REGULAR), Cow::Borrowed(MONO_BOLD)])
