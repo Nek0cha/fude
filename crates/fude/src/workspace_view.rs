@@ -432,6 +432,7 @@ impl WorkspaceView {
         window.focus(&focus, cx);
         // OS の通知のクリックは OS のスレッドで届くので、channel でこのビューに送る。
         let (notify_clicks, mut clicks) = futures::channel::mpsc::unbounded::<u64>();
+        crate::os_notify::init(&notify_clicks);
         cx.spawn_in(window, async move |this, cx| {
             while let Some(pane) = futures::StreamExt::next(&mut clicks).await {
                 if this.update_in(cx, |view, window, cx| view.on_notification_click(pane, window, cx)).is_err() {

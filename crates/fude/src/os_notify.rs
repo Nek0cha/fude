@@ -84,11 +84,24 @@ pub(crate) fn toast_xml(t: &Toast) -> String {
     )
 }
 
+/// 起動時の準備。macOS ではクリックを受ける delegate を通知センターに付ける。ほかでは何もしない。
+pub(crate) fn init(clicks: &ClickSender) {
+    #[cfg(target_os = "macos")]
+    mac::init(clicks);
+    #[cfg(not(target_os = "macos"))]
+    let _ = clicks;
+}
+
 /// 通知を出す。同じ tag の通知は置き換える。出せないときは黙って出さない。
 pub(crate) fn show(toast: &Toast, clicks: &ClickSender) {
     #[cfg(windows)]
     win::show(toast, clicks);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = clicks;
+        mac::show(toast);
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (toast, clicks);
 }
 
@@ -96,8 +109,135 @@ pub(crate) fn show(toast: &Toast, clicks: &ClickSender) {
 pub(crate) fn remove(tag: &str) {
     #[cfg(windows)]
     win::remove(tag);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    mac::remove(tag);
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = tag;
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send};
+    use objc2_foundation::{NSArray, NSBundle, NSError, NSString};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest, UNNotificationResponse, UNNotificationSound,
+        UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+    };
+
+    use super::{ClickSender, Toast, pane_of_tag};
+
+    /// 通知の許可の状態。
+    const UNKNOWN: u8 = 0;
+    const ASKING: u8 = 1;
+    const GRANTED: u8 = 2;
+    const DENIED: u8 = 3;
+    static AUTH: AtomicU8 = AtomicU8::new(UNKNOWN);
+
+    struct Ivars {
+        clicks: ClickSender,
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[name = "FudeNotificationDelegate"]
+        #[ivars = Ivars]
+        struct Delegate;
+
+        unsafe impl NSObjectProtocol for Delegate {}
+
+        unsafe impl UNUserNotificationCenterDelegate for Delegate {
+            // willPresentNotification は実装しない（前面のときは出さない）。
+            #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+            fn did_receive(
+                &self,
+                _center: &UNUserNotificationCenter,
+                response: &UNNotificationResponse,
+                completion_handler: &block2::DynBlock<dyn Fn()>,
+            ) {
+                let tag = response.notification().request().identifier().to_string();
+                if let Some(pane) = pane_of_tag(&tag) {
+                    self.ivars().clicks.unbounded_send(pane).ok();
+                }
+                completion_handler.call(());
+            }
+        }
+    );
+
+    impl Delegate {
+        fn new(clicks: ClickSender) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(Ivars { clicks });
+            // SAFETY: NSObject の init を呼ぶだけ。
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    thread_local! {
+        /// 通知センターの delegate は弱い参照なので、ここで持ち続ける。
+        static DELEGATE: RefCell<Option<Retained<Delegate>>> = const { RefCell::new(None) };
+    }
+
+    /// .app の中（bundle identifier がある）でだけ通知センターを使う。外で呼ぶと例外で落ちるため。
+    fn available() -> bool {
+        NSBundle::mainBundle().bundleIdentifier().is_some()
+    }
+
+    pub(super) fn init(clicks: &ClickSender) {
+        if !available() {
+            return;
+        }
+        let delegate = Delegate::new(clicks.clone());
+        UNUserNotificationCenter::currentNotificationCenter().setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        DELEGATE.with(|d| *d.borrow_mut() = Some(delegate));
+    }
+
+    fn add(title: &str, body: &str, tag: &str) {
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(body));
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&NSString::from_str(tag), &content, None);
+        UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, None);
+    }
+
+    pub(super) fn show(toast: &Toast) {
+        if !available() {
+            return;
+        }
+        match AUTH.load(Ordering::SeqCst) {
+            GRANTED => add(&toast.title, &toast.body, &toast.tag),
+            UNKNOWN => {
+                // 最初の 1 回だけ許可を求め、許可されたらこの通知を出す。
+                AUTH.store(ASKING, Ordering::SeqCst);
+                let (title, body, tag) = (toast.title.clone(), toast.body.clone(), toast.tag.clone());
+                let done = RcBlock::new(move |granted: Bool, _error: *mut NSError| {
+                    if granted.as_bool() {
+                        AUTH.store(GRANTED, Ordering::SeqCst);
+                        add(&title, &body, &tag);
+                    } else {
+                        AUTH.store(DENIED, Ordering::SeqCst);
+                    }
+                });
+                UNUserNotificationCenter::currentNotificationCenter()
+                    .requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound, &done);
+            }
+            // 許可を求めている間と、拒否されたあとは出さない。
+            _ => {}
+        }
+    }
+
+    pub(super) fn remove(tag: &str) {
+        if !available() {
+            return;
+        }
+        let ids = NSArray::from_retained_slice(&[NSString::from_str(tag)]);
+        UNUserNotificationCenter::currentNotificationCenter().removeDeliveredNotificationsWithIdentifiers(&ids);
+    }
 }
 
 #[cfg(windows)]
